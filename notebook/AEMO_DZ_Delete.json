@@ -1,0 +1,267 @@
+{
+	"name": "AEMO_DZ_Delete",
+	"properties": {
+		"folder": {
+			"name": "DataHubBatchScripts/AEMO"
+		},
+		"nbformat": 4,
+		"nbformat_minor": 2,
+		"bigDataPool": {
+			"referenceName": "Sparkpool01",
+			"type": "BigDataPoolReference"
+		},
+		"sessionProperties": {
+			"driverMemory": "56g",
+			"driverCores": 8,
+			"executorMemory": "56g",
+			"executorCores": 8,
+			"numExecutors": 2,
+			"conf": {
+				"spark.dynamicAllocation.enabled": "false",
+				"spark.dynamicAllocation.minExecutors": "2",
+				"spark.dynamicAllocation.maxExecutors": "2",
+				"spark.autotune.trackingId": "8fd45283-0c4e-4717-92b1-f47442a6be26"
+			}
+		},
+		"metadata": {
+			"saveOutput": true,
+			"enableDebugMode": false,
+			"kernelspec": {
+				"name": "synapse_pyspark",
+				"display_name": "Synapse PySpark"
+			},
+			"language_info": {
+				"name": "python"
+			},
+			"a365ComputeOptions": {
+				"id": "/subscriptions/2e9f823e-dc76-4e8e-b815-c8a4f22d05ff/resourceGroups/CQL-AZUR1-DEVDATAHUB01-RG/providers/Microsoft.Synapse/workspaces/cql-dev-datahub-synapse01/bigDataPools/Sparkpool01",
+				"name": "Sparkpool01",
+				"type": "Spark",
+				"endpoint": "https://cql-dev-datahub-synapse01.dev.azuresynapse.net/livyApi/versions/2019-11-01-preview/sparkPools/Sparkpool01",
+				"auth": {
+					"type": "AAD",
+					"authResource": "https://dev.azuresynapse.net"
+				},
+				"sparkVersion": "3.3",
+				"nodeCount": 10,
+				"cores": 8,
+				"memory": 56
+			},
+			"sessionKeepAliveTimeout": 30
+		},
+		"cells": [
+			{
+				"cell_type": "markdown",
+				"metadata": {
+					"nteract": {
+						"transient": {
+							"deleting": false
+						}
+					}
+				},
+				"source": [
+					"# Source to Landing (AEMO NEM12)"
+				]
+			},
+			{
+				"cell_type": "code",
+				"metadata": {
+					"jupyter": {
+						"source_hidden": false,
+						"outputs_hidden": false
+					},
+					"nteract": {
+						"transient": {
+							"deleting": false
+						}
+					}
+				},
+				"source": [
+					"import json\r\n",
+					"db_port = 1433\r\n",
+					"linked_service_name = \"LS_SQL_ELTFrameworkDB\"\r\n",
+					"db_notebookname= \"AEMO_DZ_Delete\"\r\n",
+					"linkedServiceProperties = json.loads(mssparkutils.credentials.getPropertiesAll(linked_service_name))\r\n",
+					"sql_server_name = linkedServiceProperties.get('Endpoint')\r\n",
+					"db_name = linkedServiceProperties.get('Database')\r\n",
+					"#print(linkedServiceProperties)\r\n",
+					"access_token = mssparkutils.credentials.getConnectionStringOrCreds(linked_service_name)\r\n",
+					"\r\n",
+					"db_query =\"SELECT A.*,B.NotebookParameterId,B.ParameterType,B.Value  FROM [CTL].[CFG_NOTEBOOK] A LEFT JOIN [CTL].[CFG_NOTEBOOK_PARAMETER] B ON A.NotebookId = B.NotebookId\"\r\n",
+					"\r\n",
+					"df = spark.read.format(\"jdbc\") \\\r\n",
+					"    .option(\"url\", \"jdbc:sqlserver://%s:%s\" % (sql_server_name, db_port)) \\\r\n",
+					"    .option(\"query\", db_query) \\\r\n",
+					"    .option(\"accessToken\", access_token) \\\r\n",
+					"    .option(\"encrypt\", \"true\") \\\r\n",
+					"    .option(\"databaseName\", db_name) \\\r\n",
+					"    .option(\"hostNameInCertificate\", \"*.database.windows.net\") \\\r\n",
+					"    .load()\r\n",
+					"\r\n",
+					"df2 = df.where(df.NotebookPath==db_notebookname) "
+				],
+				"execution_count": null
+			},
+			{
+				"cell_type": "code",
+				"metadata": {
+					"jupyter": {
+						"source_hidden": false,
+						"outputs_hidden": false
+					},
+					"nteract": {
+						"transient": {
+							"deleting": false
+						}
+					}
+				},
+				"source": [
+					"#Source DataLake storage details\r\n",
+					"source_storage = df2.where(df2.ParameterType=='source_storage').collect()[0][\"Value\"] #Storage name\r\n",
+					"source_container = df2.where(df2.ParameterType=='source_container').collect()[0][\"Value\"] #Storage container detail\r\n",
+					"source_path = df2.where(df2.ParameterType=='source_path').collect()[0][\"Value\"] #internal folder location in container \"demodata/demo_aemo\"\r\n",
+					""
+				],
+				"execution_count": null
+			},
+			{
+				"cell_type": "code",
+				"metadata": {
+					"jupyter": {
+						"source_hidden": false,
+						"outputs_hidden": false
+					},
+					"nteract": {
+						"transient": {
+							"deleting": false
+						}
+					}
+				},
+				"source": [
+					"source_path = f'abfss://{source_container}@{source_storage}.dfs.core.windows.net/{source_path}'"
+				],
+				"execution_count": 3
+			},
+			{
+				"cell_type": "code",
+				"metadata": {
+					"jupyter": {
+						"source_hidden": false,
+						"outputs_hidden": false
+					},
+					"nteract": {
+						"transient": {
+							"deleting": false
+						}
+					}
+				},
+				"source": [
+					"from py4j.java_gateway import java_import\r\n",
+					"import json\r\n",
+					"\r\n",
+					"\r\n",
+					"# Determines if it is the files we want\r\n",
+					"def is_correct_file(name:str) -> bool:\r\n",
+					"    return name[:4] in [\"mtrd\"]\r\n",
+					"\r\n",
+					"# Extract file name from path\r\n",
+					"import re\r\n",
+					"\r\n",
+					"def extract_file_from_path(path:str):\r\n",
+					"    match = re.search(r'[^/]+$',path)\r\n",
+					"    if match:\r\n",
+					"        return match.group(0)\r\n",
+					"    return None\r\n",
+					""
+				],
+				"execution_count": 4
+			},
+			{
+				"cell_type": "code",
+				"metadata": {
+					"jupyter": {
+						"source_hidden": false,
+						"outputs_hidden": false
+					},
+					"nteract": {
+						"transient": {
+							"deleting": false
+						}
+					}
+				},
+				"source": [
+					"# source_path = \"abfss://drop-zone@cqldevdatahubdata.dfs.core.windows.net/AEMO_SourceCopy/\"\r\n",
+					"\r\n",
+					"dir_obj = {f.name:None for f in mssparkutils.fs.ls(source_path)}\r\n",
+					"\r\n",
+					"full_paths = []\r\n",
+					"\r\n",
+					"for year in dir_obj.keys():\r\n",
+					"    year_path = mssparkutils.fs.ls(f\"{source_path}/{year}\")\r\n",
+					"    dir_obj[year] = {f.name:None for f in year_path}\r\n",
+					"\r\n",
+					"    for month in dir_obj[year].keys(): # Day\r\n",
+					"        day_path =  mssparkutils.fs.ls(f\"{source_path}/{year}/{month}\")\r\n",
+					"        dir_obj[year][month] = {f.name:None for f in day_path}\r\n",
+					"\r\n",
+					"        for day in dir_obj[year][month].keys(): # Exact Date\r\n",
+					"            date_path =  mssparkutils.fs.ls(f\"{source_path}/{year}/{month}/{day}\")\r\n",
+					"            dir_obj[year][month][day] = {f.name:None for f in date_path}\r\n",
+					"\r\n",
+					"\r\n",
+					"            for date in dir_obj[year][month][day].keys(): # File Dir\r\n",
+					"                file_path = mssparkutils.fs.ls(f\"{source_path}/{year}/{month}/{day}/{date}\")\r\n",
+					"                dir_obj[year][month][day][date] = {f.name:None for f in file_path}\r\n",
+					"                for actual_file in dir_obj[year][month][day][date].keys():\r\n",
+					"                    actual_file_path = mssparkutils.fs.ls(f\"{source_path}/{year}/{month}/{day}/{date}/{actual_file}\")\r\n",
+					"                    print(\"File Path\", actual_file_path)\r\n",
+					"                    for f in actual_file_path:\r\n",
+					"                        full_paths.append(f.path)\r\n",
+					"\r\n",
+					"\r\n",
+					"    \r\n",
+					"  "
+				],
+				"execution_count": 10
+			},
+			{
+				"cell_type": "code",
+				"metadata": {
+					"jupyter": {
+						"source_hidden": false,
+						"outputs_hidden": false
+					},
+					"nteract": {
+						"transient": {
+							"deleting": false
+						}
+					}
+				},
+				"source": [
+					"files_to_delete = [f for f in full_paths if not is_correct_file(extract_file_from_path(f))]\r\n",
+					""
+				],
+				"execution_count": 11
+			},
+			{
+				"cell_type": "code",
+				"metadata": {
+					"jupyter": {
+						"source_hidden": false,
+						"outputs_hidden": false
+					},
+					"nteract": {
+						"transient": {
+							"deleting": false
+						}
+					}
+				},
+				"source": [
+					"for f in files_to_delete:\r\n",
+					"    mssparkutils.fs.rm(f)"
+				],
+				"execution_count": 13
+			}
+		]
+	}
+}

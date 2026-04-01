@@ -1,0 +1,141 @@
+{
+	"name": "Drop_folderandfile",
+	"properties": {
+		"folder": {
+			"name": "DataHubBatchScripts/Utils"
+		},
+		"nbformat": 4,
+		"nbformat_minor": 2,
+		"bigDataPool": {
+			"referenceName": "Sparkpool01",
+			"type": "BigDataPoolReference"
+		},
+		"sessionProperties": {
+			"driverMemory": "56g",
+			"driverCores": 8,
+			"executorMemory": "56g",
+			"executorCores": 8,
+			"numExecutors": 2,
+			"conf": {
+				"spark.dynamicAllocation.enabled": "false",
+				"spark.dynamicAllocation.minExecutors": "2",
+				"spark.dynamicAllocation.maxExecutors": "2",
+				"spark.autotune.trackingId": "6effecae-dc21-4843-88f1-034c145039aa"
+			}
+		},
+		"metadata": {
+			"saveOutput": true,
+			"enableDebugMode": false,
+			"kernelspec": {
+				"name": "synapse_pyspark",
+				"display_name": "Synapse PySpark"
+			},
+			"language_info": {
+				"name": "python"
+			},
+			"a365ComputeOptions": {
+				"id": "/subscriptions/2e9f823e-dc76-4e8e-b815-c8a4f22d05ff/resourceGroups/CQL-AZUR1-DEVDATAHUB01-RG/providers/Microsoft.Synapse/workspaces/cql-dev-datahub-synapse01/bigDataPools/Sparkpool01",
+				"name": "Sparkpool01",
+				"type": "Spark",
+				"endpoint": "https://cql-dev-datahub-synapse01.dev.azuresynapse.net/livyApi/versions/2019-11-01-preview/sparkPools/Sparkpool01",
+				"auth": {
+					"type": "AAD",
+					"authResource": "https://dev.azuresynapse.net"
+				},
+				"sparkVersion": "3.3",
+				"nodeCount": 10,
+				"cores": 8,
+				"memory": 56
+			},
+			"sessionKeepAliveTimeout": 30
+		},
+		"cells": [
+			{
+				"cell_type": "code",
+				"source": [
+					"destination_storage = \"cqldevdatahubsynapse\" #Storage name\r\n",
+					"destination_container = \"silver\"  #raw storage container details\r\n",
+					"destination_path = \"AEMO/NEM12\" #raw delta file patch\r\n",
+					"\r\n",
+					"raw_output_path = f\"abfss://{destination_container}@{destination_storage}.dfs.core.windows.net/{destination_path}\"\r\n",
+					"mssparkutils.fs.rm(raw_output_path,recurse=True)"
+				],
+				"execution_count": 4
+			},
+			{
+				"cell_type": "code",
+				"metadata": {
+					"jupyter": {
+						"source_hidden": false,
+						"outputs_hidden": false
+					},
+					"nteract": {
+						"transient": {
+							"deleting": false
+						}
+					}
+				},
+				"source": [
+					"spark.sql(\"DROP DATABASE IF EXISTS aemo_silver CASCADE;\")"
+				],
+				"execution_count": 3
+			},
+			{
+				"cell_type": "code",
+				"metadata": {
+					"jupyter": {
+						"source_hidden": false,
+						"outputs_hidden": false
+					},
+					"nteract": {
+						"transient": {
+							"deleting": false
+						}
+					}
+				},
+				"source": [
+					"from pyspark.sql.functions import sha2\r\n",
+					"\r\n",
+					"print(sha2(\"Hello\",256))"
+				],
+				"execution_count": 16
+			},
+			{
+				"cell_type": "code",
+				"metadata": {
+					"jupyter": {
+						"source_hidden": false,
+						"outputs_hidden": false
+					},
+					"nteract": {
+						"transient": {
+							"deleting": false
+						}
+					}
+				},
+				"source": [
+					"mssparkutils.fs.mkdirs(f\"abfss://silver@cqldevdatahubsynapse.dfs.core.windows.net/AEMO/NEM12\")"
+				],
+				"execution_count": 7
+			},
+			{
+				"cell_type": "code",
+				"metadata": {
+					"jupyter": {
+						"source_hidden": false,
+						"outputs_hidden": false
+					},
+					"nteract": {
+						"transient": {
+							"deleting": false
+						}
+					}
+				},
+				"source": [
+					""
+				],
+				"execution_count": null
+			}
+		]
+	}
+}

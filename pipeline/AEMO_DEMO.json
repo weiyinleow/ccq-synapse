@@ -1,0 +1,325 @@
+{
+	"name": "AEMO_DEMO",
+	"properties": {
+		"activities": [
+			{
+				"name": "ReadFromLanding",
+				"type": "SynapseNotebook",
+				"dependsOn": [],
+				"policy": {
+					"timeout": "0.12:00:00",
+					"retry": 0,
+					"retryIntervalInSeconds": 30,
+					"secureOutput": false,
+					"secureInput": false
+				},
+				"userProperties": [],
+				"typeProperties": {
+					"notebook": {
+						"referenceName": {
+							"value": "ReadFromLanding",
+							"type": "Expression"
+						},
+						"type": "NotebookReference"
+					},
+					"parameters": {
+						"source_storage": {
+							"value": "vndatapltfv2devst02",
+							"type": "string"
+						},
+						"source_container": {
+							"value": "landing",
+							"type": "string"
+						},
+						"source_path": {
+							"value": "demodata/demo_aemo",
+							"type": "string"
+						},
+						"source_file": {
+							"value": "demodata2.xml",
+							"type": "string"
+						},
+						"destination_storage": {
+							"value": "vndatapltfv2devst02",
+							"type": "string"
+						},
+						"destination_container": {
+							"value": "raw",
+							"type": "string"
+						},
+						"destination_path": {
+							"value": "aemo",
+							"type": "string"
+						}
+					},
+					"snapshot": true,
+					"sparkPool": {
+						"referenceName": {
+							"value": "devsparkpool02",
+							"type": "Expression"
+						},
+						"type": "BigDataPoolReference"
+					},
+					"executorSize": "Large",
+					"conf": {
+						"spark.dynamicAllocation.enabled": null,
+						"spark.dynamicAllocation.minExecutors": null,
+						"spark.dynamicAllocation.maxExecutors": null
+					},
+					"driverSize": "Large",
+					"numExecutors": null
+				},
+				"linkedServiceName": {
+					"referenceName": "AzureSynapseArtifacts",
+					"type": "LinkedServiceReference"
+				}
+			},
+			{
+				"name": "ReadFromRaw",
+				"type": "SynapseNotebook",
+				"state": "Active",
+				"onInactiveMarkAs": "Succeeded",
+				"dependsOn": [
+					{
+						"activity": "ReadFromLanding",
+						"dependencyConditions": [
+							"Succeeded"
+						]
+					}
+				],
+				"policy": {
+					"timeout": "0.12:00:00",
+					"retry": 0,
+					"retryIntervalInSeconds": 30,
+					"secureOutput": false,
+					"secureInput": false
+				},
+				"userProperties": [],
+				"typeProperties": {
+					"notebook": {
+						"referenceName": {
+							"value": "ReadFromRaw",
+							"type": "Expression"
+						},
+						"type": "NotebookReference"
+					},
+					"parameters": {
+						"source_storage": {
+							"value": "vndatapltfv2devst02",
+							"type": "string"
+						},
+						"source_container": {
+							"value": "raw",
+							"type": "string"
+						},
+						"source_path": {
+							"value": "aemo",
+							"type": "string"
+						},
+						"source_file": {
+							"value": "",
+							"type": "string"
+						},
+						"destination_storage": {
+							"value": "vndatapltfv2devst02",
+							"type": "string"
+						},
+						"destination_container": {
+							"value": "conformance",
+							"type": "string"
+						},
+						"destination_path": {
+							"value": "aemo",
+							"type": "string"
+						}
+					},
+					"snapshot": true,
+					"sparkPool": {
+						"referenceName": {
+							"value": "devsparkpool02",
+							"type": "Expression"
+						},
+						"type": "BigDataPoolReference"
+					},
+					"executorSize": "Large",
+					"conf": {
+						"spark.dynamicAllocation.enabled": null,
+						"spark.dynamicAllocation.minExecutors": null,
+						"spark.dynamicAllocation.maxExecutors": null
+					},
+					"driverSize": "Large",
+					"numExecutors": null
+				},
+				"linkedServiceName": {
+					"referenceName": "AzureSynapseArtifacts",
+					"type": "LinkedServiceReference"
+				}
+			},
+			{
+				"name": "ReadFromConformance",
+				"type": "SynapseNotebook",
+				"state": "Active",
+				"onInactiveMarkAs": "Succeeded",
+				"dependsOn": [
+					{
+						"activity": "ReadFromRaw",
+						"dependencyConditions": [
+							"Succeeded"
+						]
+					}
+				],
+				"policy": {
+					"timeout": "0.12:00:00",
+					"retry": 0,
+					"retryIntervalInSeconds": 30,
+					"secureOutput": false,
+					"secureInput": false
+				},
+				"userProperties": [],
+				"typeProperties": {
+					"notebook": {
+						"referenceName": {
+							"value": "ReadFromConformance",
+							"type": "Expression"
+						},
+						"type": "NotebookReference"
+					},
+					"parameters": {
+						"source_storage": {
+							"value": "vndatapltfv2devst02",
+							"type": "string"
+						},
+						"source_container": {
+							"value": "conformance",
+							"type": "string"
+						},
+						"source_path": {
+							"value": "aemo",
+							"type": "string"
+						},
+						"source_file": {
+							"value": "",
+							"type": "string"
+						},
+						"destination_storage": {
+							"value": "vndatapltfv2devst02",
+							"type": "string"
+						},
+						"destination_container": {
+							"value": "standardized",
+							"type": "string"
+						},
+						"destination_path": {
+							"value": "aemo",
+							"type": "string"
+						}
+					},
+					"snapshot": true,
+					"sparkPool": {
+						"referenceName": {
+							"value": "devsparkpool02",
+							"type": "Expression"
+						},
+						"type": "BigDataPoolReference"
+					},
+					"executorSize": "Large",
+					"conf": {
+						"spark.dynamicAllocation.enabled": null,
+						"spark.dynamicAllocation.minExecutors": null,
+						"spark.dynamicAllocation.maxExecutors": null
+					},
+					"driverSize": "Large",
+					"numExecutors": null
+				},
+				"linkedServiceName": {
+					"referenceName": "AzureSynapseArtifacts",
+					"type": "LinkedServiceReference"
+				}
+			},
+			{
+				"name": "ReadFromStandardized",
+				"type": "SynapseNotebook",
+				"state": "Active",
+				"onInactiveMarkAs": "Succeeded",
+				"dependsOn": [
+					{
+						"activity": "ReadFromConformance",
+						"dependencyConditions": [
+							"Succeeded"
+						]
+					}
+				],
+				"policy": {
+					"timeout": "0.12:00:00",
+					"retry": 0,
+					"retryIntervalInSeconds": 30,
+					"secureOutput": false,
+					"secureInput": false
+				},
+				"userProperties": [],
+				"typeProperties": {
+					"notebook": {
+						"referenceName": {
+							"value": "ReadFromStandardized",
+							"type": "Expression"
+						},
+						"type": "NotebookReference"
+					},
+					"parameters": {
+						"source_storage": {
+							"value": "vndatapltfv2devst02",
+							"type": "string"
+						},
+						"source_container": {
+							"value": "standardized",
+							"type": "string"
+						},
+						"source_path": {
+							"value": "aemo",
+							"type": "string"
+						},
+						"source_file": {
+							"value": "",
+							"type": "string"
+						},
+						"destination_storage": {
+							"value": "vndatapltfv2devst02",
+							"type": "string"
+						},
+						"destination_container": {
+							"value": "curated",
+							"type": "string"
+						},
+						"destination_path": {
+							"value": "aemo",
+							"type": "string"
+						}
+					},
+					"snapshot": true,
+					"sparkPool": {
+						"referenceName": {
+							"value": "devsparkpool02",
+							"type": "Expression"
+						},
+						"type": "BigDataPoolReference"
+					},
+					"executorSize": "Large",
+					"conf": {
+						"spark.dynamicAllocation.enabled": null,
+						"spark.dynamicAllocation.minExecutors": null,
+						"spark.dynamicAllocation.maxExecutors": null
+					},
+					"driverSize": "Large",
+					"numExecutors": null
+				},
+				"linkedServiceName": {
+					"referenceName": "AzureSynapseArtifacts",
+					"type": "LinkedServiceReference"
+				}
+			}
+		],
+		"annotations": [],
+		"lastPublishTime": "2024-03-20T22:56:35Z"
+	},
+	"type": "Microsoft.Synapse/workspaces/pipelines"
+}

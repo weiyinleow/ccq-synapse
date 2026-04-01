@@ -1,0 +1,478 @@
+{
+	"name": "21359_Fuel_Card_Facility_Map_Date_Range",
+	"properties": {
+		"folder": {
+			"name": "DataHubBatchScripts/ESG_SHAREPOINT/ESG_SHAREPOINT_Hotfix"
+		},
+		"nbformat": 4,
+		"nbformat_minor": 2,
+		"bigDataPool": {
+			"referenceName": "Sparkpool01",
+			"type": "BigDataPoolReference"
+		},
+		"sessionProperties": {
+			"driverMemory": "56g",
+			"driverCores": 8,
+			"executorMemory": "56g",
+			"executorCores": 8,
+			"numExecutors": 2,
+			"conf": {
+				"spark.dynamicAllocation.enabled": "false",
+				"spark.dynamicAllocation.minExecutors": "2",
+				"spark.dynamicAllocation.maxExecutors": "2",
+				"spark.autotune.trackingId": "305a2760-3599-4044-b3a3-91c47600304c"
+			}
+		},
+		"metadata": {
+			"saveOutput": true,
+			"enableDebugMode": false,
+			"kernelspec": {
+				"name": "synapse_pyspark",
+				"display_name": "Synapse PySpark"
+			},
+			"language_info": {
+				"name": "python"
+			},
+			"a365ComputeOptions": {
+				"id": "/subscriptions/2e9f823e-dc76-4e8e-b815-c8a4f22d05ff/resourceGroups/CQL-AZUR1-DEVDATAHUB01-RG/providers/Microsoft.Synapse/workspaces/cql-dev-datahub-synapse01/bigDataPools/Sparkpool01",
+				"name": "Sparkpool01",
+				"type": "Spark",
+				"endpoint": "https://cql-dev-datahub-synapse01.dev.azuresynapse.net/livyApi/versions/2019-11-01-preview/sparkPools/Sparkpool01",
+				"auth": {
+					"type": "AAD",
+					"authResource": "https://dev.azuresynapse.net"
+				},
+				"sparkVersion": "3.4",
+				"nodeCount": 10,
+				"cores": 8,
+				"memory": 56,
+				"automaticScaleJobs": false
+			},
+			"sessionKeepAliveTimeout": 30
+		},
+		"cells": [
+			{
+				"cell_type": "markdown",
+				"metadata": {
+					"nteract": {
+						"transient": {
+							"deleting": false
+						}
+					}
+				},
+				"source": [
+					"#### Setup Config Parameters"
+				]
+			},
+			{
+				"cell_type": "code",
+				"metadata": {
+					"editable": true,
+					"run_control": {
+						"frozen": false
+					}
+				},
+				"source": [
+					"from pyspark.sql import Window\n",
+					"from pyspark.sql.functions import col, row_number, when, sha2, concat_ws, regexp_replace\n",
+					"\n",
+					"# Environment Parameter\n",
+					"env = 'prod'\n",
+					"\n",
+					"# Config for updating keys in Bronze\n",
+					"bronze_tables_config = [\n",
+					"    {\n",
+					"        \"table_detail\": \"esg_sharepoint_bronze.fuelcard_facility_map\",\n",
+					"        \"table_detail_bkup\": \"esg_sharepoint_bronze.fuelcard_facility_map_bkup\",\n",
+					"        \"table_name\": \"fuelcard_facility_map\",\n",
+					"        \"path\": f\"abfss://bronze@cql{env}datahubsynapse.dfs.core.windows.net/esg_sharepoint_bronze/fuelcard_facility_map\",\n",
+					"        \"bkup_path\": f\"abfss://bronze@cql{env}datahubsynapse.dfs.core.windows.net/esg_sharepoint_bronze/fuelcard_facility_map_bkup\",\n",
+					"        \"format\": \"delta\",\n",
+					"        \"hash_columns\": [\"FuelCardNumber\",regexp_replace(\"ValidFromDate\", \"-|[/.:]\", \"\"), regexp_replace(\"ValidToDate\", \"-|[/.:]\", \"\")],\n",
+					"        \"old_hash_column\": \"HashKey\",\n",
+					"        \"drop_old_hashkey\": \"OLD_HashKey\"\n",
+					"    }\n",
+					"]\n",
+					"\n",
+					"# Config for Silver Backup\n",
+					"silver_tables_config = [\n",
+					"    {\n",
+					"        \"table_detail\": \"silver.fuel_transactions\",\n",
+					"        \"table_detail_bkup\": \"silver.fuel_transactions_bkup\",\n",
+					"        \"table_name\": \"fuel_transactions\",\n",
+					"        \"path\": f\"abfss://silver@cql{env}datahubsynapse.dfs.core.windows.net/fuel_transactions/fuel_transactions\",\n",
+					"        \"bkup_path\": f\"abfss://silver@cql{env}datahubsynapse.dfs.core.windows.net/fuel_transactions_bkup/fuel_transactions_bkup\",\n",
+					"        \"format\": \"delta\"\n",
+					"    }\n",
+					"]"
+				],
+				"execution_count": 36
+			},
+			{
+				"cell_type": "markdown",
+				"metadata": {
+					"nteract": {
+						"transient": {
+							"deleting": false
+						}
+					}
+				},
+				"source": [
+					"#### Create Backup Tables (Frozen Cells)"
+				]
+			},
+			{
+				"cell_type": "code",
+				"metadata": {
+					"editable": false,
+					"run_control": {
+						"frozen": true
+					}
+				},
+				"source": [
+					"#Create backups (bronze)\n",
+					"for config in bronze_tables_config:\n",
+					"    df = spark.read.table(config[\"table_detail\"])\n",
+					"    df.write.format(config[\"format\"]).mode(\"overwrite\").saveAsTable(config[\"table_detail_bkup\"])\n",
+					"    print(f\"Backup created for: {config['table_name']}\")"
+				],
+				"execution_count": 24
+			},
+			{
+				"cell_type": "code",
+				"metadata": {
+					"editable": false,
+					"run_control": {
+						"frozen": true
+					}
+				},
+				"source": [
+					"#Create backups (silver)\n",
+					"for config in silver_tables_config:\n",
+					"    df = spark.read.table(config[\"table_detail\"])\n",
+					"    df.write.format(config[\"format\"]).mode(\"overwrite\").saveAsTable(config[\"table_detail_bkup\"])\n",
+					"    print(f\"Backup created for: {config['table_name']}\")"
+				],
+				"execution_count": 6
+			},
+			{
+				"cell_type": "markdown",
+				"metadata": {
+					"nteract": {
+						"transient": {
+							"deleting": false
+						}
+					}
+				},
+				"source": [
+					"#### Restore From Backup Tables (Frozen Cells)"
+				]
+			},
+			{
+				"cell_type": "code",
+				"metadata": {
+					"editable": false,
+					"run_control": {
+						"frozen": true
+					}
+				},
+				"source": [
+					"#Restore backups (bronze)\n",
+					"for config in bronze_tables_config:\n",
+					"    df = spark.read.table(config[\"table_detail_bkup\"])\n",
+					"    df.write.format(config[\"format\"]).mode(\"overwrite\").saveAsTable(config[\"table_detail\"])\n",
+					"    print(f\"Backup restored for: {config['table_name']}\")"
+				],
+				"execution_count": 17
+			},
+			{
+				"cell_type": "code",
+				"metadata": {
+					"editable": false,
+					"run_control": {
+						"frozen": true
+					}
+				},
+				"source": [
+					"#Restore backups (silver)\n",
+					"for config in silver_tables_config:\n",
+					"    df = spark.read.table(config[\"table_detail_bkup\"])\n",
+					"    df.write.format(config[\"format\"]).mode(\"overwrite\").saveAsTable(config[\"table_detail\"])\n",
+					"    print(f\"Backup restored for: {config['table_name']}\")"
+				],
+				"execution_count": 3
+			},
+			{
+				"cell_type": "markdown",
+				"metadata": {
+					"nteract": {
+						"transient": {
+							"deleting": false
+						}
+					}
+				},
+				"source": [
+					"#### Validation Queries - Before Updates\n",
+					""
+				]
+			},
+			{
+				"cell_type": "code",
+				"metadata": {
+					"editable": true,
+					"run_control": {
+						"frozen": false
+					},
+					"collapsed": false
+				},
+				"source": [
+					"#FuelCardFacilityMap\n",
+					"validation_query = \"\"\"\n",
+					"SELECT * FROM esg_sharepoint_bronze.fuelcard_facility_map\n",
+					"where fuelcardnumber = '34091'\n",
+					"\n",
+					"\"\"\"\n",
+					"validation_df = spark.sql(validation_query)\n",
+					"display(validation_df)"
+				],
+				"execution_count": 25
+			},
+			{
+				"cell_type": "code",
+				"metadata": {
+					"collapsed": false
+				},
+				"source": [
+					"# BP Validation\n",
+					"# Standardising Product names \n",
+					"df_product = spark.sql(f\"\"\"\n",
+					"                        SELECT \n",
+					"                            ref.Description AS Product, \n",
+					"                            ref.NumericValue AS FuelType\n",
+					"                        FROM esg_sharepoint_bronze.reference_data ref\n",
+					"                        WHERE ref.CDCCurrentFlag = 1 AND Dataset = 'ProductType'\n",
+					"                    \"\"\")\n",
+					"#display(df_product)\n",
+					"df_product.createOrReplaceTempView(\"TempProduct\")\n",
+					"\n",
+					"validation_query = \"\"\"\n",
+					"SELECT  \n",
+					"    bp.TransactionReceiptNumber AS TransactionId, \n",
+					"    bp.TransactionEffectiveDate AS TransactionEffectiveDate,\n",
+					"    f.Facility AS SiteCode,\n",
+					"    bp.Product AS Product,\n",
+					"    CASE WHEN t.FuelType = '1' THEN \"Unleaded Petrol\" ELSE \"Diesel\" END AS StandardisedProduct, \n",
+					"    bp.Litres AS Quantity,\n",
+					"    'bp_fuel_transactions' AS RecordSourceTableName, \n",
+					"    bp.HashKey as RecordSourceHashKey,\n",
+					"    false as FileOverrideFlag,\n",
+					"    '' as Stationary_category\n",
+					"FROM bp_bronze.bp_fuel_transactions bp\n",
+					"LEFT JOIN esg_sharepoint_bronze.fuelcard_facility_map f ON f.FuelCardNumber = bp.CardNumber\n",
+					"LEFT JOIN TempProduct t ON t.Product = bp.Product\n",
+					"WHERE bp.Product IN (t.Product) AND bp.CDCCurrentFlag = 1 and bp.CardNumber = '34091'\n",
+					"\"\"\"\n",
+					"validation_df = spark.sql(validation_query)\n",
+					"display(validation_df)"
+				],
+				"execution_count": 26
+			},
+			{
+				"cell_type": "code",
+				"metadata": {
+					"collapsed": false
+				},
+				"source": [
+					"# Silver Counts\n",
+					"validation_query = \"\"\"\n",
+					"SELECT count(transactionid), SiteCode FROM silver.fuel_transactions\n",
+					"where recordsourcetablename = 'bp_fuel_transactions' and cdccurrentflag = 1\n",
+					"group by SiteCode\n",
+					"\"\"\"\n",
+					"validation_df = spark.sql(validation_query)\n",
+					"display(validation_df)"
+				],
+				"execution_count": 27
+			},
+			{
+				"cell_type": "markdown",
+				"metadata": {
+					"nteract": {
+						"transient": {
+							"deleting": false
+						}
+					}
+				},
+				"source": [
+					"#### Drop Bronze Tables"
+				]
+			},
+			{
+				"cell_type": "code",
+				"metadata": {
+					"editable": false,
+					"run_control": {
+						"frozen": true
+					}
+				},
+				"source": [
+					"file_path = f'abfss://bronze@cql{env}datahubsynapse.dfs.core.windows.net/esg_sharepoint_bronze/fuelcard_facility_map'\n",
+					"mssparkutils.fs.rm(file_path, recurse=True) \n",
+					"mssparkutils.fs.mkdirs(file_path)\n",
+					"spark.sql(f\"\"\"DROP TABLE esg_sharepoint_bronze.fuelcard_facility_map;\"\"\")"
+				],
+				"execution_count": 29
+			},
+			{
+				"cell_type": "markdown",
+				"metadata": {
+					"nteract": {
+						"transient": {
+							"deleting": false
+						}
+					}
+				},
+				"source": [
+					"#### Drop Silver Tables"
+				]
+			},
+			{
+				"cell_type": "code",
+				"metadata": {
+					"editable": false,
+					"run_control": {
+						"frozen": true
+					}
+				},
+				"source": [
+					"file_path = f'abfss://silver@cql{env}datahubsynapse.dfs.core.windows.net/fuel_transactions/fuel_transactions'\n",
+					"mssparkutils.fs.rm(file_path, recurse=True) \n",
+					"mssparkutils.fs.mkdirs(file_path)\n",
+					"spark.sql(f\"\"\"DROP TABLE silver.fuel_transactions;\"\"\")\n",
+					""
+				],
+				"execution_count": 37
+			},
+			{
+				"cell_type": "markdown",
+				"metadata": {
+					"nteract": {
+						"transient": {
+							"deleting": false
+						}
+					}
+				},
+				"source": [
+					"#### Drop Gold Tables"
+				]
+			},
+			{
+				"cell_type": "code",
+				"metadata": {
+					"editable": false,
+					"run_control": {
+						"frozen": true
+					}
+				},
+				"source": [
+					"file_path = f'abfss://gold@cql{env}datahubsynapse.dfs.core.windows.net/fact_fuel_consumption/fact_fuel_consumption'\n",
+					"mssparkutils.fs.rm(file_path, recurse=True)\n",
+					"mssparkutils.fs.mkdirs(file_path)\n",
+					"spark.sql(f\"\"\"DROP TABLE gold.fact_fuel_consumption;\"\"\""
+				],
+				"execution_count": 1
+			},
+			{
+				"cell_type": "markdown",
+				"metadata": {
+					"nteract": {
+						"transient": {
+							"deleting": false
+						}
+					}
+				},
+				"source": [
+					"#### Validation Queries - After Updates\n",
+					""
+				]
+			},
+			{
+				"cell_type": "code",
+				"metadata": {
+					"collapsed": false
+				},
+				"source": [
+					"#FuelCardFacilityMap\n",
+					"validation_query = \"\"\"\n",
+					"SELECT * FROM esg_sharepoint_bronze.fuelcard_facility_map\n",
+					"where fuelcardnumber = '34091'\n",
+					"\n",
+					"\"\"\"\n",
+					"validation_df = spark.sql(validation_query)\n",
+					"display(validation_df)"
+				],
+				"execution_count": 30
+			},
+			{
+				"cell_type": "code",
+				"metadata": {
+					"editable": true,
+					"run_control": {
+						"frozen": false
+					},
+					"collapsed": false
+				},
+				"source": [
+					"spark.conf.set(\"spark.sql.legacy.timeParserPolicy\", \"LEGACY\")\n",
+					"# BP Validation\n",
+					"# Standardising Product names \n",
+					"df_product = spark.sql(f\"\"\"\n",
+					"                        SELECT \n",
+					"                            ref.Description AS Product, \n",
+					"                            ref.NumericValue AS FuelType\n",
+					"                        FROM esg_sharepoint_bronze.reference_data ref\n",
+					"                        WHERE ref.CDCCurrentFlag = 1 AND Dataset = 'ProductType'\n",
+					"                    \"\"\")\n",
+					"#display(df_product)\n",
+					"df_product.createOrReplaceTempView(\"TempProduct\")\n",
+					"\n",
+					"validation_query = \"\"\"\n",
+					"SELECT distinct\n",
+					"    bp.TransactionReceiptNumber AS TransactionId, \n",
+					"    bp.TransactionEffectiveDate AS TransactionEffectiveDate,\n",
+					"    f.Facility AS SiteCode,\n",
+					"    bp.Product AS Product,\n",
+					"    CASE WHEN t.FuelType = '1' THEN \"Unleaded Petrol\" ELSE \"Diesel\" END AS StandardisedProduct, \n",
+					"    bp.Litres AS Quantity,\n",
+					"    'bp_fuel_transactions' AS RecordSourceTableName, \n",
+					"    bp.HashKey as RecordSourceHashKey,\n",
+					"    false as FileOverrideFlag,\n",
+					"    '' as Stationary_category\n",
+					"FROM bp_bronze.bp_fuel_transactions bp\n",
+					"LEFT JOIN esg_sharepoint_bronze.fuelcard_facility_map f ON f.FuelCardNumber = bp.CardNumber AND f.CDCCurrentFlag = 1 \n",
+					"LEFT JOIN TempProduct t ON t.Product = bp.Product \n",
+					"WHERE bp.Product IN (t.Product) AND bp.CDCCurrentFlag = 1 and bp.CardNumber = '34091'       \n",
+					"and (to_date(bp.TransactionEffectiveDate,'dd/MM/yyyy') BETWEEN to_date(f.ValidFromDate,'yyyy-MM-dd') AND to_date(f.ValidToDate,'yyyy-MM-dd'))\n",
+					"\"\"\"\n",
+					"validation_df = spark.sql(validation_query)\n",
+					"display(validation_df)"
+				],
+				"execution_count": 34
+			},
+			{
+				"cell_type": "code",
+				"source": [
+					"# Silver Counts\n",
+					"validation_query = \"\"\"\n",
+					"SELECT count(transactionid), SiteCode FROM silver.fuel_transactions\n",
+					"where recordsourcetablename = 'bp_fuel_transactions' and cdccurrentflag = 1\n",
+					"group by SiteCode\n",
+					"\"\"\"\n",
+					"validation_df = spark.sql(validation_query)\n",
+					"display(validation_df)"
+				],
+				"execution_count": null
+			}
+		]
+	}
+}

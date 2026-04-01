@@ -1,0 +1,2373 @@
+{
+	"name": "emms_longterm_bronze",
+	"properties": {
+		"folder": {
+			"name": "DataHubBatchScripts/EMMS_LONGTERM"
+		},
+		"nbformat": 4,
+		"nbformat_minor": 2,
+		"bigDataPool": {
+			"referenceName": "Sparkpool01",
+			"type": "BigDataPoolReference"
+		},
+		"sessionProperties": {
+			"driverMemory": "28g",
+			"driverCores": 4,
+			"executorMemory": "28g",
+			"executorCores": 4,
+			"numExecutors": 2,
+			"conf": {
+				"spark.dynamicAllocation.enabled": "false",
+				"spark.dynamicAllocation.minExecutors": "2",
+				"spark.dynamicAllocation.maxExecutors": "2",
+				"spark.autotune.trackingId": "a6066959-115d-4293-8926-19f416df1965"
+			}
+		},
+		"metadata": {
+			"saveOutput": true,
+			"enableDebugMode": false,
+			"kernelspec": {
+				"name": "synapse_pyspark",
+				"display_name": "Synapse PySpark"
+			},
+			"language_info": {
+				"name": "python"
+			},
+			"a365ComputeOptions": {
+				"id": "/subscriptions/2e9f823e-dc76-4e8e-b815-c8a4f22d05ff/resourceGroups/CQL-AZUR1-DEVDATAHUB01-RG/providers/Microsoft.Synapse/workspaces/cql-dev-datahub-synapse01/bigDataPools/Sparkpool01",
+				"name": "Sparkpool01",
+				"type": "Spark",
+				"endpoint": "https://cql-dev-datahub-synapse01.dev.azuresynapse.net/livyApi/versions/2019-11-01-preview/sparkPools/Sparkpool01",
+				"auth": {
+					"type": "AAD",
+					"authResource": "https://dev.azuresynapse.net"
+				},
+				"sparkVersion": "3.4",
+				"nodeCount": 10,
+				"cores": 8,
+				"memory": 56,
+				"automaticScaleJobs": false
+			},
+			"sessionKeepAliveTimeout": 30
+		},
+		"cells": [
+			{
+				"cell_type": "code",
+				"source": [
+					"#Imports\n",
+					"import json\n",
+					"\n",
+					"from pyspark.sql.functions import hash\n",
+					"from pyspark.sql import functions as fn\n",
+					"from pyspark.sql.functions import col, concat, lit, to_timestamp,current_timestamp,date_format\n",
+					"from pyspark.sql.functions import sha2, concat_ws\n",
+					"\n",
+					"from pyspark.sql.types import StructType, StructField, StringType, IntegerType, BooleanType,DateType, DoubleType,TimestampType\n",
+					"\n",
+					"from py4j.protocol import Py4JJavaError"
+				],
+				"execution_count": 104
+			},
+			{
+				"cell_type": "code",
+				"metadata": {
+					"jupyter": {
+						"source_hidden": false,
+						"outputs_hidden": false
+					},
+					"nteract": {
+						"transient": {
+							"deleting": false
+						}
+					},
+					"collapsed": false
+				},
+				"source": [
+					"#Get Parameter from controldb\n",
+					"db_port = 1433\n",
+					"linked_service_name = \"LS_SQL_ELTFrameworkDB\"\n",
+					"db_notebookname= \"emms_longterm_bronze\"\n",
+					"linkedServiceProperties = json.loads(mssparkutils.credentials.getPropertiesAll(linked_service_name))\n",
+					"sql_server_name = linkedServiceProperties.get('Endpoint')\n",
+					"db_name = linkedServiceProperties.get('Database')\n",
+					"#print(linkedServiceProperties)\n",
+					"access_token = mssparkutils.credentials.getConnectionStringOrCreds(linked_service_name)\n",
+					"\n",
+					"db_query =\"SELECT A.*,B.NotebookParameterId,B.ParameterType,B.Value  FROM [CTL].[CFG_NOTEBOOK] A LEFT JOIN [CTL].[CFG_NOTEBOOK_PARAMETER] B ON A.NotebookId = B.NotebookId\"\n",
+					"\n",
+					"df = spark.read.format(\"jdbc\") \\\n",
+					"    .option(\"url\", \"jdbc:sqlserver://%s:%s\" % (sql_server_name, db_port)) \\\n",
+					"    .option(\"query\", db_query) \\\n",
+					"    .option(\"accessToken\", access_token) \\\n",
+					"    .option(\"encrypt\", \"true\") \\\n",
+					"    .option(\"databaseName\", db_name) \\\n",
+					"    .option(\"hostNameInCertificate\", \"*.database.windows.net\") \\\n",
+					"    .load()\n",
+					"\n",
+					"df2 = df.where(df.NotebookPath==db_notebookname) "
+				],
+				"execution_count": 105
+			},
+			{
+				"cell_type": "code",
+				"metadata": {
+					"collapsed": false
+				},
+				"source": [
+					"#Source DataLake storage details\n",
+					"source_storage = df2.where(df2.ParameterType=='source_storage').collect()[0][\"Value\"] #Storage name\n",
+					"source_container = df2.where(df2.ParameterType=='source_container').collect()[0][\"Value\"] #Storage container detail\n",
+					"source_path = df2.where(df2.ParameterType=='source_path').collect()[0][\"Value\"] #internal folder location in container\n",
+					"\n",
+					"#Destination DataLake storage details\n",
+					"destination_storage = df2.where(df2.ParameterType=='destination_storage').collect()[0][\"Value\"] #Storage name\n",
+					"destination_container = df2.where(df2.ParameterType=='destination_container').collect()[0][\"Value\"] #raw storage container details\n",
+					"destination_path = df2.where(df2.ParameterType=='destination_path').collect()[0][\"Value\"] #raw delta file patch\n",
+					"\n",
+					"\n",
+					"#Get Current Date\n",
+					"#Bronze_LoadDate=spark.sql(\"select current_timestamp()\").collect()[0][0]\n",
+					"Date_Collection = spark.sql(\"select current_timestamp() AS Current,(current_timestamp() + interval '-1' second) AS EndDate\").collect()\n",
+					"Bronze_LoadDate = Date_Collection[0]['Current']\n",
+					"Bronze_UpdateEndDate = Date_Collection[0]['EndDate']"
+				],
+				"execution_count": 106
+			},
+			{
+				"cell_type": "markdown",
+				"metadata": {
+					"nteract": {
+						"transient": {
+							"deleting": false
+						}
+					}
+				},
+				"source": [
+					"# Table: setgendata: START"
+				]
+			},
+			{
+				"cell_type": "code",
+				"metadata": {
+					"jupyter": {
+						"source_hidden": false,
+						"outputs_hidden": false
+					},
+					"nteract": {
+						"transient": {
+							"deleting": false
+						}
+					}
+				},
+				"source": [
+					"#Set table name\n",
+					"db_tablename=\"setgendata\""
+				],
+				"execution_count": 107
+			},
+			{
+				"cell_type": "code",
+				"metadata": {
+					"jupyter": {
+						"source_hidden": false,
+						"outputs_hidden": false
+					},
+					"nteract": {
+						"transient": {
+							"deleting": false
+						}
+					}
+				},
+				"source": [
+					"#Create Bronze Table\n",
+					"spark.sql(f\"\"\"CREATE DATABASE IF NOT EXISTS {db_notebookname};\"\"\")\n",
+					"spark.sql(f\"\"\"\n",
+					"CREATE TABLE IF NOT EXISTS {db_notebookname}.{db_tablename}\n",
+					"(\n",
+					"\tSettlementDate TIMESTAMP,\n",
+					"\tVersionNo BIGINT,\n",
+					"\tPeriodId BIGINT,\n",
+					"\tParticipantId STRING,\n",
+					"\tStationId STRING,\n",
+					"\tDUID STRING,\n",
+					"\tGenSetId STRING,\n",
+					"\tRegionId STRING,\n",
+					"\tGEnergy DECIMAL(16,6),\n",
+					"\tAEnergy DECIMAL(16,6),\n",
+					"\tGPower DECIMAL(16,6),\n",
+					"\tAPower DECIMAL(16,6),\n",
+					"\tRRP DECIMAL(20,5),\n",
+					"\tEEP DECIMAL(16,6),\n",
+					"\tTLF DECIMAL(7,5),\n",
+					"\tCPRRP DECIMAL(16,6),\n",
+					"\tCPEEP DECIMAL(16,6),\n",
+					"\tNetEnergy DECIMAL(16,6),\n",
+					"\tEnergyCost DECIMAL(16,6),\n",
+					"\tExcessEnergyCost DECIMAL(16,6),\n",
+					"\tAPC DECIMAL(16,6),\n",
+					"\tRESC DECIMAL(16,6),\n",
+					"\tRESP DECIMAL(16,6),\n",
+					"\tLastChanged TIMESTAMP,\n",
+					"\tExpEnergy DECIMAL(15,6),\n",
+					"\tExpEnergyCost DECIMAL(15,6),\n",
+					"\tMeterRunNo INT,\n",
+					"\tMDA STRING,\n",
+					"\tSecondaryTLF DECIMAL(7,5),\n",
+					"\tCDCLoadDate TIMESTAMP,\n",
+					"\tCDCStartDate TIMESTAMP,\n",
+					"\tCDCEndDate TIMESTAMP,\n",
+					"\tCDCOps INT,\n",
+					"\tCDCCurrentFlag BOOLEAN,\n",
+					"\tHashKey STRING,\n",
+					"\tHashDiff STRING   \n",
+					")\n",
+					"USING delta\n",
+					"LOCATION 'abfss://{destination_container}@{destination_storage}.dfs.core.windows.net/{destination_path}/{db_tablename}'\n",
+					"\"\"\")"
+				],
+				"execution_count": 108
+			},
+			{
+				"cell_type": "code",
+				"metadata": {
+					"jupyter": {
+						"source_hidden": false,
+						"outputs_hidden": false
+					},
+					"nteract": {
+						"transient": {
+							"deleting": false
+						}
+					}
+				},
+				"source": [
+					"# load parquet file as dataframe\n",
+					"raw_df = spark.read.format(\"parquet\").load(f'abfss://{source_container}@{source_storage}.dfs.core.windows.net/{source_path}/{db_tablename}/')"
+				],
+				"execution_count": 109
+			},
+			{
+				"cell_type": "code",
+				"metadata": {
+					"jupyter": {
+						"source_hidden": false,
+						"outputs_hidden": false
+					},
+					"nteract": {
+						"transient": {
+							"deleting": false
+						}
+					},
+					"collapsed": false
+				},
+				"source": [
+					"# Add CDC columns\n",
+					"raw_df = raw_df.withColumn(\"HashKey\", sha2(concat_ws(\"||\", \"SETTLEMENTDATE\", \"VERSIONNO\", \"PERIODID\", \"STATIONID\", \"DUID\", \"GENSETID\", \"REGIONID\"), 256))\n",
+					"raw_df = raw_df.withColumn(\"HashDiff\", sha2(concat_ws(\"||\", \"PARTICIPANTID\", \"GENERGY\", \"AENERGY\", \"GPOWER\", \"APOWER\", \"RRP\", \"EEP\", \"TLF\", \"CPRRP\", \"CPEEP\", \"NETENERGY\", \"ENERGYCOST\", \"EXCESSENERGYCOST\", \"APC\", \"RESC\", \"RESP\", \"LASTCHANGED\", \"EXPENERGY\", \"EXPENERGYCOST\", \"METERRUNNO\", \"MDA\", \"SECONDARY_TLF\"), 256))\n",
+					"raw_df = raw_df.withColumn(\"CDCLoadDate\", to_timestamp(lit(Bronze_LoadDate),'yyyy-MM-dd HH:mm:ss'))\n",
+					"raw_df = raw_df.withColumn(\"CDCStartDate\", to_timestamp(lit(Bronze_LoadDate), 'yyyy-MM-dd HH:mm:ss'))\n",
+					"raw_df = raw_df.withColumn(\"CDCEndDate\", to_timestamp(lit(\"9999-12-31 23:59:59\"), 'yyyy-MM-dd HH:mm:ss'))\n",
+					"raw_df = raw_df.withColumn(\"CDCCurrentFlag\", lit(1))\n",
+					"raw_df = raw_df.withColumn(\"CDCOps\", lit(1))"
+				],
+				"execution_count": 110
+			},
+			{
+				"cell_type": "code",
+				"metadata": {
+					"jupyter": {
+						"source_hidden": false,
+						"outputs_hidden": false
+					},
+					"nteract": {
+						"transient": {
+							"deleting": false
+						}
+					}
+				},
+				"source": [
+					"# Row count parameters\n",
+					"Bronze_Insert_Pre=spark.sql(f\"\"\" SELECT COUNT(*) FROM {db_notebookname}.{db_tablename} WHERE CDCOps = 1 \"\"\").collect()[0][0]\n",
+					"Bronze_Update_Pre=spark.sql(f\"\"\" SELECT COUNT(*) FROM {db_notebookname}.{db_tablename} WHERE CDCOps = 2 \"\"\").collect()[0][0]\n",
+					"Bronze_Delete_Pre=spark.sql(f\"\"\" SELECT COUNT(*) FROM {db_notebookname}.{db_tablename} WHERE CDCOps = 0 \"\"\").collect()[0][0]"
+				],
+				"execution_count": 111
+			},
+			{
+				"cell_type": "code",
+				"metadata": {
+					"jupyter": {
+						"source_hidden": false,
+						"outputs_hidden": false
+					},
+					"nteract": {
+						"transient": {
+							"deleting": false
+						}
+					}
+				},
+				"source": [
+					"# SCD2 logic\n",
+					"# Create a temporary view of the dataframe\n",
+					"raw_df.createOrReplaceTempView(\"temp_table\")\n",
+					"\n",
+					"# Use the merge operation to update the target table\n",
+					"spark.sql(f\"\"\"\n",
+					"    MERGE INTO {db_notebookname}.{db_tablename} t\n",
+					"    USING temp_table s\n",
+					"    ON t.HashKey = s.HashKey AND t.CDCCurrentFlag == true\n",
+					"    WHEN MATCHED AND t.HashDiff <> s.HashDiff THEN\n",
+					"      UPDATE SET t.CDCEndDate = '{Bronze_UpdateEndDate}',\n",
+					"                 t.CDCCurrentFlag = false,\n",
+					"                 t.CDCOps = s.CDCOps + 1\n",
+					"    WHEN NOT MATCHED THEN\n",
+					"      INSERT (SettlementDate, VersionNo, PeriodId, ParticipantId, StationId, DUID, GenSetId, RegionId, GEnergy, AEnergy, GPower, APower, RRP, EEP, TLF, CPRRP, CPEEP, NetEnergy, EnergyCost, ExcessEnergyCost, APC, RESC, RESP, LastChanged, ExpEnergy, ExpEnergyCost, MeterRunNo, MDA, SecondaryTLF, CDCLoadDate, CDCStartDate, CDCEndDate, CDCOps, CDCCurrentFlag, HashKey, HashDiff)\n",
+					"      VALUES (s.SETTLEMENTDATE, s.VERSIONNO, s.PERIODID, s.PARTICIPANTID, s.STATIONID, s.DUID, s.GENSETID, s.REGIONID, s.GENERGY, s.AENERGY, s.GPOWER, s.APOWER, s.RRP, s.EEP, s.TLF, s.CPRRP, s.CPEEP, s.NETENERGY, s.ENERGYCOST, s.EXCESSENERGYCOST, s.APC, s.RESC, s.RESP, s.LASTCHANGED, s.EXPENERGY, s.EXPENERGYCOST, s.METERRUNNO, s.MDA, s.SECONDARY_TLF, s.CDCLoadDate, s.CDCStartDate, s.CDCEndDate, 1, s.CDCCurrentFlag, s.HashKey, s.HashDiff)\n",
+					"\"\"\")\n",
+					"\n",
+					"# Use the merge operation to Insert updated record \n",
+					"spark.sql(f\"\"\"\n",
+					"    MERGE INTO {db_notebookname}.{db_tablename} t\n",
+					"    USING temp_table s\n",
+					"    ON t.HashKey = s.HashKey AND t.CDCCurrentFlag == true\n",
+					"    WHEN MATCHED AND t.HashDiff <> s.HashDiff THEN\n",
+					"      UPDATE SET t.CDCEndDate = '{Bronze_UpdateEndDate}',\n",
+					"                 t.CDCCurrentFlag = false,\n",
+					"                 t.CDCOps = s.CDCOps + 1\n",
+					"    WHEN NOT MATCHED THEN\n",
+					"      INSERT (SettlementDate, VersionNo, PeriodId, ParticipantId, StationId, DUID, GenSetId, RegionId, GEnergy, AEnergy, GPower, APower, RRP, EEP, TLF, CPRRP, CPEEP, NetEnergy, EnergyCost, ExcessEnergyCost, APC, RESC, RESP, LastChanged, ExpEnergy, ExpEnergyCost, MeterRunNo, MDA, SecondaryTLF, CDCLoadDate, CDCStartDate, CDCEndDate, CDCOps, CDCCurrentFlag, HashKey, HashDiff)\n",
+					"      VALUES (s.SETTLEMENTDATE, s.VERSIONNO, s.PERIODID, s.PARTICIPANTID, s.STATIONID, s.DUID, s.GENSETID, s.REGIONID, s.GENERGY, s.AENERGY, s.GPOWER, s.APOWER, s.RRP, s.EEP, s.TLF, s.CPRRP, s.CPEEP, s.NETENERGY, s.ENERGYCOST, s.EXCESSENERGYCOST, s.APC, s.RESC, s.RESP, s.LASTCHANGED, s.EXPENERGY, s.EXPENERGYCOST, s.METERRUNNO, s.MDA, s.SECONDARY_TLF, s.CDCLoadDate, s.CDCStartDate, s.CDCEndDate, 1, s.CDCCurrentFlag, s.HashKey, s.HashDiff)\n",
+					"\"\"\")\n",
+					""
+				],
+				"execution_count": 112
+			},
+			{
+				"cell_type": "code",
+				"metadata": {
+					"jupyter": {
+						"source_hidden": false,
+						"outputs_hidden": false
+					},
+					"nteract": {
+						"transient": {
+							"deleting": false
+						}
+					}
+				},
+				"source": [
+					"#Row count parameters\n",
+					"Bronze_Insert_Post=spark.sql(f\"\"\" SELECT COUNT(*) FROM {db_notebookname}.{db_tablename} WHERE CDCOps = 1 \"\"\").collect()[0][0]\n",
+					"Bronze_Update_Post=spark.sql(f\"\"\" SELECT COUNT(*) FROM {db_notebookname}.{db_tablename} WHERE CDCOps = 2 \"\"\").collect()[0][0]\n",
+					"Bronze_Delete_Post=spark.sql(f\"\"\" SELECT COUNT(*) FROM {db_notebookname}.{db_tablename} WHERE CDCOps = 0 \"\"\").collect()[0][0]\n",
+					"Bronze_TotalRowCount_Post=spark.sql(f\"\"\" SELECT COUNT(*) FROM {db_notebookname}.{db_tablename}\"\"\").collect()[0][0]\n",
+					"Bronze_ActiveRecord_Post=spark.sql(f\"\"\" SELECT COUNT(*) FROM {db_notebookname}.{db_tablename} WHERE CDCCurrentFlag = true \"\"\").collect()[0][0]"
+				],
+				"execution_count": 113
+			},
+			{
+				"cell_type": "code",
+				"metadata": {
+					"jupyter": {
+						"source_hidden": false,
+						"outputs_hidden": false
+					},
+					"nteract": {
+						"transient": {
+							"deleting": false
+						}
+					}
+				},
+				"source": [
+					"#Row calculation\n",
+					"Bronze_Update = Bronze_Update_Post - Bronze_Update_Pre\n",
+					"Bronze_Insert = (Bronze_Insert_Post - Bronze_Insert_Pre) + Bronze_Update\n",
+					"Bronze_Delete = Bronze_Delete_Post - Bronze_Delete_Pre\n",
+					"Bronze_ActiveRows = Bronze_ActiveRecord_Post \n",
+					"Bronze_TotalRows = Bronze_TotalRowCount_Post"
+				],
+				"execution_count": 114
+			},
+			{
+				"cell_type": "code",
+				"metadata": {
+					"jupyter": {
+						"source_hidden": false,
+						"outputs_hidden": false
+					},
+					"nteract": {
+						"transient": {
+							"deleting": false
+						}
+					}
+				},
+				"source": [
+					"log_data = [(db_notebookname,db_tablename,Bronze_LoadDate,Bronze_Insert,Bronze_Update,Bronze_Delete,Bronze_ActiveRows,Bronze_TotalRows)]\n",
+					"print(log_data)\n",
+					"log_columns = ['PIPELINE_NAME', 'TABLE_NAME', 'INGEST_DATETIME', 'INSERT','UPDATE','DELETE','ACTIVE_ROWS','TOTAL_ROWS']\n",
+					"df_log = spark.createDataFrame(log_data, log_columns)"
+				],
+				"execution_count": 115
+			},
+			{
+				"cell_type": "code",
+				"metadata": {
+					"jupyter": {
+						"source_hidden": false,
+						"outputs_hidden": false
+					},
+					"nteract": {
+						"transient": {
+							"deleting": false
+						}
+					},
+					"collapsed": false
+				},
+				"source": [
+					"#Write to controldb\n",
+					"db_port = 1433\n",
+					"linked_service_name = \"LS_SQL_ELTFrameworkDB\"\n",
+					"linkedServiceProperties = json.loads(mssparkutils.credentials.getPropertiesAll(linked_service_name))\n",
+					"sql_server_name = linkedServiceProperties.get('Endpoint')\n",
+					"db_name = linkedServiceProperties.get('Database')\n",
+					"access_token = mssparkutils.credentials.getConnectionStringOrCreds(linked_service_name)\n",
+					"write_table_name = \"[CTL].[CFG_INGESTION_LOGS]\"\n",
+					"\n",
+					"try:\n",
+					"    df_log.write.format(\"jdbc\") \\\n",
+					"        .option(\"url\", \"jdbc:sqlserver://%s:%s\" % (sql_server_name, db_port)) \\\n",
+					"        .option(\"dbtable\", write_table_name) \\\n",
+					"        .option(\"accessToken\", access_token) \\\n",
+					"        .option(\"encrypt\", \"true\") \\\n",
+					"        .option(\"databaseName\", db_name) \\\n",
+					"        .option(\"hostNameInCertificate\", \"*.database.windows.net\") \\\n",
+					"        .mode(\"append\") \\\n",
+					"        .save()\n",
+					"except ValueError as error :\n",
+					"    print(\"MSSQL Connector write failed\", error)\n",
+					"\n",
+					"print(\"MSSQL Connector write(append) succeeded  \")\n",
+					""
+				],
+				"execution_count": 116
+			},
+			{
+				"cell_type": "code",
+				"source": [
+					"# Drop files raw storage files if exists after they have been processed.\n",
+					"from py4j.protocol import Py4JJavaError\n",
+					"\n",
+					"try:\n",
+					"    raw_output_path = f\"abfss://{source_container}@{source_storage}.dfs.core.windows.net/{source_path}/{db_tablename}/\"\n",
+					"    mssparkutils.fs.rm(raw_output_path,recurse=True)\n",
+					"\n",
+					"    print(\"Delete successful\")\n",
+					"\n",
+					"except Py4JJavaError as error :\n",
+					"    if 'org.apache.hadoop.fs.PathNotFoundException' in str (error.java_exception):\n",
+					"        print(\"No such file or directory\")"
+				],
+				"execution_count": 117
+			},
+			{
+				"cell_type": "markdown",
+				"metadata": {
+					"nteract": {
+						"transient": {
+							"deleting": false
+						}
+					}
+				},
+				"source": [
+					"# Table: setgendata: END"
+				]
+			},
+			{
+				"cell_type": "markdown",
+				"metadata": {
+					"nteract": {
+						"transient": {
+							"deleting": false
+						}
+					}
+				},
+				"source": [
+					"# Table: setcpdata: START"
+				]
+			},
+			{
+				"cell_type": "code",
+				"source": [
+					"#Set table name\n",
+					"db_tablename=\"setcpdata\""
+				],
+				"execution_count": 118
+			},
+			{
+				"cell_type": "code",
+				"source": [
+					"#Create Bronze Table\n",
+					"spark.sql(f\"\"\"CREATE DATABASE IF NOT EXISTS {db_notebookname};\"\"\")\n",
+					"spark.sql(f\"\"\"\n",
+					"CREATE TABLE IF NOT EXISTS {db_notebookname}.{db_tablename}\n",
+					"(\n",
+					"\tSettlementDate TIMESTAMP,\n",
+					"    VersionNo BIGINT,\n",
+					"    PeriodId BIGINT,\n",
+					"    ParticipantId STRING,\n",
+					"    TCPID STRING,\n",
+					"    RegionId STRING,\n",
+					"    IGENERGY DECIMAL(16,6),\n",
+					"    XGENERGY DECIMAL(16,6),\n",
+					"    INENERGY DECIMAL(16,6),\n",
+					"    XNENERGY DECIMAL(16,6),\n",
+					"    IPOWER DECIMAL(16,6),\n",
+					"    XPOWER DECIMAL(16,6),\n",
+					"    RRP DECIMAL(20,5),\n",
+					"    EEP DECIMAL(16,6),\n",
+					"    TLF DECIMAL(7,5),\n",
+					"    CPRRP DECIMAL(16,6),\n",
+					"    CPEEP DECIMAL(16,6),\n",
+					"    TA DECIMAL(16,6),\n",
+					"    EP DECIMAL(16,6),\n",
+					"    APC DECIMAL(16,6),\n",
+					"    RESC DECIMAL(16,6),\n",
+					"    RESP DECIMAL(16,6),\n",
+					"    MeterRunNo BIGINT,\n",
+					"    LastChanged TIMESTAMP,\n",
+					"    HostDistributor STRING,\n",
+					"    MDA STRING,\n",
+					"    AFE DECIMAL(18,8),\n",
+					"    DME DECIMAL(18,8),\n",
+					"    UFEA DECIMAL(18,8),\n",
+					"    AGE DECIMAL(18,8),\n",
+					"\tCDCLoadDate TIMESTAMP,\n",
+					"\tCDCStartDate TIMESTAMP,\n",
+					"\tCDCEndDate TIMESTAMP,\n",
+					"\tCDCOps INT,\n",
+					"\tCDCCurrentFlag BOOLEAN,\n",
+					"\tHashKey STRING,\n",
+					"\tHashDiff STRING   \n",
+					")\n",
+					"USING delta\n",
+					"LOCATION 'abfss://{destination_container}@{destination_storage}.dfs.core.windows.net/{destination_path}/{db_tablename}'\n",
+					"\"\"\")"
+				],
+				"execution_count": 119
+			},
+			{
+				"cell_type": "code",
+				"source": [
+					"# load parquet file as dataframe\n",
+					"raw_df = spark.read.format(\"parquet\").load(f'abfss://{source_container}@{source_storage}.dfs.core.windows.net/{source_path}/{db_tablename}/')"
+				],
+				"execution_count": 120
+			},
+			{
+				"cell_type": "code",
+				"source": [
+					"# Add CDC columns\n",
+					"raw_df = raw_df.withColumn(\"HashKey\", sha2(concat_ws(\"||\", \"SETTLEMENTDATE\", \"VERSIONNO\", \"PERIODID\", \"PARTICIPANTID\", \"TCPID\", \"MDA\"), 256))\n",
+					"raw_df = raw_df.withColumn(\"HashDiff\", sha2(concat_ws(\"||\", \"REGIONID\", \"IGENERGY\", \"XGENERGY\", \"INENERGY\", \"XNENERGY\", \"IPOWER\", \"XPOWER\", \"RRP\", \"EEP\", \"TLF\", \"CPRRP\", \"CPEEP\", \"TA\", \"EP\", \"APC\", \"RESC\", \"RESP\", \"METERRUNNO\", \"LASTCHANGED\", \"HOSTDISTRIBUTOR\", \"AFE\", \"DME\", \"UFEA\", \"AGE\"), 256))\n",
+					"raw_df = raw_df.withColumn(\"CDCLoadDate\", to_timestamp(lit(Bronze_LoadDate),'yyyy-MM-dd HH:mm:ss'))\n",
+					"raw_df = raw_df.withColumn(\"CDCStartDate\", to_timestamp(lit(Bronze_LoadDate), 'yyyy-MM-dd HH:mm:ss'))\n",
+					"raw_df = raw_df.withColumn(\"CDCEndDate\", to_timestamp(lit(\"9999-12-31 23:59:59\"), 'yyyy-MM-dd HH:mm:ss'))\n",
+					"raw_df = raw_df.withColumn(\"CDCCurrentFlag\", lit(1))\n",
+					"raw_df = raw_df.withColumn(\"CDCOps\", lit(1))"
+				],
+				"execution_count": 121
+			},
+			{
+				"cell_type": "code",
+				"source": [
+					"# Row count parameters\n",
+					"Bronze_Insert_Pre=spark.sql(f\"\"\" SELECT COUNT(*) FROM {db_notebookname}.{db_tablename} WHERE CDCOps = 1 \"\"\").collect()[0][0]\n",
+					"Bronze_Update_Pre=spark.sql(f\"\"\" SELECT COUNT(*) FROM {db_notebookname}.{db_tablename} WHERE CDCOps = 2 \"\"\").collect()[0][0]\n",
+					"Bronze_Delete_Pre=spark.sql(f\"\"\" SELECT COUNT(*) FROM {db_notebookname}.{db_tablename} WHERE CDCOps = 0 \"\"\").collect()[0][0]"
+				],
+				"execution_count": 122
+			},
+			{
+				"cell_type": "code",
+				"source": [
+					"# SCD2 logic\n",
+					"# Create a temporary view of the dataframe\n",
+					"raw_df.createOrReplaceTempView(\"temp_table\")\n",
+					"\n",
+					"# Use the merge operation to update the target table\n",
+					"spark.sql(f\"\"\"\n",
+					"    MERGE INTO {db_notebookname}.{db_tablename} t\n",
+					"    USING temp_table s\n",
+					"    ON t.HashKey = s.HashKey AND t.CDCCurrentFlag == true\n",
+					"    WHEN MATCHED AND t.HashDiff <> s.HashDiff THEN\n",
+					"      UPDATE SET t.CDCEndDate = '{Bronze_UpdateEndDate}',\n",
+					"                 t.CDCCurrentFlag = false,\n",
+					"                 t.CDCOps = s.CDCOps + 1\n",
+					"    WHEN NOT MATCHED THEN\n",
+					"      INSERT (SettlementDate, VersionNo, PeriodId, ParticipantId, TCPID, RegionId, IGENERGY, XGENERGY, INENERGY, XNENERGY, IPOWER, XPOWER, RRP, EEP, TLF, CPRRP, CPEEP, TA, EP, APC, RESC, RESP, MeterRunNo, LastChanged, HostDistributor, MDA, AFE, DME, UFEA, AGE, CDCLoadDate, CDCStartDate, CDCEndDate, CDCOps, CDCCurrentFlag, HashKey, HashDiff)\n",
+					"      VALUES (s.SETTLEMENTDATE, s.VERSIONNO, s.PERIODID, s.PARTICIPANTID, s.TCPID, s.REGIONID, s.IGENERGY, s.XGENERGY, s.INENERGY, s.XNENERGY, s.IPOWER, s.XPOWER, s.RRP, s.EEP, s.TLF, s.CPRRP, s.CPEEP, s.TA, s.EP, s.APC, s.RESC, s.RESP, s.METERRUNNO, s.LASTCHANGED, s.HOSTDISTRIBUTOR, s.MDA, s.AFE, s.DME, s.UFEA, s.AGE, s.CDCLoadDate, s.CDCStartDate, s.CDCEndDate, 1, s.CDCCurrentFlag, s.HashKey, s.HashDiff)\n",
+					"\"\"\")\n",
+					"\n",
+					"# Use the merge operation to Insert updated record \n",
+					"spark.sql(f\"\"\"\n",
+					"    MERGE INTO {db_notebookname}.{db_tablename} t\n",
+					"    USING temp_table s\n",
+					"    ON t.HashKey = s.HashKey AND t.CDCCurrentFlag == true\n",
+					"    WHEN MATCHED AND t.HashDiff <> s.HashDiff THEN\n",
+					"      UPDATE SET t.CDCEndDate = '{Bronze_UpdateEndDate}',\n",
+					"                 t.CDCCurrentFlag = false,\n",
+					"                 t.CDCOps = s.CDCOps + 1\n",
+					"    WHEN NOT MATCHED THEN\n",
+					"      INSERT (SettlementDate, VersionNo, PeriodId, ParticipantId, TCPID, RegionId, IGENERGY, XGENERGY, INENERGY, XNENERGY, IPOWER, XPOWER, RRP, EEP, TLF, CPRRP, CPEEP, TA, EP, APC, RESC, RESP, MeterRunNo, LastChanged, HostDistributor, MDA, AFE, DME, UFEA, AGE, CDCLoadDate, CDCStartDate, CDCEndDate, CDCOps, CDCCurrentFlag, HashKey, HashDiff)\n",
+					"      VALUES (s.SETTLEMENTDATE, s.VERSIONNO, s.PERIODID, s.PARTICIPANTID, s.TCPID, s.REGIONID, s.IGENERGY, s.XGENERGY, s.INENERGY, s.XNENERGY, s.IPOWER, s.XPOWER, s.RRP, s.EEP, s.TLF, s.CPRRP, s.CPEEP, s.TA, s.EP, s.APC, s.RESC, s.RESP, s.METERRUNNO, s.LASTCHANGED, s.HOSTDISTRIBUTOR, s.MDA, s.AFE, s.DME, s.UFEA, s.AGE, s.CDCLoadDate, s.CDCStartDate, s.CDCEndDate, 1, s.CDCCurrentFlag, s.HashKey, s.HashDiff)\n",
+					"\"\"\")\n",
+					""
+				],
+				"execution_count": 123
+			},
+			{
+				"cell_type": "code",
+				"source": [
+					"#Row count parameters\n",
+					"Bronze_Insert_Post=spark.sql(f\"\"\" SELECT COUNT(*) FROM {db_notebookname}.{db_tablename} WHERE CDCOps = 1 \"\"\").collect()[0][0]\n",
+					"Bronze_Update_Post=spark.sql(f\"\"\" SELECT COUNT(*) FROM {db_notebookname}.{db_tablename} WHERE CDCOps = 2 \"\"\").collect()[0][0]\n",
+					"Bronze_Delete_Post=spark.sql(f\"\"\" SELECT COUNT(*) FROM {db_notebookname}.{db_tablename} WHERE CDCOps = 0 \"\"\").collect()[0][0]\n",
+					"Bronze_TotalRowCount_Post=spark.sql(f\"\"\" SELECT COUNT(*) FROM {db_notebookname}.{db_tablename}\"\"\").collect()[0][0]\n",
+					"Bronze_ActiveRecord_Post=spark.sql(f\"\"\" SELECT COUNT(*) FROM {db_notebookname}.{db_tablename} WHERE CDCCurrentFlag = true \"\"\").collect()[0][0]"
+				],
+				"execution_count": 124
+			},
+			{
+				"cell_type": "code",
+				"source": [
+					"#Row calculation\n",
+					"Bronze_Update = Bronze_Update_Post - Bronze_Update_Pre\n",
+					"Bronze_Insert = (Bronze_Insert_Post - Bronze_Insert_Pre) + Bronze_Update\n",
+					"Bronze_Delete = Bronze_Delete_Post - Bronze_Delete_Pre\n",
+					"Bronze_ActiveRows = Bronze_ActiveRecord_Post \n",
+					"Bronze_TotalRows = Bronze_TotalRowCount_Post"
+				],
+				"execution_count": 125
+			},
+			{
+				"cell_type": "code",
+				"source": [
+					"log_data = [(db_notebookname,db_tablename,Bronze_LoadDate,Bronze_Insert,Bronze_Update,Bronze_Delete,Bronze_ActiveRows,Bronze_TotalRows)]\n",
+					"print(log_data)\n",
+					"log_columns = ['PIPELINE_NAME', 'TABLE_NAME', 'INGEST_DATETIME', 'INSERT','UPDATE','DELETE','ACTIVE_ROWS','TOTAL_ROWS']\n",
+					"df_log = spark.createDataFrame(log_data, log_columns)"
+				],
+				"execution_count": 126
+			},
+			{
+				"cell_type": "code",
+				"source": [
+					"#Write to controldb\n",
+					"db_port = 1433\n",
+					"linked_service_name = \"LS_SQL_ELTFrameworkDB\"\n",
+					"linkedServiceProperties = json.loads(mssparkutils.credentials.getPropertiesAll(linked_service_name))\n",
+					"sql_server_name = linkedServiceProperties.get('Endpoint')\n",
+					"db_name = linkedServiceProperties.get('Database')\n",
+					"access_token = mssparkutils.credentials.getConnectionStringOrCreds(linked_service_name)\n",
+					"write_table_name = \"[CTL].[CFG_INGESTION_LOGS]\"\n",
+					"\n",
+					"try:\n",
+					"    df_log.write.format(\"jdbc\") \\\n",
+					"        .option(\"url\", \"jdbc:sqlserver://%s:%s\" % (sql_server_name, db_port)) \\\n",
+					"        .option(\"dbtable\", write_table_name) \\\n",
+					"        .option(\"accessToken\", access_token) \\\n",
+					"        .option(\"encrypt\", \"true\") \\\n",
+					"        .option(\"databaseName\", db_name) \\\n",
+					"        .option(\"hostNameInCertificate\", \"*.database.windows.net\") \\\n",
+					"        .mode(\"append\") \\\n",
+					"        .save()\n",
+					"except ValueError as error :\n",
+					"    print(\"MSSQL Connector write failed\", error)\n",
+					"\n",
+					"print(\"MSSQL Connector write(append) succeeded  \")"
+				],
+				"execution_count": 127
+			},
+			{
+				"cell_type": "markdown",
+				"metadata": {
+					"nteract": {
+						"transient": {
+							"deleting": false
+						}
+					}
+				},
+				"source": [
+					"# Table: setcpdata: END"
+				]
+			},
+			{
+				"cell_type": "code",
+				"metadata": {
+					"ms_comments": [
+						{
+							"threadId": "54a89500-bf50-47f4-9940-380102a5167c",
+							"text": "why",
+							"status": "active",
+							"user": {
+								"name": "Admin.Su.Seol",
+								"idType": "aad"
+							},
+							"createdDateUTC": 1765172823649,
+							"modifiedDateUTC": 1765172823649,
+							"replies": []
+						}
+					],
+					"ms_comment_ranges": {
+						"54a89500-bf50-47f4-9940-380102a5167c": {
+							"text": "# Drop files raw storage files if exists after they have been processed.\nfrom py4j.protocol import Py4JJavaError\n\ntry:\n    raw_output_path = f\"abfss://{source_container}@{source_storage}.dfs.core.windows.net/{source_path}/{db_tablename}/\"\n    mssparkutils.fs.rm(raw_output_path,recurse=True)\n\n    print(\"Delete successful\")\n\nexcept Py4JJavaError as error :\n    if 'org.apache.hadoop.fs.PathNotFoundException' in str (error.java_exception):\n        print(\"No such file or directory\")",
+							"start": {
+								"line": 1,
+								"column": 1
+							},
+							"end": {
+								"line": 12,
+								"column": 43
+							}
+						}
+					}
+				},
+				"source": [
+					"# Drop files raw storage files if exists after they have been processed.\n",
+					"from py4j.protocol import Py4JJavaError\n",
+					"\n",
+					"try:\n",
+					"    raw_output_path = f\"abfss://{source_container}@{source_storage}.dfs.core.windows.net/{source_path}/{db_tablename}/\"\n",
+					"    mssparkutils.fs.rm(raw_output_path,recurse=True)\n",
+					"\n",
+					"    print(\"Delete successful\")\n",
+					"\n",
+					"except Py4JJavaError as error :\n",
+					"    if 'org.apache.hadoop.fs.PathNotFoundException' in str (error.java_exception):\n",
+					"        print(\"No such file or directory\")"
+				],
+				"execution_count": 128
+			},
+			{
+				"cell_type": "markdown",
+				"metadata": {
+					"nteract": {
+						"transient": {
+							"deleting": false
+						}
+					}
+				},
+				"source": [
+					"# Table: set_energy_transactions: START"
+				]
+			},
+			{
+				"cell_type": "code",
+				"source": [
+					"#Set table name\n",
+					"db_tablename=\"set_energy_transactions\""
+				],
+				"execution_count": 129
+			},
+			{
+				"cell_type": "code",
+				"source": [
+					"#Create Bronze Table\n",
+					"spark.sql(f\"\"\"CREATE DATABASE IF NOT EXISTS {db_notebookname};\"\"\")\n",
+					"spark.sql(f\"\"\"\n",
+					"CREATE TABLE IF NOT EXISTS {db_notebookname}.{db_tablename}\n",
+					"(\n",
+					"    SettlementDate TIMESTAMP,\n",
+					"    VersionNo DECIMAL(3,0),\n",
+					"    PeriodId DECIMAL(3,0),\n",
+					"    ParticipantId STRING,\n",
+					"    ConnectionPointId STRING,\n",
+					"    Meter_Type STRING,\n",
+					"    RegionId STRING,\n",
+					"    RRP DECIMAL(18,8),\n",
+					"    TLF DECIMAL(18,8),\n",
+					"    CE_MWH DECIMAL(18,8),\n",
+					"    UFEA_MWH DECIMAL(18,8),\n",
+					"    ACE_MWH DECIMAL(18,8),\n",
+					"    ASOE_MWH DECIMAL(18,8),\n",
+					"    TOTAL_MWH DECIMAL(18,8),\n",
+					"    ACE_AMOUNT DECIMAL(18,8),\n",
+					"    ASOE_AMOUNT DECIMAL(18,8),\n",
+					"    TOTAL_AMOUNT DECIMAL(18,8),\n",
+					"    Case_Id BIGINT,\n",
+					"    DME_MWH DECIMAL(18,8),\n",
+					"    Aggregate_Read_Flag DECIMAL(3,0),\n",
+					"    Individual_Read_Flag DECIMAL(3,0),\n",
+					"    LastChanged TIMESTAMP,\n",
+					"\tCDCLoadDate TIMESTAMP,\n",
+					"\tCDCStartDate TIMESTAMP,\n",
+					"\tCDCEndDate TIMESTAMP,\n",
+					"\tCDCOps INT,\n",
+					"\tCDCCurrentFlag BOOLEAN,\n",
+					"\tHashKey STRING,\n",
+					"\tHashDiff STRING   \n",
+					")\n",
+					"USING delta\n",
+					"LOCATION 'abfss://{destination_container}@{destination_storage}.dfs.core.windows.net/{destination_path}/{db_tablename}'\n",
+					"\"\"\")"
+				],
+				"execution_count": 130
+			},
+			{
+				"cell_type": "code",
+				"source": [
+					"# load parquet file as dataframe\n",
+					"raw_df = spark.read.format(\"parquet\").load(f'abfss://{source_container}@{source_storage}.dfs.core.windows.net/{source_path}/{db_tablename}/')"
+				],
+				"execution_count": 131
+			},
+			{
+				"cell_type": "code",
+				"source": [
+					"# Add CDC columns\n",
+					"raw_df = raw_df.withColumn(\"HashKey\", sha2(concat_ws(\"||\", \"SETTLEMENTDATE\", \"VERSIONNO\", \"PERIODID\", \"PARTICIPANTID\", \"CONNECTIONPOINTID\", \"METER_TYPE\"), 256))\n",
+					"raw_df = raw_df.withColumn(\"HashDiff\", sha2(concat_ws(\"||\", \"REGIONID\", \"RRP\", \"TLF\", \"CE_MWH\", \"UFEA_MWH\", \"ACE_MWH\", \"ASOE_MWH\", \"TOTAL_MWH\", \"ACE_AMOUNT\", \"ASOE_AMOUNT\", \"TOTAL_AMOUNT\", \"CASE_ID\", \"DME_MWH\", \"AGGREGATE_READ_FLAG\", \"INDIVIDUAL_READ_FLAG\", \"LASTCHANGED\"), 256))\n",
+					"raw_df = raw_df.withColumn(\"CDCLoadDate\", to_timestamp(lit(Bronze_LoadDate),'yyyy-MM-dd HH:mm:ss'))\n",
+					"raw_df = raw_df.withColumn(\"CDCStartDate\", to_timestamp(lit(Bronze_LoadDate), 'yyyy-MM-dd HH:mm:ss'))\n",
+					"raw_df = raw_df.withColumn(\"CDCEndDate\", to_timestamp(lit(\"9999-12-31 23:59:59\"), 'yyyy-MM-dd HH:mm:ss'))\n",
+					"raw_df = raw_df.withColumn(\"CDCCurrentFlag\", lit(1))\n",
+					"raw_df = raw_df.withColumn(\"CDCOps\", lit(1))"
+				],
+				"execution_count": 132
+			},
+			{
+				"cell_type": "code",
+				"source": [
+					"# Row count parameters\n",
+					"Bronze_Insert_Pre=spark.sql(f\"\"\" SELECT COUNT(*) FROM {db_notebookname}.{db_tablename} WHERE CDCOps = 1 \"\"\").collect()[0][0]\n",
+					"Bronze_Update_Pre=spark.sql(f\"\"\" SELECT COUNT(*) FROM {db_notebookname}.{db_tablename} WHERE CDCOps = 2 \"\"\").collect()[0][0]\n",
+					"Bronze_Delete_Pre=spark.sql(f\"\"\" SELECT COUNT(*) FROM {db_notebookname}.{db_tablename} WHERE CDCOps = 0 \"\"\").collect()[0][0]"
+				],
+				"execution_count": 133
+			},
+			{
+				"cell_type": "code",
+				"source": [
+					"# SCD2 logic\n",
+					"# Create a temporary view of the dataframe\n",
+					"raw_df.createOrReplaceTempView(\"temp_table\")\n",
+					"\n",
+					"# Use the merge operation to update the target table\n",
+					"spark.sql(f\"\"\"\n",
+					"    MERGE INTO {db_notebookname}.{db_tablename} t\n",
+					"    USING temp_table s\n",
+					"    ON t.HashKey = s.HashKey AND t.CDCCurrentFlag == true\n",
+					"    WHEN MATCHED AND t.HashDiff <> s.HashDiff THEN\n",
+					"      UPDATE SET t.CDCEndDate = '{Bronze_UpdateEndDate}',\n",
+					"                 t.CDCCurrentFlag = false,\n",
+					"                 t.CDCOps = s.CDCOps + 1\n",
+					"    WHEN NOT MATCHED THEN\n",
+					"      INSERT (SettlementDate, VersionNo, PeriodId, ParticipantId, ConnectionPointId, Meter_Type, RegionId, RRP, TLF, CE_MWH, UFEA_MWH, ACE_MWH, ASOE_MWH, TOTAL_MWH, ACE_AMOUNT, ASOE_AMOUNT, TOTAL_AMOUNT, Case_Id, DME_MWH, Aggregate_Read_Flag, Individual_Read_Flag, LastChanged, CDCLoadDate, CDCStartDate, CDCEndDate, CDCOps, CDCCurrentFlag, HashKey, HashDiff)\n",
+					"      VALUES (s.SETTLEMENTDATE, s.VERSIONNO, s.PERIODID, s.PARTICIPANTID, s.CONNECTIONPOINTID, s.METER_TYPE, s.REGIONID, s.RRP, s.TLF, s.CE_MWH, s.UFEA_MWH, s.ACE_MWH, s.ASOE_MWH, s.TOTAL_MWH, s.ACE_AMOUNT, s.ASOE_AMOUNT, s.TOTAL_AMOUNT, s.CASE_ID, s.DME_MWH, s.AGGREGATE_READ_FLAG, s.INDIVIDUAL_READ_FLAG, s.LASTCHANGED, s.CDCLoadDate, s.CDCStartDate, s.CDCEndDate, 1, s.CDCCurrentFlag, s.HashKey, s.HashDiff)\n",
+					"\"\"\")\n",
+					"\n",
+					"# Use the merge operation to Insert updated record \n",
+					"spark.sql(f\"\"\"\n",
+					"    MERGE INTO {db_notebookname}.{db_tablename} t\n",
+					"    USING temp_table s\n",
+					"    ON t.HashKey = s.HashKey AND t.CDCCurrentFlag == true\n",
+					"    WHEN MATCHED AND t.HashDiff <> s.HashDiff THEN\n",
+					"      UPDATE SET t.CDCEndDate = '{Bronze_UpdateEndDate}',\n",
+					"                 t.CDCCurrentFlag = false,\n",
+					"                 t.CDCOps = s.CDCOps + 1\n",
+					"    WHEN NOT MATCHED THEN\n",
+					"      INSERT (SettlementDate, VersionNo, PeriodId, ParticipantId, ConnectionPointId, Meter_Type, RegionId, RRP, TLF, CE_MWH, UFEA_MWH, ACE_MWH, ASOE_MWH, TOTAL_MWH, ACE_AMOUNT, ASOE_AMOUNT, TOTAL_AMOUNT, Case_Id, DME_MWH, Aggregate_Read_Flag, Individual_Read_Flag, LastChanged, CDCLoadDate, CDCStartDate, CDCEndDate, CDCOps, CDCCurrentFlag, HashKey, HashDiff)\n",
+					"      VALUES (s.SETTLEMENTDATE, s.VERSIONNO, s.PERIODID, s.PARTICIPANTID, s.CONNECTIONPOINTID, s.METER_TYPE, s.REGIONID, s.RRP, s.TLF, s.CE_MWH, s.UFEA_MWH, s.ACE_MWH, s.ASOE_MWH, s.TOTAL_MWH, s.ACE_AMOUNT, s.ASOE_AMOUNT, s.TOTAL_AMOUNT, s.CASE_ID, s.DME_MWH, s.AGGREGATE_READ_FLAG, s.INDIVIDUAL_READ_FLAG, s.LASTCHANGED, s.CDCLoadDate, s.CDCStartDate, s.CDCEndDate, 1, s.CDCCurrentFlag, s.HashKey, s.HashDiff)\n",
+					"\"\"\")\n",
+					""
+				],
+				"execution_count": 134
+			},
+			{
+				"cell_type": "code",
+				"source": [
+					"#Row count parameters\n",
+					"Bronze_Insert_Post=spark.sql(f\"\"\" SELECT COUNT(*) FROM {db_notebookname}.{db_tablename} WHERE CDCOps = 1 \"\"\").collect()[0][0]\n",
+					"Bronze_Update_Post=spark.sql(f\"\"\" SELECT COUNT(*) FROM {db_notebookname}.{db_tablename} WHERE CDCOps = 2 \"\"\").collect()[0][0]\n",
+					"Bronze_Delete_Post=spark.sql(f\"\"\" SELECT COUNT(*) FROM {db_notebookname}.{db_tablename} WHERE CDCOps = 0 \"\"\").collect()[0][0]\n",
+					"Bronze_TotalRowCount_Post=spark.sql(f\"\"\" SELECT COUNT(*) FROM {db_notebookname}.{db_tablename}\"\"\").collect()[0][0]\n",
+					"Bronze_ActiveRecord_Post=spark.sql(f\"\"\" SELECT COUNT(*) FROM {db_notebookname}.{db_tablename} WHERE CDCCurrentFlag = true \"\"\").collect()[0][0]"
+				],
+				"execution_count": 135
+			},
+			{
+				"cell_type": "code",
+				"source": [
+					"#Row calculation\n",
+					"Bronze_Update = Bronze_Update_Post - Bronze_Update_Pre\n",
+					"Bronze_Insert = (Bronze_Insert_Post - Bronze_Insert_Pre) + Bronze_Update\n",
+					"Bronze_Delete = Bronze_Delete_Post - Bronze_Delete_Pre\n",
+					"Bronze_ActiveRows = Bronze_ActiveRecord_Post \n",
+					"Bronze_TotalRows = Bronze_TotalRowCount_Post"
+				],
+				"execution_count": 136
+			},
+			{
+				"cell_type": "code",
+				"source": [
+					"log_data = [(db_notebookname,db_tablename,Bronze_LoadDate,Bronze_Insert,Bronze_Update,Bronze_Delete,Bronze_ActiveRows,Bronze_TotalRows)]\n",
+					"print(log_data)\n",
+					"log_columns = ['PIPELINE_NAME', 'TABLE_NAME', 'INGEST_DATETIME', 'INSERT','UPDATE','DELETE','ACTIVE_ROWS','TOTAL_ROWS']\n",
+					"df_log = spark.createDataFrame(log_data, log_columns)"
+				],
+				"execution_count": 137
+			},
+			{
+				"cell_type": "code",
+				"source": [
+					"#Write to controldb\n",
+					"db_port = 1433\n",
+					"linked_service_name = \"LS_SQL_ELTFrameworkDB\"\n",
+					"linkedServiceProperties = json.loads(mssparkutils.credentials.getPropertiesAll(linked_service_name))\n",
+					"sql_server_name = linkedServiceProperties.get('Endpoint')\n",
+					"db_name = linkedServiceProperties.get('Database')\n",
+					"access_token = mssparkutils.credentials.getConnectionStringOrCreds(linked_service_name)\n",
+					"write_table_name = \"[CTL].[CFG_INGESTION_LOGS]\"\n",
+					"\n",
+					"try:\n",
+					"    df_log.write.format(\"jdbc\") \\\n",
+					"        .option(\"url\", \"jdbc:sqlserver://%s:%s\" % (sql_server_name, db_port)) \\\n",
+					"        .option(\"dbtable\", write_table_name) \\\n",
+					"        .option(\"accessToken\", access_token) \\\n",
+					"        .option(\"encrypt\", \"true\") \\\n",
+					"        .option(\"databaseName\", db_name) \\\n",
+					"        .option(\"hostNameInCertificate\", \"*.database.windows.net\") \\\n",
+					"        .mode(\"append\") \\\n",
+					"        .save()\n",
+					"except ValueError as error :\n",
+					"    print(\"MSSQL Connector write failed\", error)\n",
+					"\n",
+					"print(\"MSSQL Connector write(append) succeeded  \")"
+				],
+				"execution_count": 138
+			},
+			{
+				"cell_type": "code",
+				"source": [
+					"# Drop files raw storage files if exists after they have been processed.\n",
+					"from py4j.protocol import Py4JJavaError\n",
+					"\n",
+					"try:\n",
+					"    raw_output_path = f\"abfss://{source_container}@{source_storage}.dfs.core.windows.net/{source_path}/{db_tablename}/\"\n",
+					"    mssparkutils.fs.rm(raw_output_path,recurse=True)\n",
+					"\n",
+					"    print(\"Delete successful\")\n",
+					"\n",
+					"except Py4JJavaError as error :\n",
+					"    if 'org.apache.hadoop.fs.PathNotFoundException' in str (error.java_exception):\n",
+					"        print(\"No such file or directory\")"
+				],
+				"execution_count": 139
+			},
+			{
+				"cell_type": "markdown",
+				"metadata": {
+					"nteract": {
+						"transient": {
+							"deleting": false
+						}
+					}
+				},
+				"source": [
+					"# Table: set_energy_transactions: END"
+				]
+			},
+			{
+				"cell_type": "markdown",
+				"metadata": {
+					"nteract": {
+						"transient": {
+							"deleting": false
+						}
+					}
+				},
+				"source": [
+					"# Table: dudetailsummary: START"
+				]
+			},
+			{
+				"cell_type": "code",
+				"source": [
+					"#Set table name\n",
+					"db_tablename=\"dudetailsummary\""
+				],
+				"execution_count": 140
+			},
+			{
+				"cell_type": "code",
+				"source": [
+					"#Create Bronze Table\n",
+					"spark.sql(f\"\"\"CREATE DATABASE IF NOT EXISTS {db_notebookname};\"\"\")\n",
+					"spark.sql(f\"\"\"\n",
+					"CREATE TABLE IF NOT EXISTS {db_notebookname}.{db_tablename}\n",
+					"(\n",
+					"    DUID STRING,\n",
+					"    StartDate TIMESTAMP,\n",
+					"    EndDate TIMESTAMP,\n",
+					"    DispatchType STRING,\n",
+					"    ConnectionPointId STRING,\n",
+					"    RegionId STRING,\n",
+					"    StationId STRING,\n",
+					"    ParticipantId STRING,\n",
+					"    LastChanged TIMESTAMP,\n",
+					"    TransmissionLossFactor DECIMAL(15,5),\n",
+					"    StartType STRING,\n",
+					"    DistributionLossFactor DECIMAL(15,5),\n",
+					"    MinimumEnergyPrice DECIMAL(9,2),\n",
+					"    MaximumEnergyPrice DECIMAL(9,2),\n",
+					"    ScheduleType STRING,\n",
+					"    MinRampRateUp DECIMAL(6,0),\n",
+					"    MinRampRateDown DECIMAL(6,0),\n",
+					"    MaxRampRateUp DECIMAL(6,0),\n",
+					"    MaxRampRateDown DECIMAL(6,0),\n",
+					"    IsAggregated DECIMAL(1,0),\n",
+					"    DispatchSubType STRING,\n",
+					"    ADG_ID STRING,\n",
+					"    LoadMinimumEnergyPrice DECIMAL(9,2),\n",
+					"    LoadMaximumEnergyPrice DECIMAL(9,2),\n",
+					"    LoadMonRampRateUp DECIMAL(6,0),\n",
+					"    LoadMinRampRateDown DECIMAL(6,0),\n",
+					"    LoadMaxRampRateUp DECIMAL(6,0),\n",
+					"    LoadMaxRampRateDown DECIMAL(6,0),\n",
+					"    SecondaryTLF DECIMAL(18,8),\n",
+					"\tCDCLoadDate TIMESTAMP,\n",
+					"\tCDCStartDate TIMESTAMP,\n",
+					"\tCDCEndDate TIMESTAMP,\n",
+					"\tCDCOps INT,\n",
+					"\tCDCCurrentFlag BOOLEAN,\n",
+					"\tHashKey STRING,\n",
+					"\tHashDiff STRING   \n",
+					")\n",
+					"USING delta\n",
+					"LOCATION 'abfss://{destination_container}@{destination_storage}.dfs.core.windows.net/{destination_path}/{db_tablename}'\n",
+					"\"\"\")"
+				],
+				"execution_count": 141
+			},
+			{
+				"cell_type": "code",
+				"source": [
+					"# load parquet file as dataframe\n",
+					"raw_df = spark.read.format(\"parquet\").load(f'abfss://{source_container}@{source_storage}.dfs.core.windows.net/{source_path}/{db_tablename}/')"
+				],
+				"execution_count": 142
+			},
+			{
+				"cell_type": "code",
+				"source": [
+					"# Add CDC columns\n",
+					"raw_df = raw_df.withColumn(\"HashKey\", sha2(concat_ws(\"||\", \"DUID\", \"START_DATE\", \"END_DATE\"), 256))\n",
+					"\n",
+					"#DEV version excludes ADG_ID\n",
+					"raw_df = raw_df.withColumn(\"HashDiff\", sha2(concat_ws(\"||\", \"DISPATCHTYPE\", \"CONNECTIONPOINTID\", \"REGIONID\", \"STATIONID\", \"PARTICIPANTID\", \"LASTCHANGED\", \"TRANSMISSIONLOSSFACTOR\", \"STARTTYPE\", \"DISTRIBUTIONLOSSFACTOR\", \"MINIMUM_ENERGY_PRICE\", \"MAXIMUM_ENERGY_PRICE\", \"SCHEDULE_TYPE\", \"MIN_RAMP_RATE_UP\", \"MIN_RAMP_RATE_DOWN\", \"MAX_RAMP_RATE_UP\", \"MAX_RAMP_RATE_DOWN\", \"IS_AGGREGATED\", \"DISPATCHSUBTYPE\", \"LOAD_MINIMUM_ENERGY_PRICE\", \"LOAD_MAXIMUM_ENERGY_PRICE\", \"LOAD_MIN_RAMP_RATE_UP\", \"LOAD_MIN_RAMP_RATE_DOWN\", \"LOAD_MAX_RAMP_RATE_UP\", \"LOAD_MAX_RAMP_RATE_DOWN\", \"SECONDARY_TLF\"), 256))\n",
+					"\n",
+					"#PRD version includes ADG_ID\n",
+					"# raw_df = raw_df.withColumn(\"HashDiff\", sha2(concat_ws(\"||\", \"DISPATCHTYPE\", \"CONNECTIONPOINTID\", \"REGIONID\", \"STATIONID\", \"PARTICIPANTID\", \"LASTCHANGED\", \"TRANSMISSIONLOSSFACTOR\", \"STARTTYPE\", \"DISTRIBUTIONLOSSFACTOR\", \"MINIMUM_ENERGY_PRICE\", \"MAXIMUM_ENERGY_PRICE\", \"SCHEDULE_TYPE\", \"MIN_RAMP_RATE_UP\", \"MIN_RAMP_RATE_DOWN\", \"MAX_RAMP_RATE_UP\", \"MAX_RAMP_RATE_DOWN\", \"IS_AGGREGATED\", \"DISPATCHSUBTYPE\", \"ADG_ID\", \"LOAD_MINIMUM_ENERGY_PRICE\", \"LOAD_MAXIMUM_ENERGY_PRICE\", \"LOAD_MIN_RAMP_RATE_UP\", \"LOAD_MIN_RAMP_RATE_DOWN\", \"LOAD_MAX_RAMP_RATE_UP\", \"LOAD_MAX_RAMP_RATE_DOWN\", \"SECONDARY_TLF\"), 256))\n",
+					"raw_df = raw_df.withColumn(\"CDCLoadDate\", to_timestamp(lit(Bronze_LoadDate),'yyyy-MM-dd HH:mm:ss'))\n",
+					"raw_df = raw_df.withColumn(\"CDCStartDate\", to_timestamp(lit(Bronze_LoadDate), 'yyyy-MM-dd HH:mm:ss'))\n",
+					"raw_df = raw_df.withColumn(\"CDCEndDate\", to_timestamp(lit(\"9999-12-31 23:59:59\"), 'yyyy-MM-dd HH:mm:ss'))\n",
+					"raw_df = raw_df.withColumn(\"CDCCurrentFlag\", lit(1))\n",
+					"raw_df = raw_df.withColumn(\"CDCOps\", lit(1))"
+				],
+				"execution_count": 143
+			},
+			{
+				"cell_type": "code",
+				"source": [
+					"# Row count parameters\n",
+					"Bronze_Insert_Pre=spark.sql(f\"\"\" SELECT COUNT(*) FROM {db_notebookname}.{db_tablename} WHERE CDCOps = 1 \"\"\").collect()[0][0]\n",
+					"Bronze_Update_Pre=spark.sql(f\"\"\" SELECT COUNT(*) FROM {db_notebookname}.{db_tablename} WHERE CDCOps = 2 \"\"\").collect()[0][0]\n",
+					"Bronze_Delete_Pre=spark.sql(f\"\"\" SELECT COUNT(*) FROM {db_notebookname}.{db_tablename} WHERE CDCOps = 0 \"\"\").collect()[0][0]"
+				],
+				"execution_count": 144
+			},
+			{
+				"cell_type": "code",
+				"source": [
+					"# SCD2 logic\n",
+					"# Create a temporary view of the dataframe\n",
+					"raw_df.createOrReplaceTempView(\"temp_table\")\n",
+					"\n",
+					"# Use the merge operation to update the target table\n",
+					"spark.sql(f\"\"\"\n",
+					"    MERGE INTO {db_notebookname}.{db_tablename} t\n",
+					"    USING temp_table s\n",
+					"    ON t.HashKey = s.HashKey AND t.CDCCurrentFlag == true\n",
+					"    WHEN MATCHED AND t.HashDiff <> s.HashDiff THEN\n",
+					"      UPDATE SET t.CDCEndDate = '{Bronze_UpdateEndDate}',\n",
+					"                 t.CDCCurrentFlag = false,\n",
+					"                 t.CDCOps = s.CDCOps + 1\n",
+					"    WHEN NOT MATCHED THEN\n",
+					"    --DEV version excludes ADG_ID\n",
+					"      INSERT (DUID, StartDate, EndDate, DispatchType, ConnectionPointId, RegionId, StationId, ParticipantId, LastChanged, TransmissionLossFactor, StartType, DistributionLossFactor, MinimumEnergyPrice, MaximumEnergyPrice, ScheduleType, MinRampRateUp, MinRampRateDown, MaxRampRateUp, MaxRampRateDown, IsAggregated, DispatchSubType, LoadMinimumEnergyPrice, LoadMaximumEnergyPrice, LoadMonRampRateUp, LoadMinRampRateDown, LoadMaxRampRateUp, LoadMaxRampRateDown, SecondaryTLF, CDCLoadDate, CDCStartDate, CDCEndDate, CDCOps, CDCCurrentFlag, HashKey, HashDiff)\n",
+					"      VALUES (s.DUID, s.START_DATE, s.END_DATE, s.DISPATCHTYPE, s.CONNECTIONPOINTID, s.REGIONID, s.STATIONID, s.PARTICIPANTID, s.LASTCHANGED, s.TRANSMISSIONLOSSFACTOR, s.STARTTYPE, s.DISTRIBUTIONLOSSFACTOR, s.MINIMUM_ENERGY_PRICE, s.MAXIMUM_ENERGY_PRICE, s.SCHEDULE_TYPE, s.MIN_RAMP_RATE_UP, s.MIN_RAMP_RATE_DOWN, s.MAX_RAMP_RATE_UP, s.MAX_RAMP_RATE_DOWN, s.IS_AGGREGATED, s.DISPATCHSUBTYPE, s.LOAD_MINIMUM_ENERGY_PRICE, s.LOAD_MAXIMUM_ENERGY_PRICE, s.LOAD_MIN_RAMP_RATE_UP, s.LOAD_MIN_RAMP_RATE_DOWN, s.LOAD_MAX_RAMP_RATE_UP, s.LOAD_MAX_RAMP_RATE_DOWN, s.SECONDARY_TLF, s.CDCLoadDate, s.CDCStartDate, s.CDCEndDate, 1, s.CDCCurrentFlag, s.HashKey, s.HashDiff)\n",
+					"\n",
+					"    --PRD version includes ADG_ID\n",
+					"      --INSERT (DUID, StartDate, EndDate, DispatchType, ConnectionPointId, RegionId, StationId, ParticipantId, LastChanged, TransmissionLossFactor, StartType, DistributionLossFactor, MinimumEnergyPrice, MaximumEnergyPrice, ScheduleType, MinRampRateUp, MinRampRateDown, MaxRampRateUp, MaxRampRateDown, IsAggregated, DispatchSubType, ADG_ID, LoadMinimumEnergyPrice, LoadMaximumEnergyPrice, LoadMonRampRateUp, LoadMinRampRateDown, LoadMaxRampRateUp, LoadMaxRampRateDown, SecondaryTLF, CDCLoadDate, CDCStartDate, CDCEndDate, CDCOps, CDCCurrentFlag, HashKey, HashDiff)\n",
+					"      --VALUES (s.DUID, s.START_DATE, s.END_DATE, s.DISPATCHTYPE, s.CONNECTIONPOINTID, s.REGIONID, s.STATIONID, s.PARTICIPANTID, s.LASTCHANGED, s.TRANSMISSIONLOSSFACTOR, s.STARTTYPE, s.DISTRIBUTIONLOSSFACTOR, s.MINIMUM_ENERGY_PRICE, s.MAXIMUM_ENERGY_PRICE, s.SCHEDULE_TYPE, s.MIN_RAMP_RATE_UP, s.MIN_RAMP_RATE_DOWN, s.MAX_RAMP_RATE_UP, s.MAX_RAMP_RATE_DOWN, s.IS_AGGREGATED, s.DISPATCHSUBTYPE, s.ADG_ID, s.LOAD_MINIMUM_ENERGY_PRICE, s.LOAD_MAXIMUM_ENERGY_PRICE, s.LOAD_MIN_RAMP_RATE_UP, s.LOAD_MIN_RAMP_RATE_DOWN, s.LOAD_MAX_RAMP_RATE_UP, s.LOAD_MAX_RAMP_RATE_DOWN, s.SECONDARY_TLF, s.CDCLoadDate, s.CDCStartDate, s.CDCEndDate, 1, s.CDCCurrentFlag, s.HashKey, s.HashDiff)\n",
+					"\"\"\")\n",
+					"\n",
+					"# Use the merge operation to Insert updated record \n",
+					"spark.sql(f\"\"\"\n",
+					"    MERGE INTO {db_notebookname}.{db_tablename} t\n",
+					"    USING temp_table s\n",
+					"    ON t.HashKey = s.HashKey AND t.CDCCurrentFlag == true\n",
+					"    WHEN MATCHED AND t.HashDiff <> s.HashDiff THEN\n",
+					"      UPDATE SET t.CDCEndDate = '{Bronze_UpdateEndDate}',\n",
+					"                 t.CDCCurrentFlag = false,\n",
+					"                 t.CDCOps = s.CDCOps + 1\n",
+					"    WHEN NOT MATCHED THEN\n",
+					"    --DEV version excludes ADG_ID\n",
+					"      INSERT (DUID, StartDate, EndDate, DispatchType, ConnectionPointId, RegionId, StationId, ParticipantId, LastChanged, TransmissionLossFactor, StartType, DistributionLossFactor, MinimumEnergyPrice, MaximumEnergyPrice, ScheduleType, MinRampRateUp, MinRampRateDown, MaxRampRateUp, MaxRampRateDown, IsAggregated, DispatchSubType, LoadMinimumEnergyPrice, LoadMaximumEnergyPrice, LoadMonRampRateUp, LoadMinRampRateDown, LoadMaxRampRateUp, LoadMaxRampRateDown, SecondaryTLF, CDCLoadDate, CDCStartDate, CDCEndDate, CDCOps, CDCCurrentFlag, HashKey, HashDiff)\n",
+					"      VALUES (s.DUID, s.START_DATE, s.END_DATE, s.DISPATCHTYPE, s.CONNECTIONPOINTID, s.REGIONID, s.STATIONID, s.PARTICIPANTID, s.LASTCHANGED, s.TRANSMISSIONLOSSFACTOR, s.STARTTYPE, s.DISTRIBUTIONLOSSFACTOR, s.MINIMUM_ENERGY_PRICE, s.MAXIMUM_ENERGY_PRICE, s.SCHEDULE_TYPE, s.MIN_RAMP_RATE_UP, s.MIN_RAMP_RATE_DOWN, s.MAX_RAMP_RATE_UP, s.MAX_RAMP_RATE_DOWN, s.IS_AGGREGATED, s.DISPATCHSUBTYPE, s.LOAD_MINIMUM_ENERGY_PRICE, s.LOAD_MAXIMUM_ENERGY_PRICE, s.LOAD_MIN_RAMP_RATE_UP, s.LOAD_MIN_RAMP_RATE_DOWN, s.LOAD_MAX_RAMP_RATE_UP, s.LOAD_MAX_RAMP_RATE_DOWN, s.SECONDARY_TLF, s.CDCLoadDate, s.CDCStartDate, s.CDCEndDate, 1, s.CDCCurrentFlag, s.HashKey, s.HashDiff)\n",
+					"\n",
+					"    --PRD version includes ADG_ID\n",
+					"      --INSERT (DUID, StartDate, EndDate, DispatchType, ConnectionPointId, RegionId, StationId, ParticipantId, LastChanged, TransmissionLossFactor, StartType, DistributionLossFactor, MinimumEnergyPrice, MaximumEnergyPrice, ScheduleType, MinRampRateUp, MinRampRateDown, MaxRampRateUp, MaxRampRateDown, IsAggregated, DispatchSubType, ADG_ID, LoadMinimumEnergyPrice, LoadMaximumEnergyPrice, LoadMonRampRateUp, LoadMinRampRateDown, LoadMaxRampRateUp, LoadMaxRampRateDown, SecondaryTLF, CDCLoadDate, CDCStartDate, CDCEndDate, CDCOps, CDCCurrentFlag, HashKey, HashDiff)\n",
+					"      --VALUES (s.DUID, s.START_DATE, s.END_DATE, s.DISPATCHTYPE, s.CONNECTIONPOINTID, s.REGIONID, s.STATIONID, s.PARTICIPANTID, s.LASTCHANGED, s.TRANSMISSIONLOSSFACTOR, s.STARTTYPE, s.DISTRIBUTIONLOSSFACTOR, s.MINIMUM_ENERGY_PRICE, s.MAXIMUM_ENERGY_PRICE, s.SCHEDULE_TYPE, s.MIN_RAMP_RATE_UP, s.MIN_RAMP_RATE_DOWN, s.MAX_RAMP_RATE_UP, s.MAX_RAMP_RATE_DOWN, s.IS_AGGREGATED, s.DISPATCHSUBTYPE, s.ADG_ID, s.LOAD_MINIMUM_ENERGY_PRICE, s.LOAD_MAXIMUM_ENERGY_PRICE, s.LOAD_MIN_RAMP_RATE_UP, s.LOAD_MIN_RAMP_RATE_DOWN, s.LOAD_MAX_RAMP_RATE_UP, s.LOAD_MAX_RAMP_RATE_DOWN, s.SECONDARY_TLF, s.CDCLoadDate, s.CDCStartDate, s.CDCEndDate, 1, s.CDCCurrentFlag, s.HashKey, s.HashDiff)\n",
+					"\"\"\")\n",
+					""
+				],
+				"execution_count": 145
+			},
+			{
+				"cell_type": "code",
+				"source": [
+					"#Row count parameters\n",
+					"Bronze_Insert_Post=spark.sql(f\"\"\" SELECT COUNT(*) FROM {db_notebookname}.{db_tablename} WHERE CDCOps = 1 \"\"\").collect()[0][0]\n",
+					"Bronze_Update_Post=spark.sql(f\"\"\" SELECT COUNT(*) FROM {db_notebookname}.{db_tablename} WHERE CDCOps = 2 \"\"\").collect()[0][0]\n",
+					"Bronze_Delete_Post=spark.sql(f\"\"\" SELECT COUNT(*) FROM {db_notebookname}.{db_tablename} WHERE CDCOps = 0 \"\"\").collect()[0][0]\n",
+					"Bronze_TotalRowCount_Post=spark.sql(f\"\"\" SELECT COUNT(*) FROM {db_notebookname}.{db_tablename}\"\"\").collect()[0][0]\n",
+					"Bronze_ActiveRecord_Post=spark.sql(f\"\"\" SELECT COUNT(*) FROM {db_notebookname}.{db_tablename} WHERE CDCCurrentFlag = true \"\"\").collect()[0][0]"
+				],
+				"execution_count": 146
+			},
+			{
+				"cell_type": "code",
+				"source": [
+					"#Row calculation\n",
+					"Bronze_Update = Bronze_Update_Post - Bronze_Update_Pre\n",
+					"Bronze_Insert = (Bronze_Insert_Post - Bronze_Insert_Pre) + Bronze_Update\n",
+					"Bronze_Delete = Bronze_Delete_Post - Bronze_Delete_Pre\n",
+					"Bronze_ActiveRows = Bronze_ActiveRecord_Post \n",
+					"Bronze_TotalRows = Bronze_TotalRowCount_Post"
+				],
+				"execution_count": 147
+			},
+			{
+				"cell_type": "code",
+				"source": [
+					"log_data = [(db_notebookname,db_tablename,Bronze_LoadDate,Bronze_Insert,Bronze_Update,Bronze_Delete,Bronze_ActiveRows,Bronze_TotalRows)]\n",
+					"print(log_data)\n",
+					"log_columns = ['PIPELINE_NAME', 'TABLE_NAME', 'INGEST_DATETIME', 'INSERT','UPDATE','DELETE','ACTIVE_ROWS','TOTAL_ROWS']\n",
+					"df_log = spark.createDataFrame(log_data, log_columns)"
+				],
+				"execution_count": 148
+			},
+			{
+				"cell_type": "code",
+				"source": [
+					"#Write to controldb\n",
+					"db_port = 1433\n",
+					"linked_service_name = \"LS_SQL_ELTFrameworkDB\"\n",
+					"linkedServiceProperties = json.loads(mssparkutils.credentials.getPropertiesAll(linked_service_name))\n",
+					"sql_server_name = linkedServiceProperties.get('Endpoint')\n",
+					"db_name = linkedServiceProperties.get('Database')\n",
+					"access_token = mssparkutils.credentials.getConnectionStringOrCreds(linked_service_name)\n",
+					"write_table_name = \"[CTL].[CFG_INGESTION_LOGS]\"\n",
+					"\n",
+					"try:\n",
+					"    df_log.write.format(\"jdbc\") \\\n",
+					"        .option(\"url\", \"jdbc:sqlserver://%s:%s\" % (sql_server_name, db_port)) \\\n",
+					"        .option(\"dbtable\", write_table_name) \\\n",
+					"        .option(\"accessToken\", access_token) \\\n",
+					"        .option(\"encrypt\", \"true\") \\\n",
+					"        .option(\"databaseName\", db_name) \\\n",
+					"        .option(\"hostNameInCertificate\", \"*.database.windows.net\") \\\n",
+					"        .mode(\"append\") \\\n",
+					"        .save()\n",
+					"except ValueError as error :\n",
+					"    print(\"MSSQL Connector write failed\", error)\n",
+					"\n",
+					"print(\"MSSQL Connector write(append) succeeded  \")"
+				],
+				"execution_count": 149
+			},
+			{
+				"cell_type": "markdown",
+				"metadata": {
+					"nteract": {
+						"transient": {
+							"deleting": false
+						}
+					}
+				},
+				"source": [
+					"# Table: dudetailsummary: END"
+				]
+			},
+			{
+				"cell_type": "markdown",
+				"metadata": {
+					"nteract": {
+						"transient": {
+							"deleting": false
+						}
+					}
+				},
+				"source": [
+					"# Table: dispatchableunit: START"
+				]
+			},
+			{
+				"cell_type": "code",
+				"source": [
+					"#Set table name\n",
+					"db_tablename=\"dispatchableunit\""
+				],
+				"execution_count": 150
+			},
+			{
+				"cell_type": "code",
+				"source": [
+					"#Create Bronze Table\n",
+					"spark.sql(f\"\"\"CREATE DATABASE IF NOT EXISTS {db_notebookname};\"\"\")\n",
+					"spark.sql(f\"\"\"\n",
+					"CREATE TABLE IF NOT EXISTS {db_notebookname}.{db_tablename}\n",
+					"(   \n",
+					"    DUID STRING,\n",
+					"    DUName STRING,\n",
+					"    UnitType STRING,\n",
+					"    LastChanged TIMESTAMP,\n",
+					"\tCDCLoadDate TIMESTAMP,\n",
+					"\tCDCStartDate TIMESTAMP,\n",
+					"\tCDCEndDate TIMESTAMP,\n",
+					"\tCDCOps INT,\n",
+					"\tCDCCurrentFlag BOOLEAN,\n",
+					"\tHashKey STRING,\n",
+					"\tHashDiff STRING   \n",
+					")\n",
+					"USING delta\n",
+					"LOCATION 'abfss://{destination_container}@{destination_storage}.dfs.core.windows.net/{destination_path}/{db_tablename}'\n",
+					"\"\"\")"
+				],
+				"execution_count": 151
+			},
+			{
+				"cell_type": "code",
+				"source": [
+					"# load parquet file as dataframe\n",
+					"raw_df = spark.read.format(\"parquet\").load(f'abfss://{source_container}@{source_storage}.dfs.core.windows.net/{source_path}/{db_tablename}/')"
+				],
+				"execution_count": 152
+			},
+			{
+				"cell_type": "code",
+				"source": [
+					"# Add CDC columns\n",
+					"raw_df = raw_df.withColumn(\"HashKey\", sha2(concat_ws(\"||\", \"DUID\"), 256))\n",
+					"raw_df = raw_df.withColumn(\"HashDiff\", sha2(concat_ws(\"||\", \"DUNAME\", \"UNITTYPE\", \"LASTCHANGED\"), 256))\n",
+					"raw_df = raw_df.withColumn(\"CDCLoadDate\", to_timestamp(lit(Bronze_LoadDate),'yyyy-MM-dd HH:mm:ss'))\n",
+					"raw_df = raw_df.withColumn(\"CDCStartDate\", to_timestamp(lit(Bronze_LoadDate), 'yyyy-MM-dd HH:mm:ss'))\n",
+					"raw_df = raw_df.withColumn(\"CDCEndDate\", to_timestamp(lit(\"9999-12-31 23:59:59\"), 'yyyy-MM-dd HH:mm:ss'))\n",
+					"raw_df = raw_df.withColumn(\"CDCCurrentFlag\", lit(1))\n",
+					"raw_df = raw_df.withColumn(\"CDCOps\", lit(1))"
+				],
+				"execution_count": 153
+			},
+			{
+				"cell_type": "code",
+				"source": [
+					"# Row count parameters\n",
+					"Bronze_Insert_Pre=spark.sql(f\"\"\" SELECT COUNT(*) FROM {db_notebookname}.{db_tablename} WHERE CDCOps = 1 \"\"\").collect()[0][0]\n",
+					"Bronze_Update_Pre=spark.sql(f\"\"\" SELECT COUNT(*) FROM {db_notebookname}.{db_tablename} WHERE CDCOps = 2 \"\"\").collect()[0][0]\n",
+					"Bronze_Delete_Pre=spark.sql(f\"\"\" SELECT COUNT(*) FROM {db_notebookname}.{db_tablename} WHERE CDCOps = 0 \"\"\").collect()[0][0]"
+				],
+				"execution_count": 154
+			},
+			{
+				"cell_type": "code",
+				"source": [
+					"# SCD2 logic\n",
+					"# Create a temporary view of the dataframe\n",
+					"raw_df.createOrReplaceTempView(\"temp_table\")\n",
+					"\n",
+					"# Use the merge operation to update the target table\n",
+					"spark.sql(f\"\"\"\n",
+					"    MERGE INTO {db_notebookname}.{db_tablename} t\n",
+					"    USING temp_table s\n",
+					"    ON t.HashKey = s.HashKey AND t.CDCCurrentFlag == true\n",
+					"    WHEN MATCHED AND t.HashDiff <> s.HashDiff THEN\n",
+					"      UPDATE SET t.CDCEndDate = '{Bronze_UpdateEndDate}',\n",
+					"                 t.CDCCurrentFlag = false,\n",
+					"                 t.CDCOps = s.CDCOps + 1\n",
+					"    WHEN NOT MATCHED THEN\n",
+					"      INSERT (DUID, DUName, UnitType, LastChanged, CDCLoadDate, CDCStartDate, CDCEndDate, CDCOps, CDCCurrentFlag, HashKey, HashDiff)\n",
+					"      VALUES (S.DUID, S.DUNAME, S.UNITTYPE, S.LASTCHANGED, s.CDCLoadDate, s.CDCStartDate, s.CDCEndDate, 1, s.CDCCurrentFlag, s.HashKey, s.HashDiff)\n",
+					"\"\"\")\n",
+					"\n",
+					"# Use the merge operation to Insert updated record \n",
+					"spark.sql(f\"\"\"\n",
+					"    MERGE INTO {db_notebookname}.{db_tablename} t\n",
+					"    USING temp_table s\n",
+					"    ON t.HashKey = s.HashKey AND t.CDCCurrentFlag == true\n",
+					"    WHEN MATCHED AND t.HashDiff <> s.HashDiff THEN\n",
+					"      UPDATE SET t.CDCEndDate = '{Bronze_UpdateEndDate}',\n",
+					"                 t.CDCCurrentFlag = false,\n",
+					"                 t.CDCOps = s.CDCOps + 1\n",
+					"    WHEN NOT MATCHED THEN\n",
+					"      INSERT (DUID, DUName, UnitType, LastChanged, CDCLoadDate, CDCStartDate, CDCEndDate, CDCOps, CDCCurrentFlag, HashKey, HashDiff)\n",
+					"      VALUES (S.DUID, S.DUNAME, S.UNITTYPE, S.LASTCHANGED, s.CDCLoadDate, s.CDCStartDate, s.CDCEndDate, 1, s.CDCCurrentFlag, s.HashKey, s.HashDiff)\n",
+					"\"\"\")\n",
+					""
+				],
+				"execution_count": 155
+			},
+			{
+				"cell_type": "code",
+				"source": [
+					"#Row count parameters\n",
+					"Bronze_Insert_Post=spark.sql(f\"\"\" SELECT COUNT(*) FROM {db_notebookname}.{db_tablename} WHERE CDCOps = 1 \"\"\").collect()[0][0]\n",
+					"Bronze_Update_Post=spark.sql(f\"\"\" SELECT COUNT(*) FROM {db_notebookname}.{db_tablename} WHERE CDCOps = 2 \"\"\").collect()[0][0]\n",
+					"Bronze_Delete_Post=spark.sql(f\"\"\" SELECT COUNT(*) FROM {db_notebookname}.{db_tablename} WHERE CDCOps = 0 \"\"\").collect()[0][0]\n",
+					"Bronze_TotalRowCount_Post=spark.sql(f\"\"\" SELECT COUNT(*) FROM {db_notebookname}.{db_tablename}\"\"\").collect()[0][0]\n",
+					"Bronze_ActiveRecord_Post=spark.sql(f\"\"\" SELECT COUNT(*) FROM {db_notebookname}.{db_tablename} WHERE CDCCurrentFlag = true \"\"\").collect()[0][0]"
+				],
+				"execution_count": 156
+			},
+			{
+				"cell_type": "code",
+				"source": [
+					"#Row calculation\n",
+					"Bronze_Update = Bronze_Update_Post - Bronze_Update_Pre\n",
+					"Bronze_Insert = (Bronze_Insert_Post - Bronze_Insert_Pre) + Bronze_Update\n",
+					"Bronze_Delete = Bronze_Delete_Post - Bronze_Delete_Pre\n",
+					"Bronze_ActiveRows = Bronze_ActiveRecord_Post \n",
+					"Bronze_TotalRows = Bronze_TotalRowCount_Post"
+				],
+				"execution_count": 157
+			},
+			{
+				"cell_type": "code",
+				"source": [
+					"log_data = [(db_notebookname,db_tablename,Bronze_LoadDate,Bronze_Insert,Bronze_Update,Bronze_Delete,Bronze_ActiveRows,Bronze_TotalRows)]\n",
+					"print(log_data)\n",
+					"log_columns = ['PIPELINE_NAME', 'TABLE_NAME', 'INGEST_DATETIME', 'INSERT','UPDATE','DELETE','ACTIVE_ROWS','TOTAL_ROWS']\n",
+					"df_log = spark.createDataFrame(log_data, log_columns)"
+				],
+				"execution_count": 158
+			},
+			{
+				"cell_type": "code",
+				"source": [
+					"#Write to controldb\n",
+					"db_port = 1433\n",
+					"linked_service_name = \"LS_SQL_ELTFrameworkDB\"\n",
+					"linkedServiceProperties = json.loads(mssparkutils.credentials.getPropertiesAll(linked_service_name))\n",
+					"sql_server_name = linkedServiceProperties.get('Endpoint')\n",
+					"db_name = linkedServiceProperties.get('Database')\n",
+					"access_token = mssparkutils.credentials.getConnectionStringOrCreds(linked_service_name)\n",
+					"write_table_name = \"[CTL].[CFG_INGESTION_LOGS]\"\n",
+					"\n",
+					"try:\n",
+					"    df_log.write.format(\"jdbc\") \\\n",
+					"        .option(\"url\", \"jdbc:sqlserver://%s:%s\" % (sql_server_name, db_port)) \\\n",
+					"        .option(\"dbtable\", write_table_name) \\\n",
+					"        .option(\"accessToken\", access_token) \\\n",
+					"        .option(\"encrypt\", \"true\") \\\n",
+					"        .option(\"databaseName\", db_name) \\\n",
+					"        .option(\"hostNameInCertificate\", \"*.database.windows.net\") \\\n",
+					"        .mode(\"append\") \\\n",
+					"        .save()\n",
+					"except ValueError as error :\n",
+					"    print(\"MSSQL Connector write failed\", error)\n",
+					"\n",
+					"print(\"MSSQL Connector write(append) succeeded  \")"
+				],
+				"execution_count": 159
+			},
+			{
+				"cell_type": "markdown",
+				"metadata": {
+					"nteract": {
+						"transient": {
+							"deleting": false
+						}
+					}
+				},
+				"source": [
+					"# Table: dispatchableunit: END"
+				]
+			},
+			{
+				"cell_type": "markdown",
+				"metadata": {
+					"nteract": {
+						"transient": {
+							"deleting": false
+						}
+					}
+				},
+				"source": [
+					"# Table: station: START"
+				]
+			},
+			{
+				"cell_type": "code",
+				"source": [
+					"#Set table name\n",
+					"db_tablename=\"station\""
+				],
+				"execution_count": 160
+			},
+			{
+				"cell_type": "code",
+				"source": [
+					"#Create Bronze Table\n",
+					"spark.sql(f\"\"\"CREATE DATABASE IF NOT EXISTS {db_notebookname};\"\"\")\n",
+					"spark.sql(f\"\"\"\n",
+					"CREATE TABLE IF NOT EXISTS {db_notebookname}.{db_tablename}\n",
+					"(\n",
+					"\tStationID STRING,\n",
+					"    StationName STRING,\n",
+					"    Address1 STRING,\n",
+					"    Address2 STRING,\n",
+					"    Address3 STRING,\n",
+					"    Address5 STRING,\n",
+					"    City STRING,\n",
+					"    State STRING,\n",
+					"    PostCode STRING,\n",
+					"    LastChanged TIMESTAMP,\n",
+					"    ConnectionPointId STRING,\n",
+					"\tCDCLoadDate TIMESTAMP,\n",
+					"\tCDCStartDate TIMESTAMP,\n",
+					"\tCDCEndDate TIMESTAMP,\n",
+					"\tCDCOps INT,\n",
+					"\tCDCCurrentFlag BOOLEAN,\n",
+					"\tHashKey STRING,\n",
+					"\tHashDiff STRING   \n",
+					")\n",
+					"USING delta\n",
+					"LOCATION 'abfss://{destination_container}@{destination_storage}.dfs.core.windows.net/{destination_path}/{db_tablename}'\n",
+					"\"\"\")"
+				],
+				"execution_count": 161
+			},
+			{
+				"cell_type": "code",
+				"source": [
+					"# load parquet file as dataframe\n",
+					"raw_df = spark.read.format(\"parquet\").load(f'abfss://{source_container}@{source_storage}.dfs.core.windows.net/{source_path}/{db_tablename}/')"
+				],
+				"execution_count": 162
+			},
+			{
+				"cell_type": "code",
+				"source": [
+					"# Add CDC columns\n",
+					"raw_df = raw_df.withColumn(\"HashKey\", sha2(concat_ws(\"||\", \"STATIONID\"), 256))\n",
+					"raw_df = raw_df.withColumn(\"HashDiff\", sha2(concat_ws(\"||\", \"STATIONNAME\", \"ADDRESS1\", \"ADDRESS2\", \"ADDRESS3\", \"ADDRESS4\", \"CITY\", \"STATE\", \"POSTCODE\", \"LASTCHANGED\", \"CONNECTIONPOINTID\"), 256))\n",
+					"raw_df = raw_df.withColumn(\"CDCLoadDate\", to_timestamp(lit(Bronze_LoadDate),'yyyy-MM-dd HH:mm:ss'))\n",
+					"raw_df = raw_df.withColumn(\"CDCStartDate\", to_timestamp(lit(Bronze_LoadDate), 'yyyy-MM-dd HH:mm:ss'))\n",
+					"raw_df = raw_df.withColumn(\"CDCEndDate\", to_timestamp(lit(\"9999-12-31 23:59:59\"), 'yyyy-MM-dd HH:mm:ss'))\n",
+					"raw_df = raw_df.withColumn(\"CDCCurrentFlag\", lit(1))\n",
+					"raw_df = raw_df.withColumn(\"CDCOps\", lit(1))"
+				],
+				"execution_count": 163
+			},
+			{
+				"cell_type": "code",
+				"source": [
+					"# Row count parameters\n",
+					"Bronze_Insert_Pre=spark.sql(f\"\"\" SELECT COUNT(*) FROM {db_notebookname}.{db_tablename} WHERE CDCOps = 1 \"\"\").collect()[0][0]\n",
+					"Bronze_Update_Pre=spark.sql(f\"\"\" SELECT COUNT(*) FROM {db_notebookname}.{db_tablename} WHERE CDCOps = 2 \"\"\").collect()[0][0]\n",
+					"Bronze_Delete_Pre=spark.sql(f\"\"\" SELECT COUNT(*) FROM {db_notebookname}.{db_tablename} WHERE CDCOps = 0 \"\"\").collect()[0][0]"
+				],
+				"execution_count": 164
+			},
+			{
+				"cell_type": "code",
+				"source": [
+					"# SCD2 logic\n",
+					"# Create a temporary view of the dataframe\n",
+					"raw_df.createOrReplaceTempView(\"temp_table\")\n",
+					"\n",
+					"# Use the merge operation to update the target table\n",
+					"spark.sql(f\"\"\"\n",
+					"    MERGE INTO {db_notebookname}.{db_tablename} t\n",
+					"    USING temp_table s\n",
+					"    ON t.HashKey = s.HashKey AND t.CDCCurrentFlag == true\n",
+					"    WHEN MATCHED AND t.HashDiff <> s.HashDiff THEN\n",
+					"      UPDATE SET t.CDCEndDate = '{Bronze_UpdateEndDate}',\n",
+					"                 t.CDCCurrentFlag = false,\n",
+					"                 t.CDCOps = s.CDCOps + 1\n",
+					"    WHEN NOT MATCHED THEN\n",
+					"      INSERT (StationID, StationName, Address1, Address2, Address3, Address5, City, State, PostCode, LastChanged, ConnectionPointId, CDCLoadDate, CDCStartDate, CDCEndDate, CDCOps, CDCCurrentFlag, HashKey, HashDiff)\n",
+					"      VALUES (s.STATIONID, s.STATIONNAME, s.ADDRESS1, s.ADDRESS2, s.ADDRESS3, s.ADDRESS4, s.CITY, s.STATE, s.POSTCODE, s.LASTCHANGED, s.CONNECTIONPOINTID, s.CDCLoadDate, s.CDCStartDate, s.CDCEndDate, 1, s.CDCCurrentFlag, s.HashKey, s.HashDiff)\n",
+					"\"\"\")\n",
+					"\n",
+					"# Use the merge operation to Insert updated record \n",
+					"spark.sql(f\"\"\"\n",
+					"    MERGE INTO {db_notebookname}.{db_tablename} t\n",
+					"    USING temp_table s\n",
+					"    ON t.HashKey = s.HashKey AND t.CDCCurrentFlag == true\n",
+					"    WHEN MATCHED AND t.HashDiff <> s.HashDiff THEN\n",
+					"      UPDATE SET t.CDCEndDate = '{Bronze_UpdateEndDate}',\n",
+					"                 t.CDCCurrentFlag = false,\n",
+					"                 t.CDCOps = s.CDCOps + 1\n",
+					"    WHEN NOT MATCHED THEN\n",
+					"      INSERT (StationID, StationName, Address1, Address2, Address3, Address5, City, State, PostCode, LastChanged, ConnectionPointId, CDCLoadDate, CDCStartDate, CDCEndDate, CDCOps, CDCCurrentFlag, HashKey, HashDiff)\n",
+					"      VALUES (s.STATIONID, s.STATIONNAME, s.ADDRESS1, s.ADDRESS2, s.ADDRESS3, s.ADDRESS4, s.CITY, s.STATE, s.POSTCODE, s.LASTCHANGED, s.CONNECTIONPOINTID, s.CDCLoadDate, s.CDCStartDate, s.CDCEndDate, 1, s.CDCCurrentFlag, s.HashKey, s.HashDiff)\n",
+					"\"\"\")\n",
+					""
+				],
+				"execution_count": 165
+			},
+			{
+				"cell_type": "code",
+				"source": [
+					"#Row count parameters\n",
+					"Bronze_Insert_Post=spark.sql(f\"\"\" SELECT COUNT(*) FROM {db_notebookname}.{db_tablename} WHERE CDCOps = 1 \"\"\").collect()[0][0]\n",
+					"Bronze_Update_Post=spark.sql(f\"\"\" SELECT COUNT(*) FROM {db_notebookname}.{db_tablename} WHERE CDCOps = 2 \"\"\").collect()[0][0]\n",
+					"Bronze_Delete_Post=spark.sql(f\"\"\" SELECT COUNT(*) FROM {db_notebookname}.{db_tablename} WHERE CDCOps = 0 \"\"\").collect()[0][0]\n",
+					"Bronze_TotalRowCount_Post=spark.sql(f\"\"\" SELECT COUNT(*) FROM {db_notebookname}.{db_tablename}\"\"\").collect()[0][0]\n",
+					"Bronze_ActiveRecord_Post=spark.sql(f\"\"\" SELECT COUNT(*) FROM {db_notebookname}.{db_tablename} WHERE CDCCurrentFlag = true \"\"\").collect()[0][0]"
+				],
+				"execution_count": 166
+			},
+			{
+				"cell_type": "code",
+				"source": [
+					"#Row calculation\n",
+					"Bronze_Update = Bronze_Update_Post - Bronze_Update_Pre\n",
+					"Bronze_Insert = (Bronze_Insert_Post - Bronze_Insert_Pre) + Bronze_Update\n",
+					"Bronze_Delete = Bronze_Delete_Post - Bronze_Delete_Pre\n",
+					"Bronze_ActiveRows = Bronze_ActiveRecord_Post \n",
+					"Bronze_TotalRows = Bronze_TotalRowCount_Post"
+				],
+				"execution_count": 167
+			},
+			{
+				"cell_type": "code",
+				"source": [
+					"log_data = [(db_notebookname,db_tablename,Bronze_LoadDate,Bronze_Insert,Bronze_Update,Bronze_Delete,Bronze_ActiveRows,Bronze_TotalRows)]\n",
+					"print(log_data)\n",
+					"log_columns = ['PIPELINE_NAME', 'TABLE_NAME', 'INGEST_DATETIME', 'INSERT','UPDATE','DELETE','ACTIVE_ROWS','TOTAL_ROWS']\n",
+					"df_log = spark.createDataFrame(log_data, log_columns)"
+				],
+				"execution_count": 168
+			},
+			{
+				"cell_type": "code",
+				"source": [
+					"#Write to controldb\n",
+					"db_port = 1433\n",
+					"linked_service_name = \"LS_SQL_ELTFrameworkDB\"\n",
+					"linkedServiceProperties = json.loads(mssparkutils.credentials.getPropertiesAll(linked_service_name))\n",
+					"sql_server_name = linkedServiceProperties.get('Endpoint')\n",
+					"db_name = linkedServiceProperties.get('Database')\n",
+					"access_token = mssparkutils.credentials.getConnectionStringOrCreds(linked_service_name)\n",
+					"write_table_name = \"[CTL].[CFG_INGESTION_LOGS]\"\n",
+					"\n",
+					"try:\n",
+					"    df_log.write.format(\"jdbc\") \\\n",
+					"        .option(\"url\", \"jdbc:sqlserver://%s:%s\" % (sql_server_name, db_port)) \\\n",
+					"        .option(\"dbtable\", write_table_name) \\\n",
+					"        .option(\"accessToken\", access_token) \\\n",
+					"        .option(\"encrypt\", \"true\") \\\n",
+					"        .option(\"databaseName\", db_name) \\\n",
+					"        .option(\"hostNameInCertificate\", \"*.database.windows.net\") \\\n",
+					"        .mode(\"append\") \\\n",
+					"        .save()\n",
+					"except ValueError as error :\n",
+					"    print(\"MSSQL Connector write failed\", error)\n",
+					"\n",
+					"print(\"MSSQL Connector write(append) succeeded  \")"
+				],
+				"execution_count": 169
+			},
+			{
+				"cell_type": "markdown",
+				"metadata": {
+					"nteract": {
+						"transient": {
+							"deleting": false
+						}
+					}
+				},
+				"source": [
+					"# Table: station: END"
+				]
+			},
+			{
+				"cell_type": "markdown",
+				"metadata": {
+					"nteract": {
+						"transient": {
+							"deleting": false
+						}
+					}
+				},
+				"source": [
+					"# Table: stationowner: START"
+				]
+			},
+			{
+				"cell_type": "code",
+				"source": [
+					"#Set table name\n",
+					"db_tablename=\"stationowner\""
+				],
+				"execution_count": 170
+			},
+			{
+				"cell_type": "code",
+				"source": [
+					"#Create Bronze Table\n",
+					"spark.sql(f\"\"\"CREATE DATABASE IF NOT EXISTS {db_notebookname};\"\"\")\n",
+					"spark.sql(f\"\"\"\n",
+					"CREATE TABLE IF NOT EXISTS {db_notebookname}.{db_tablename}\n",
+					"(\n",
+					"    EffectiveDate TIMESTAMP,\n",
+					"    ParticipantId STRING,\n",
+					"    StationId STRING,\n",
+					"    VersionNo DECIMAL(3,0),\n",
+					"    LastChanged TIMESTAMP,\n",
+					"\tCDCLoadDate TIMESTAMP,\n",
+					"\tCDCStartDate TIMESTAMP,\n",
+					"\tCDCEndDate TIMESTAMP,\n",
+					"\tCDCOps INT,\n",
+					"\tCDCCurrentFlag BOOLEAN,\n",
+					"\tHashKey STRING,\n",
+					"\tHashDiff STRING   \n",
+					")\n",
+					"USING delta\n",
+					"LOCATION 'abfss://{destination_container}@{destination_storage}.dfs.core.windows.net/{destination_path}/{db_tablename}'\n",
+					"\"\"\")"
+				],
+				"execution_count": 171
+			},
+			{
+				"cell_type": "code",
+				"source": [
+					"# load parquet file as dataframe\n",
+					"raw_df = spark.read.format(\"parquet\").load(f'abfss://{source_container}@{source_storage}.dfs.core.windows.net/{source_path}/{db_tablename}/')"
+				],
+				"execution_count": 172
+			},
+			{
+				"cell_type": "code",
+				"source": [
+					"# Add CDC columns\n",
+					"raw_df = raw_df.withColumn(\"HashKey\", sha2(concat_ws(\"||\", \"EFFECTIVEDATE\", \"PARTICIPANTID\", \"STATIONID\", \"VERSIONNO\"), 256))\n",
+					"raw_df = raw_df.withColumn(\"HashDiff\", sha2(concat_ws(\"||\", \"LASTCHANGED\"), 256))\n",
+					"raw_df = raw_df.withColumn(\"CDCLoadDate\", to_timestamp(lit(Bronze_LoadDate),'yyyy-MM-dd HH:mm:ss'))\n",
+					"raw_df = raw_df.withColumn(\"CDCStartDate\", to_timestamp(lit(Bronze_LoadDate), 'yyyy-MM-dd HH:mm:ss'))\n",
+					"raw_df = raw_df.withColumn(\"CDCEndDate\", to_timestamp(lit(\"9999-12-31 23:59:59\"), 'yyyy-MM-dd HH:mm:ss'))\n",
+					"raw_df = raw_df.withColumn(\"CDCCurrentFlag\", lit(1))\n",
+					"raw_df = raw_df.withColumn(\"CDCOps\", lit(1))"
+				],
+				"execution_count": 173
+			},
+			{
+				"cell_type": "code",
+				"source": [
+					"# Row count parameters\n",
+					"Bronze_Insert_Pre=spark.sql(f\"\"\" SELECT COUNT(*) FROM {db_notebookname}.{db_tablename} WHERE CDCOps = 1 \"\"\").collect()[0][0]\n",
+					"Bronze_Update_Pre=spark.sql(f\"\"\" SELECT COUNT(*) FROM {db_notebookname}.{db_tablename} WHERE CDCOps = 2 \"\"\").collect()[0][0]\n",
+					"Bronze_Delete_Pre=spark.sql(f\"\"\" SELECT COUNT(*) FROM {db_notebookname}.{db_tablename} WHERE CDCOps = 0 \"\"\").collect()[0][0]"
+				],
+				"execution_count": 174
+			},
+			{
+				"cell_type": "code",
+				"source": [
+					"# SCD2 logic\n",
+					"# Create a temporary view of the dataframe\n",
+					"raw_df.createOrReplaceTempView(\"temp_table\")\n",
+					"\n",
+					"# Use the merge operation to update the target table\n",
+					"spark.sql(f\"\"\"\n",
+					"    MERGE INTO {db_notebookname}.{db_tablename} t\n",
+					"    USING temp_table s\n",
+					"    ON t.HashKey = s.HashKey AND t.CDCCurrentFlag == true\n",
+					"    WHEN MATCHED AND t.HashDiff <> s.HashDiff THEN\n",
+					"      UPDATE SET t.CDCEndDate = '{Bronze_UpdateEndDate}',\n",
+					"                 t.CDCCurrentFlag = false,\n",
+					"                 t.CDCOps = s.CDCOps + 1\n",
+					"    WHEN NOT MATCHED THEN\n",
+					"      INSERT (EffectiveDate, ParticipantId, StationId, VersionNo, LastChanged, CDCLoadDate, CDCStartDate, CDCEndDate, CDCOps, CDCCurrentFlag, HashKey, HashDiff)\n",
+					"      VALUES (s.EFFECTIVEDATE, s.PARTICIPANTID, s.STATIONID, s.VERSIONNO, s.LASTCHANGED, s.CDCLoadDate, s.CDCStartDate, s.CDCEndDate, 1, s.CDCCurrentFlag, s.HashKey, s.HashDiff)\n",
+					"\"\"\")\n",
+					"\n",
+					"# Use the merge operation to Insert updated record \n",
+					"spark.sql(f\"\"\"\n",
+					"    MERGE INTO {db_notebookname}.{db_tablename} t\n",
+					"    USING temp_table s\n",
+					"    ON t.HashKey = s.HashKey AND t.CDCCurrentFlag == true\n",
+					"    WHEN MATCHED AND t.HashDiff <> s.HashDiff THEN\n",
+					"      UPDATE SET t.CDCEndDate = '{Bronze_UpdateEndDate}',\n",
+					"                 t.CDCCurrentFlag = false,\n",
+					"                 t.CDCOps = s.CDCOps + 1\n",
+					"    WHEN NOT MATCHED THEN\n",
+					"      INSERT (EffectiveDate, ParticipantId, StationId, VersionNo, LastChanged, CDCLoadDate, CDCStartDate, CDCEndDate, CDCOps, CDCCurrentFlag, HashKey, HashDiff)\n",
+					"      VALUES (s.EFFECTIVEDATE, s.PARTICIPANTID, s.STATIONID, s.VERSIONNO, s.LASTCHANGED, s.CDCLoadDate, s.CDCStartDate, s.CDCEndDate, 1, s.CDCCurrentFlag, s.HashKey, s.HashDiff)\n",
+					"\"\"\")\n",
+					""
+				],
+				"execution_count": 175
+			},
+			{
+				"cell_type": "code",
+				"source": [
+					"#Row count parameters\n",
+					"Bronze_Insert_Post=spark.sql(f\"\"\" SELECT COUNT(*) FROM {db_notebookname}.{db_tablename} WHERE CDCOps = 1 \"\"\").collect()[0][0]\n",
+					"Bronze_Update_Post=spark.sql(f\"\"\" SELECT COUNT(*) FROM {db_notebookname}.{db_tablename} WHERE CDCOps = 2 \"\"\").collect()[0][0]\n",
+					"Bronze_Delete_Post=spark.sql(f\"\"\" SELECT COUNT(*) FROM {db_notebookname}.{db_tablename} WHERE CDCOps = 0 \"\"\").collect()[0][0]\n",
+					"Bronze_TotalRowCount_Post=spark.sql(f\"\"\" SELECT COUNT(*) FROM {db_notebookname}.{db_tablename}\"\"\").collect()[0][0]\n",
+					"Bronze_ActiveRecord_Post=spark.sql(f\"\"\" SELECT COUNT(*) FROM {db_notebookname}.{db_tablename} WHERE CDCCurrentFlag = true \"\"\").collect()[0][0]"
+				],
+				"execution_count": 176
+			},
+			{
+				"cell_type": "code",
+				"source": [
+					"#Row calculation\n",
+					"Bronze_Update = Bronze_Update_Post - Bronze_Update_Pre\n",
+					"Bronze_Insert = (Bronze_Insert_Post - Bronze_Insert_Pre) + Bronze_Update\n",
+					"Bronze_Delete = Bronze_Delete_Post - Bronze_Delete_Pre\n",
+					"Bronze_ActiveRows = Bronze_ActiveRecord_Post \n",
+					"Bronze_TotalRows = Bronze_TotalRowCount_Post"
+				],
+				"execution_count": 177
+			},
+			{
+				"cell_type": "code",
+				"source": [
+					"log_data = [(db_notebookname,db_tablename,Bronze_LoadDate,Bronze_Insert,Bronze_Update,Bronze_Delete,Bronze_ActiveRows,Bronze_TotalRows)]\n",
+					"print(log_data)\n",
+					"log_columns = ['PIPELINE_NAME', 'TABLE_NAME', 'INGEST_DATETIME', 'INSERT','UPDATE','DELETE','ACTIVE_ROWS','TOTAL_ROWS']\n",
+					"df_log = spark.createDataFrame(log_data, log_columns)"
+				],
+				"execution_count": 178
+			},
+			{
+				"cell_type": "code",
+				"source": [
+					"#Write to controldb\n",
+					"db_port = 1433\n",
+					"linked_service_name = \"LS_SQL_ELTFrameworkDB\"\n",
+					"linkedServiceProperties = json.loads(mssparkutils.credentials.getPropertiesAll(linked_service_name))\n",
+					"sql_server_name = linkedServiceProperties.get('Endpoint')\n",
+					"db_name = linkedServiceProperties.get('Database')\n",
+					"access_token = mssparkutils.credentials.getConnectionStringOrCreds(linked_service_name)\n",
+					"write_table_name = \"[CTL].[CFG_INGESTION_LOGS]\"\n",
+					"\n",
+					"try:\n",
+					"    df_log.write.format(\"jdbc\") \\\n",
+					"        .option(\"url\", \"jdbc:sqlserver://%s:%s\" % (sql_server_name, db_port)) \\\n",
+					"        .option(\"dbtable\", write_table_name) \\\n",
+					"        .option(\"accessToken\", access_token) \\\n",
+					"        .option(\"encrypt\", \"true\") \\\n",
+					"        .option(\"databaseName\", db_name) \\\n",
+					"        .option(\"hostNameInCertificate\", \"*.database.windows.net\") \\\n",
+					"        .mode(\"append\") \\\n",
+					"        .save()\n",
+					"except ValueError as error :\n",
+					"    print(\"MSSQL Connector write failed\", error)\n",
+					"\n",
+					"print(\"MSSQL Connector write(append) succeeded  \")"
+				],
+				"execution_count": 179
+			},
+			{
+				"cell_type": "markdown",
+				"metadata": {
+					"nteract": {
+						"transient": {
+							"deleting": false
+						}
+					}
+				},
+				"source": [
+					"# Table: stationowner: END"
+				]
+			},
+			{
+				"cell_type": "markdown",
+				"metadata": {
+					"nteract": {
+						"transient": {
+							"deleting": false
+						}
+					}
+				},
+				"source": [
+					"# Table: dispatchload: START (Disabled)"
+				]
+			},
+			{
+				"cell_type": "markdown",
+				"metadata": {
+					"nteract": {
+						"transient": {
+							"deleting": false
+						}
+					}
+				},
+				"source": [
+					"#Set table name\n",
+					"db_tablename=\"dispatchload\""
+				]
+			},
+			{
+				"cell_type": "markdown",
+				"metadata": {
+					"nteract": {
+						"transient": {
+							"deleting": false
+						}
+					}
+				},
+				"source": [
+					"#Create Bronze Table\n",
+					"spark.sql(f\"\"\"CREATE DATABASE IF NOT EXISTS {db_notebookname};\"\"\")\n",
+					"spark.sql(f\"\"\"\n",
+					"CREATE TABLE IF NOT EXISTS {db_notebookname}.{db_tablename}\n",
+					"(\n",
+					"    SettlementDate TIMESTAMP,\n",
+					"    RunNo DECIMAL(3,0),\n",
+					"    DUID STRING,\n",
+					"    TradeType DECIMAL(2,0),\n",
+					"    DispatchInterval DECIMAL(22,0),\n",
+					"    Intervention DECIMAL(2,0),\n",
+					"    ConnectionPointId STRING,\n",
+					"    DispatchMode DECIMAL(2,0),\n",
+					"    AGCStatus DECIMAL(2,0),\n",
+					"    InitialMW DECIMAL(15,5),\n",
+					"    TotalCleared DECIMAL(15,5),\n",
+					"    RampDownRate DECIMAL(15,5),\n",
+					"    RampUpRate DECIMAL(15,5),\n",
+					"    Lower5Min DECIMAL(15,5),\n",
+					"    Lower60Sec DECIMAL(15,5),\n",
+					"    Lower6Sec DECIMAL(15,5),\n",
+					"    Raise5Min DECIMAL(15,5),\n",
+					"    Raise60Sec DECIMAL(15,5),\n",
+					"    Raise6Sec DECIMAL(15,5),\n",
+					"    DownEPF DECIMAL(15,5),\n",
+					"    UpEPF DECIMAL(15,5),\n",
+					"    Marginal5MinValue DECIMAL(15,5),\n",
+					"    Marginal60SecValue DECIMAL(15,5),\n",
+					"    Marginal6SecValue DECIMAL(15,5),\n",
+					"    MarginalValue DECIMAL(15,5),\n",
+					"    Violation5MinDegree DECIMAL(15,5),\n",
+					"    Violation60SecDegree DECIMAL(15,5),\n",
+					"    Violation6SecDegree DECIMAL(15,5),\n",
+					"    ViolationDegree DECIMAL(15,5),\n",
+					"    LastChanged DATE,\n",
+					"    LowerReg DECIMAL(15,5),\n",
+					"    RaiseReg DECIMAL(15,5),\n",
+					"    Availability DECIMAL(15,5),\n",
+					"    Raise6SecFlags DECIMAL(3,0),\n",
+					"    Raise60SecFlags DECIMAL(3,0),\n",
+					"    Raise5MinFlags DECIMAL(3,0),\n",
+					"    RaiseRegFlags DECIMAL(3,0),\n",
+					"    Lower6SecFlags DECIMAL(3,0),\n",
+					"    lower60Secflags DECIMAL(3,0),\n",
+					"    Lower5MinFlags DECIMAL(3,0),\n",
+					"    LowerRegFlags DECIMAL(3,0),\n",
+					"    RaiseRegAvailability DECIMAL(15,5),\n",
+					"    RaiseRegEnablementMax DECIMAL(15,5),\n",
+					"    RaiseRegEnablementMin DECIMAL(15,5),\n",
+					"    LowerRegAvailability DECIMAL(15,5),\n",
+					"    LowerRegEnablementMax DECIMAL(15,5),\n",
+					"    LowerRegEnablementMin DECIMAL(15,5),\n",
+					"    Raise6SecActualAvailability DECIMAL(16,6),\n",
+					"    Raise60SecActualAvailability DECIMAL(16,6),\n",
+					"    Raise5minActualAvailability DECIMAL(16,6),\n",
+					"    RaiseRegActualAvailability DECIMAL(16,6),\n",
+					"    Lower6SecActualAvailability DECIMAL(16,6),\n",
+					"    Lower60SecActualAvailability DECIMAL(16,6),\n",
+					"    Lower5MinActualAvailability DECIMAL(16,6),\n",
+					"    LowerRegActualAvailability DECIMAL(16,6),\n",
+					"    SemiDispatchCap DECIMAL(3,0),\n",
+					"    DispatchModeTime DECIMAL(4,0),\n",
+					"    Conformance_Mode DECIMAL(6,0),\n",
+					"    UIGF DECIMAL(15,5),\n",
+					"    Raise1Sec DECIMAL(15,5),\n",
+					"    Raise1SecFlags DECIMAL(3,0),\n",
+					"    Lower1Sec DECIMAL(15,5),\n",
+					"    Lower1SecFlags DECIMAL(3,0),\n",
+					"    Raise1SecActualAvailability DECIMAL(16,6),\n",
+					"    Lower1SecActualAvailability DECIMAL(16,6),\n",
+					"    Initial_Energy_Storage DECIMAL(15,5),\n",
+					"    Energy_Storage DECIMAL(15,5),\n",
+					"    Min_Availability DECIMAL(15,5),\n",
+					"\tCDCLoadDate TIMESTAMP,\n",
+					"\tCDCStartDate TIMESTAMP,\n",
+					"\tCDCEndDate TIMESTAMP,\n",
+					"\tCDCOps INT,\n",
+					"\tCDCCurrentFlag BOOLEAN,\n",
+					"\tHashKey STRING,\n",
+					"\tHashDiff STRING   \n",
+					")\n",
+					"USING delta\n",
+					"LOCATION 'abfss://{destination_container}@{destination_storage}.dfs.core.windows.net/{destination_path}/{db_tablename}'\n",
+					"\"\"\")\n",
+					""
+				]
+			},
+			{
+				"cell_type": "markdown",
+				"metadata": {
+					"nteract": {
+						"transient": {
+							"deleting": false
+						}
+					}
+				},
+				"source": [
+					"#load parquet file as dataframe\n",
+					"raw_df = spark.read.format(\"parquet\").load(f'abfss://{source_container}@{source_storage}.dfs.core.windows.net/{source_path}/{db_tablename}/')"
+				]
+			},
+			{
+				"cell_type": "markdown",
+				"metadata": {
+					"nteract": {
+						"transient": {
+							"deleting": false
+						}
+					}
+				},
+				"source": [
+					"#Add CDC columns\n",
+					"raw_df = raw_df.withColumn(\"HashKey\", sha2(concat_ws(\"||\", \"SETTLEMENTDATE\", \"RUNNO\", \"DUID\", \"INTERVENTION\"), 256))\n",
+					"\n",
+					"#DEV version excludes multiple columns\n",
+					"raw_df = raw_df.withColumn(\"HashDiff\", sha2(concat_ws(\"||\", \"TRADETYPE\", \"DISPATCHINTERVAL\", \"CONNECTIONPOINTID\", \"DISPATCHMODE\", \"AGCSTATUS\", \"INITIALMW\", \"TOTALCLEARED\", \"RAMPDOWNRATE\", \"RAMPUPRATE\", \"LOWER5MIN\", \"LOWER60SEC\", \"LOWER6SEC\", \"RAISE5MIN\", \"RAISE60SEC\", \"RAISE6SEC\", \"DOWNEPF\", \"UPEPF\", \"MARGINAL5MINVALUE\", \"MARGINAL60SECVALUE\", \"MARGINAL6SECVALUE\", \"MARGINALVALUE\", \"VIOLATION5MINDEGREE\", \"VIOLATION60SECDEGREE\", \"VIOLATION6SECDEGREE\", \"VIOLATIONDEGREE\", \"LASTCHANGED\", \"LOWERREG\", \"RAISEREG\", \"AVAILABILITY\", \"RAISE6SECFLAGS\", \"RAISE60SECFLAGS\", \"RAISE5MINFLAGS\", \"RAISEREGFLAGS\", \"LOWER6SECFLAGS\", \"LOWER60SECFLAGS\", \"LOWER5MINFLAGS\", \"LOWERREGFLAGS\", \"RAISEREGAVAILABILITY\", \"RAISEREGENABLEMENTMAX\", \"RAISEREGENABLEMENTMIN\", \"LOWERREGAVAILABILITY\", \"LOWERREGENABLEMENTMAX\", \"LOWERREGENABLEMENTMIN\", \"RAISE6SECACTUALAVAILABILITY\", \"RAISE60SECACTUALAVAILABILITY\", \"RAISE5MINACTUALAVAILABILITY\", \"RAISEREGACTUALAVAILABILITY\", \"LOWER6SECACTUALAVAILABILITY\", \"LOWER60SECACTUALAVAILABILITY\", \"LOWER5MINACTUALAVAILABILITY\", \"LOWERREGACTUALAVAILABILITY\", \"SEMIDISPATCHCAP\", \"DISPATCHMODETIME\", \"INITIAL_ENERGY_STORAGE\", \"ENERGY_STORAGE\", \"MIN_AVAILABILITY\"), 256))\n",
+					"\n",
+					"#PRD version\n",
+					"#raw_df = raw_df.withColumn(\"HashDiff\", sha2(concat_ws(\"||\", \"TRADETYPE\", \"DISPATCHINTERVAL\", \"CONNECTIONPOINTID\", \"DISPATCHMODE\", \"AGCSTATUS\", \"INITIALMW\", \"TOTALCLEARED\", \"RAMPDOWNRATE\", \"RAMPUPRATE\", \"LOWER5MIN\", \"LOWER60SEC\", \"LOWER6SEC\", \"RAISE5MIN\", \"RAISE60SEC\", \"RAISE6SEC\", \"DOWNEPF\", \"UPEPF\", \"MARGINAL5MINVALUE\", \"MARGINAL60SECVALUE\", \"MARGINAL6SECVALUE\", \"MARGINALVALUE\", \"VIOLATION5MINDEGREE\", \"VIOLATION60SECDEGREE\", \"VIOLATION6SECDEGREE\", \"VIOLATIONDEGREE\", \"LASTCHANGED\", \"LOWERREG\", \"RAISEREG\", \"AVAILABILITY\", \"RAISE6SECFLAGS\", \"RAISE60SECFLAGS\", \"RAISE5MINFLAGS\", \"RAISEREGFLAGS\", \"LOWER6SECFLAGS\", \"LOWER60SECFLAGS\", \"LOWER5MINFLAGS\", \"LOWERREGFLAGS\", \"RAISEREGAVAILABILITY\", \"RAISEREGENABLEMENTMAX\", \"RAISEREGENABLEMENTMIN\", \"LOWERREGAVAILABILITY\", \"LOWERREGENABLEMENTMAX\", \"LOWERREGENABLEMENTMIN\", \"RAISE6SECACTUALAVAILABILITY\", \"RAISE60SECACTUALAVAILABILITY\", \"RAISE5MINACTUALAVAILABILITY\", \"RAISEREGACTUALAVAILABILITY\", \"LOWER6SECACTUALAVAILABILITY\", \"LOWER60SECACTUALAVAILABILITY\", \"LOWER5MINACTUALAVAILABILITY\", \"LOWERREGACTUALAVAILABILITY\", \"SEMIDISPATCHCAP\", \"DISPATCHMODETIME\", \"CONFORMANCE_MODE\", \"UIGF\", \"RAISE1SEC\", \"RAISE1SECFLAGS\", \"LOWER1SEC\", \"LOWER1SECFLAGS\", \"RAISE1SECACTUALAVAILABILITY\", \"LOWER1SECACTUALAVAILABILITY\", \"INITIAL_ENERGY_STORAGE\", \"ENERGY_STORAGE\", \"MIN_AVAILABILITY\"), 256))\n",
+					"raw_df = raw_df.withColumn(\"CDCLoadDate\", to_timestamp(lit(Bronze_LoadDate),'yyyy-MM-dd HH:mm:ss'))\n",
+					"raw_df = raw_df.withColumn(\"CDCStartDate\", to_timestamp(lit(Bronze_LoadDate), 'yyyy-MM-dd HH:mm:ss'))\n",
+					"raw_df = raw_df.withColumn(\"CDCEndDate\", to_timestamp(lit(\"9999-12-31 23:59:59\"), 'yyyy-MM-dd HH:mm:ss'))\n",
+					"raw_df = raw_df.withColumn(\"CDCCurrentFlag\", lit(1))\n",
+					"raw_df = raw_df.withColumn(\"CDCOps\", lit(1))\n",
+					""
+				]
+			},
+			{
+				"cell_type": "markdown",
+				"metadata": {
+					"nteract": {
+						"transient": {
+							"deleting": false
+						}
+					}
+				},
+				"source": [
+					"#Row count parameters\n",
+					"Bronze_Insert_Pre=spark.sql(f\"\"\" SELECT COUNT(*) FROM {db_notebookname}.{db_tablename} WHERE CDCOps = 1 \"\"\").collect()[0][0]\n",
+					"Bronze_Update_Pre=spark.sql(f\"\"\" SELECT COUNT(*) FROM {db_notebookname}.{db_tablename} WHERE CDCOps = 2 \"\"\").collect()[0][0]\n",
+					"Bronze_Delete_Pre=spark.sql(f\"\"\" SELECT COUNT(*) FROM {db_notebookname}.{db_tablename} WHERE CDCOps = 0 \"\"\").collect()[0][0]"
+				]
+			},
+			{
+				"cell_type": "markdown",
+				"metadata": {
+					"nteract": {
+						"transient": {
+							"deleting": false
+						}
+					}
+				},
+				"source": [
+					"#SCD2 logic\n",
+					"#Create a temporary view of the dataframe\n",
+					"raw_df.createOrReplaceTempView(\"temp_table\")\n",
+					"\n",
+					"#Use the merge operation to update the target table\n",
+					"spark.sql(f\"\"\"\n",
+					"    MERGE INTO {db_notebookname}.{db_tablename} t\n",
+					"    USING temp_table s\n",
+					"    ON t.HashKey = s.HashKey AND t.CDCCurrentFlag == true\n",
+					"    WHEN MATCHED AND t.HashDiff <> s.HashDiff THEN\n",
+					"      UPDATE SET t.CDCEndDate = '{Bronze_UpdateEndDate}',\n",
+					"                 t.CDCCurrentFlag = false,\n",
+					"                 t.CDCOps = s.CDCOps + 1\n",
+					"    WHEN NOT MATCHED THEN\n",
+					"    --DEV Version excludes multiple columns\n",
+					"      INSERT (SettlementDate, RunNo, DUID, TradeType, DispatchInterval, Intervention, ConnectionPointId, DispatchMode, AGCStatus, InitialMW, TotalCleared, RampDownRate, RampUpRate, Lower5Min, Lower60Sec, Lower6Sec, Raise5Min, Raise60Sec, Raise6Sec, DownEPF, UpEPF, Marginal5MinValue, Marginal60SecValue, Marginal6SecValue, MarginalValue, Violation5MinDegree, Violation60SecDegree, Violation6SecDegree, ViolationDegree, LastChanged, LowerReg, RaiseReg, Availability, Raise6SecFlags, Raise60SecFlags, Raise5MinFlags, RaiseRegFlags, Lower6SecFlags, lower60Secflags, Lower5MinFlags, LowerRegFlags, RaiseRegAvailability, RaiseRegEnablementMax, RaiseRegEnablementMin, LowerRegAvailability, LowerRegEnablementMax, LowerRegEnablementMin, Raise6SecActualAvailability, Raise60SecActualAvailability, Raise5minActualAvailability, RaiseRegActualAvailability, Lower6SecActualAvailability, Lower60SecActualAvailability, Lower5MinActualAvailability, LowerRegActualAvailability, SemiDispatchCap, DispatchModeTime, Initial_Energy_Storage, Energy_Storage, Min_Availability, CDCLoadDate, CDCStartDate, CDCEndDate, CDCOps, CDCCurrentFlag, HashKey, HashDiff)\n",
+					"      VALUES (s.SETTLEMENTDATE, s.RUNNO, s.DUID, s.TRADETYPE, s.DISPATCHINTERVAL, s.INTERVENTION, s.CONNECTIONPOINTID, s.DISPATCHMODE, s.AGCSTATUS, s.INITIALMW, s.TOTALCLEARED, s.RAMPDOWNRATE, s.RAMPUPRATE, s.LOWER5MIN, s.LOWER60SEC, s.LOWER6SEC, s.RAISE5MIN, s.RAISE60SEC, s.RAISE6SEC, s.DOWNEPF, s.UPEPF, s.MARGINAL5MINVALUE, s.MARGINAL60SECVALUE, s.MARGINAL6SECVALUE, s.MARGINALVALUE, s.VIOLATION5MINDEGREE, s.VIOLATION60SECDEGREE, s.VIOLATION6SECDEGREE, s.VIOLATIONDEGREE, s.LASTCHANGED, s.LOWERREG, s.RAISEREG, s.AVAILABILITY, s.RAISE6SECFLAGS, s.RAISE60SECFLAGS, s.RAISE5MINFLAGS, s.RAISEREGFLAGS, s.LOWER6SECFLAGS, s.LOWER60SECFLAGS, s.LOWER5MINFLAGS, s.LOWERREGFLAGS, s.RAISEREGAVAILABILITY, s.RAISEREGENABLEMENTMAX, s.RAISEREGENABLEMENTMIN, s.LOWERREGAVAILABILITY, s.LOWERREGENABLEMENTMAX, s.LOWERREGENABLEMENTMIN, s.RAISE6SECACTUALAVAILABILITY, s.RAISE60SECACTUALAVAILABILITY, s.RAISE5MINACTUALAVAILABILITY, s.RAISEREGACTUALAVAILABILITY, s.LOWER6SECACTUALAVAILABILITY, s.LOWER60SECACTUALAVAILABILITY, s.LOWER5MINACTUALAVAILABILITY, s.LOWERREGACTUALAVAILABILITY, s.SEMIDISPATCHCAP, s.DISPATCHMODETIME, s.INITIAL_ENERGY_STORAGE, s.ENERGY_STORAGE, s.MIN_AVAILABILITY, s.CDCLoadDate, s.CDCStartDate, s.CDCEndDate, 1, s.CDCCurrentFlag, s.HashKey, s.HashDiff)\n",
+					"\n",
+					"    --PRD Version\n",
+					"      --INSERT (SettlementDate, RunNo, DUID, TradeType, DispatchInterval, Intervention, ConnectionPointId, DispatchMode, AGCStatus, InitialMW, TotalCleared, RampDownRate, RampUpRate, Lower5Min, Lower60Sec, Lower6Sec, Raise5Min, Raise60Sec, Raise6Sec, DownEPF, UpEPF, Marginal5MinValue, Marginal60SecValue, Marginal6SecValue, MarginalValue, Violation5MinDegree, Violation60SecDegree, Violation6SecDegree, ViolationDegree, LastChanged, LowerReg, RaiseReg, Availability, Raise6SecFlags, Raise60SecFlags, Raise5MinFlags, RaiseRegFlags, Lower6SecFlags, lower60Secflags, Lower5MinFlags, LowerRegFlags, RaiseRegAvailability, RaiseRegEnablementMax, RaiseRegEnablementMin, LowerRegAvailability, LowerRegEnablementMax, LowerRegEnablementMin, Raise6SecActualAvailability, Raise60SecActualAvailability, Raise5minActualAvailability, RaiseRegActualAvailability, Lower6SecActualAvailability, Lower60SecActualAvailability, Lower5MinActualAvailability, LowerRegActualAvailability, SemiDispatchCap, DispatchModeTime, Conformance_Mode, UIGF, Raise1Sec, Raise1SecFlags, Lower1Sec, Lower1SecFlags, Raise1SecActualAvailability, Lower1SecActualAvailability, Initial_Energy_Storage, Energy_Storage, Min_Availability, CDCLoadDate, CDCStartDate, CDCEndDate, CDCOps, CDCCurrentFlag, HashKey, HashDiff)\n",
+					"      --VALUES (s.SETTLEMENTDATE, s.RUNNO, s.DUID, s.TRADETYPE, s.DISPATCHINTERVAL, s.INTERVENTION, s.CONNECTIONPOINTID, s.DISPATCHMODE, s.AGCSTATUS, s.INITIALMW, s.TOTALCLEARED, s.RAMPDOWNRATE, s.RAMPUPRATE, s.LOWER5MIN, s.LOWER60SEC, s.LOWER6SEC, s.RAISE5MIN, s.RAISE60SEC, s.RAISE6SEC, s.DOWNEPF, s.UPEPF, s.MARGINAL5MINVALUE, s.MARGINAL60SECVALUE, s.MARGINAL6SECVALUE, s.MARGINALVALUE, s.VIOLATION5MINDEGREE, s.VIOLATION60SECDEGREE, s.VIOLATION6SECDEGREE, s.VIOLATIONDEGREE, s.LASTCHANGED, s.LOWERREG, s.RAISEREG, s.AVAILABILITY, s.RAISE6SECFLAGS, s.RAISE60SECFLAGS, s.RAISE5MINFLAGS, s.RAISEREGFLAGS, s.LOWER6SECFLAGS, s.LOWER60SECFLAGS, s.LOWER5MINFLAGS, s.LOWERREGFLAGS, s.RAISEREGAVAILABILITY, s.RAISEREGENABLEMENTMAX, s.RAISEREGENABLEMENTMIN, s.LOWERREGAVAILABILITY, s.LOWERREGENABLEMENTMAX, s.LOWERREGENABLEMENTMIN, s.RAISE6SECACTUALAVAILABILITY, s.RAISE60SECACTUALAVAILABILITY, s.RAISE5MINACTUALAVAILABILITY, s.RAISEREGACTUALAVAILABILITY, s.LOWER6SECACTUALAVAILABILITY, s.LOWER60SECACTUALAVAILABILITY, s.LOWER5MINACTUALAVAILABILITY, s.LOWERREGACTUALAVAILABILITY, s.SEMIDISPATCHCAP, s.DISPATCHMODETIME, s.CONFORMANCE_MODE, s.UIGF, s.RAISE1SEC, s.RAISE1SECFLAGS, s.LOWER1SEC, s.LOWER1SECFLAGS, s.RAISE1SECACTUALAVAILABILITY, s.LOWER1SECACTUALAVAILABILITY, s.INITIAL_ENERGY_STORAGE, s.ENERGY_STORAGE, s.MIN_AVAILABILITY, s.CDCLoadDate, s.CDCStartDate, s.CDCEndDate, 1, s.CDCCurrentFlag, s.HashKey, s.HashDiff)\n",
+					"\"\"\")\n",
+					"\n",
+					"#Use the merge operation to Insert updated record \n",
+					"spark.sql(f\"\"\"\n",
+					"    MERGE INTO {db_notebookname}.{db_tablename} t\n",
+					"    USING temp_table s\n",
+					"    ON t.HashKey = s.HashKey AND t.CDCCurrentFlag == true\n",
+					"    WHEN MATCHED AND t.HashDiff <> s.HashDiff THEN\n",
+					"      UPDATE SET t.CDCEndDate = '{Bronze_UpdateEndDate}',\n",
+					"                 t.CDCCurrentFlag = false,\n",
+					"                 t.CDCOps = s.CDCOps + 1\n",
+					"    WHEN NOT MATCHED THEN\n",
+					"    --DEV Version excludes multiple columns\n",
+					"      INSERT (SettlementDate, RunNo, DUID, TradeType, DispatchInterval, Intervention, ConnectionPointId, DispatchMode, AGCStatus, InitialMW, TotalCleared, RampDownRate, RampUpRate, Lower5Min, Lower60Sec, Lower6Sec, Raise5Min, Raise60Sec, Raise6Sec, DownEPF, UpEPF, Marginal5MinValue, Marginal60SecValue, Marginal6SecValue, MarginalValue, Violation5MinDegree, Violation60SecDegree, Violation6SecDegree, ViolationDegree, LastChanged, LowerReg, RaiseReg, Availability, Raise6SecFlags, Raise60SecFlags, Raise5MinFlags, RaiseRegFlags, Lower6SecFlags, lower60Secflags, Lower5MinFlags, LowerRegFlags, RaiseRegAvailability, RaiseRegEnablementMax, RaiseRegEnablementMin, LowerRegAvailability, LowerRegEnablementMax, LowerRegEnablementMin, Raise6SecActualAvailability, Raise60SecActualAvailability, Raise5minActualAvailability, RaiseRegActualAvailability, Lower6SecActualAvailability, Lower60SecActualAvailability, Lower5MinActualAvailability, LowerRegActualAvailability, SemiDispatchCap, DispatchModeTime, Initial_Energy_Storage, Energy_Storage, Min_Availability, CDCLoadDate, CDCStartDate, CDCEndDate, CDCOps, CDCCurrentFlag, HashKey, HashDiff)\n",
+					"      VALUES (s.SETTLEMENTDATE, s.RUNNO, s.DUID, s.TRADETYPE, s.DISPATCHINTERVAL, s.INTERVENTION, s.CONNECTIONPOINTID, s.DISPATCHMODE, s.AGCSTATUS, s.INITIALMW, s.TOTALCLEARED, s.RAMPDOWNRATE, s.RAMPUPRATE, s.LOWER5MIN, s.LOWER60SEC, s.LOWER6SEC, s.RAISE5MIN, s.RAISE60SEC, s.RAISE6SEC, s.DOWNEPF, s.UPEPF, s.MARGINAL5MINVALUE, s.MARGINAL60SECVALUE, s.MARGINAL6SECVALUE, s.MARGINALVALUE, s.VIOLATION5MINDEGREE, s.VIOLATION60SECDEGREE, s.VIOLATION6SECDEGREE, s.VIOLATIONDEGREE, s.LASTCHANGED, s.LOWERREG, s.RAISEREG, s.AVAILABILITY, s.RAISE6SECFLAGS, s.RAISE60SECFLAGS, s.RAISE5MINFLAGS, s.RAISEREGFLAGS, s.LOWER6SECFLAGS, s.LOWER60SECFLAGS, s.LOWER5MINFLAGS, s.LOWERREGFLAGS, s.RAISEREGAVAILABILITY, s.RAISEREGENABLEMENTMAX, s.RAISEREGENABLEMENTMIN, s.LOWERREGAVAILABILITY, s.LOWERREGENABLEMENTMAX, s.LOWERREGENABLEMENTMIN, s.RAISE6SECACTUALAVAILABILITY, s.RAISE60SECACTUALAVAILABILITY, s.RAISE5MINACTUALAVAILABILITY, s.RAISEREGACTUALAVAILABILITY, s.LOWER6SECACTUALAVAILABILITY, s.LOWER60SECACTUALAVAILABILITY, s.LOWER5MINACTUALAVAILABILITY, s.LOWERREGACTUALAVAILABILITY, s.SEMIDISPATCHCAP, s.DISPATCHMODETIME, s.INITIAL_ENERGY_STORAGE, s.ENERGY_STORAGE, s.MIN_AVAILABILITY, s.CDCLoadDate, s.CDCStartDate, s.CDCEndDate, 1, s.CDCCurrentFlag, s.HashKey, s.HashDiff)\n",
+					"\n",
+					"    --PRD Version\n",
+					"      --INSERT (SettlementDate, RunNo, DUID, TradeType, DispatchInterval, Intervention, ConnectionPointId, DispatchMode, AGCStatus, InitialMW, TotalCleared, RampDownRate, RampUpRate, Lower5Min, Lower60Sec, Lower6Sec, Raise5Min, Raise60Sec, Raise6Sec, DownEPF, UpEPF, Marginal5MinValue, Marginal60SecValue, Marginal6SecValue, MarginalValue, Violation5MinDegree, Violation60SecDegree, Violation6SecDegree, ViolationDegree, LastChanged, LowerReg, RaiseReg, Availability, Raise6SecFlags, Raise60SecFlags, Raise5MinFlags, RaiseRegFlags, Lower6SecFlags, lower60Secflags, Lower5MinFlags, LowerRegFlags, RaiseRegAvailability, RaiseRegEnablementMax, RaiseRegEnablementMin, LowerRegAvailability, LowerRegEnablementMax, LowerRegEnablementMin, Raise6SecActualAvailability, Raise60SecActualAvailability, Raise5minActualAvailability, RaiseRegActualAvailability, Lower6SecActualAvailability, Lower60SecActualAvailability, Lower5MinActualAvailability, LowerRegActualAvailability, SemiDispatchCap, DispatchModeTime, Conformance_Mode, UIGF, Raise1Sec, Raise1SecFlags, Lower1Sec, Lower1SecFlags, Raise1SecActualAvailability, Lower1SecActualAvailability, Initial_Energy_Storage, Energy_Storage, Min_Availability, CDCLoadDate, CDCStartDate, CDCEndDate, CDCOps, CDCCurrentFlag, HashKey, HashDiff)\n",
+					"      --VALUES (s.SETTLEMENTDATE, s.RUNNO, s.DUID, s.TRADETYPE, s.DISPATCHINTERVAL, s.INTERVENTION, s.CONNECTIONPOINTID, s.DISPATCHMODE, s.AGCSTATUS, s.INITIALMW, s.TOTALCLEARED, s.RAMPDOWNRATE, s.RAMPUPRATE, s.LOWER5MIN, s.LOWER60SEC, s.LOWER6SEC, s.RAISE5MIN, s.RAISE60SEC, s.RAISE6SEC, s.DOWNEPF, s.UPEPF, s.MARGINAL5MINVALUE, s.MARGINAL60SECVALUE, s.MARGINAL6SECVALUE, s.MARGINALVALUE, s.VIOLATION5MINDEGREE, s.VIOLATION60SECDEGREE, s.VIOLATION6SECDEGREE, s.VIOLATIONDEGREE, s.LASTCHANGED, s.LOWERREG, s.RAISEREG, s.AVAILABILITY, s.RAISE6SECFLAGS, s.RAISE60SECFLAGS, s.RAISE5MINFLAGS, s.RAISEREGFLAGS, s.LOWER6SECFLAGS, s.LOWER60SECFLAGS, s.LOWER5MINFLAGS, s.LOWERREGFLAGS, s.RAISEREGAVAILABILITY, s.RAISEREGENABLEMENTMAX, s.RAISEREGENABLEMENTMIN, s.LOWERREGAVAILABILITY, s.LOWERREGENABLEMENTMAX, s.LOWERREGENABLEMENTMIN, s.RAISE6SECACTUALAVAILABILITY, s.RAISE60SECACTUALAVAILABILITY, s.RAISE5MINACTUALAVAILABILITY, s.RAISEREGACTUALAVAILABILITY, s.LOWER6SECACTUALAVAILABILITY, s.LOWER60SECACTUALAVAILABILITY, s.LOWER5MINACTUALAVAILABILITY, s.LOWERREGACTUALAVAILABILITY, s.SEMIDISPATCHCAP, s.DISPATCHMODETIME, s.CONFORMANCE_MODE, s.UIGF, s.RAISE1SEC, s.RAISE1SECFLAGS, s.LOWER1SEC, s.LOWER1SECFLAGS, s.RAISE1SECACTUALAVAILABILITY, s.LOWER1SECACTUALAVAILABILITY, s.INITIAL_ENERGY_STORAGE, s.ENERGY_STORAGE, s.MIN_AVAILABILITY, s.CDCLoadDate, s.CDCStartDate, s.CDCEndDate, 1, s.CDCCurrentFlag, s.HashKey, s.HashDiff)\n",
+					"\"\"\")\n",
+					""
+				]
+			},
+			{
+				"cell_type": "markdown",
+				"metadata": {
+					"nteract": {
+						"transient": {
+							"deleting": false
+						}
+					}
+				},
+				"source": [
+					"#Row count parameters\n",
+					"Bronze_Insert_Post=spark.sql(f\"\"\" SELECT COUNT(*) FROM {db_notebookname}.{db_tablename} WHERE CDCOps = 1 \"\"\").collect()[0][0]\n",
+					"Bronze_Update_Post=spark.sql(f\"\"\" SELECT COUNT(*) FROM {db_notebookname}.{db_tablename} WHERE CDCOps = 2 \"\"\").collect()[0][0]\n",
+					"Bronze_Delete_Post=spark.sql(f\"\"\" SELECT COUNT(*) FROM {db_notebookname}.{db_tablename} WHERE CDCOps = 0 \"\"\").collect()[0][0]\n",
+					"Bronze_TotalRowCount_Post=spark.sql(f\"\"\" SELECT COUNT(*) FROM {db_notebookname}.{db_tablename}\"\"\").collect()[0][0]\n",
+					"Bronze_ActiveRecord_Post=spark.sql(f\"\"\" SELECT COUNT(*) FROM {db_notebookname}.{db_tablename} WHERE CDCCurrentFlag = true \"\"\").collect()[0][0]"
+				]
+			},
+			{
+				"cell_type": "markdown",
+				"metadata": {
+					"nteract": {
+						"transient": {
+							"deleting": false
+						}
+					}
+				},
+				"source": [
+					"#Row calculation\n",
+					"Bronze_Update = Bronze_Update_Post - Bronze_Update_Pre\n",
+					"Bronze_Insert = (Bronze_Insert_Post - Bronze_Insert_Pre) + Bronze_Update\n",
+					"Bronze_Delete = Bronze_Delete_Post - Bronze_Delete_Pre\n",
+					"Bronze_ActiveRows = Bronze_ActiveRecord_Post \n",
+					"Bronze_TotalRows = Bronze_TotalRowCount_Post"
+				]
+			},
+			{
+				"cell_type": "markdown",
+				"metadata": {
+					"nteract": {
+						"transient": {
+							"deleting": false
+						}
+					}
+				},
+				"source": [
+					"log_data = [(db_notebookname,db_tablename,Bronze_LoadDate,Bronze_Insert,Bronze_Update,Bronze_Delete,Bronze_ActiveRows,Bronze_TotalRows)]\n",
+					"print(log_data)\n",
+					"log_columns = ['PIPELINE_NAME', 'TABLE_NAME', 'INGEST_DATETIME', 'INSERT','UPDATE','DELETE','ACTIVE_ROWS','TOTAL_ROWS']\n",
+					"df_log = spark.createDataFrame(log_data, log_columns)"
+				]
+			},
+			{
+				"cell_type": "markdown",
+				"metadata": {
+					"nteract": {
+						"transient": {
+							"deleting": false
+						}
+					}
+				},
+				"source": [
+					"#Write to controldb\n",
+					"db_port = 1433\n",
+					"linked_service_name = \"LS_SQL_ELTFrameworkDB\"\n",
+					"linkedServiceProperties = json.loads(mssparkutils.credentials.getPropertiesAll(linked_service_name))\n",
+					"sql_server_name = linkedServiceProperties.get('Endpoint')\n",
+					"db_name = linkedServiceProperties.get('Database')\n",
+					"access_token = mssparkutils.credentials.getConnectionStringOrCreds(linked_service_name)\n",
+					"write_table_name = \"[CTL].[CFG_INGESTION_LOGS]\"\n",
+					"\n",
+					"try:\n",
+					"    df_log.write.format(\"jdbc\") \\\n",
+					"        .option(\"url\", \"jdbc:sqlserver://%s:%s\" % (sql_server_name, db_port)) \\\n",
+					"        .option(\"dbtable\", write_table_name) \\\n",
+					"        .option(\"accessToken\", access_token) \\\n",
+					"        .option(\"encrypt\", \"true\") \\\n",
+					"        .option(\"databaseName\", db_name) \\\n",
+					"        .option(\"hostNameInCertificate\", \"*.database.windows.net\") \\\n",
+					"        .mode(\"append\") \\\n",
+					"        .save()\n",
+					"except ValueError as error :\n",
+					"    print(\"MSSQL Connector write failed\", error)\n",
+					"\n",
+					"print(\"MSSQL Connector write(append) succeeded  \")"
+				]
+			},
+			{
+				"cell_type": "markdown",
+				"metadata": {
+					"nteract": {
+						"transient": {
+							"deleting": false
+						}
+					}
+				},
+				"source": [
+					"#Drop files raw storage files if exists after they have been processed.\n",
+					"from py4j.protocol import Py4JJavaError\n",
+					"\n",
+					"try:\n",
+					"    raw_output_path = f\"abfss://{source_container}@{source_storage}.dfs.core.windows.net/{source_path}/{db_tablename}/\"\n",
+					"    mssparkutils.fs.rm(raw_output_path,recurse=True)\n",
+					"\n",
+					"    print(\"Delete successful\")\n",
+					"\n",
+					"except Py4JJavaError as error :\n",
+					"    if 'org.apache.hadoop.fs.PathNotFoundException' in str (error.java_exception):\n",
+					"        print(\"No such file or directory\")"
+				]
+			},
+			{
+				"cell_type": "markdown",
+				"metadata": {
+					"nteract": {
+						"transient": {
+							"deleting": false
+						}
+					}
+				},
+				"source": [
+					"# Table: dispatchload: END (Disabled)"
+				]
+			},
+			{
+				"cell_type": "markdown",
+				"metadata": {
+					"nteract": {
+						"transient": {
+							"deleting": false
+						}
+					}
+				},
+				"source": [
+					"# Table: transmissionlossfactor : START"
+				]
+			},
+			{
+				"cell_type": "code",
+				"source": [
+					"#Set table name\n",
+					"db_tablename=\"transmissionlossfactor\""
+				],
+				"execution_count": null
+			},
+			{
+				"cell_type": "code",
+				"source": [
+					"#Create Bronze Table\n",
+					"spark.sql(f\"\"\"CREATE DATABASE IF NOT EXISTS {db_notebookname};\"\"\")\n",
+					"spark.sql(f\"\"\"\n",
+					"CREATE TABLE IF NOT EXISTS {db_notebookname}.{db_tablename}\n",
+					"(\n",
+					"    TransmissionLossFactor DECIMAL(15,5),\n",
+					"    EffectiveDate TIMESTAMP,\n",
+					"    VersionNo DECIMAL(22,0),\n",
+					"    ConnectionPointId STRING,\n",
+					"    RegionId STRING,\n",
+					"    LastChanged TIMESTAMP,\n",
+					"    SecondaryTLF DECIMAL(18,8),\n",
+					"\tCDCLoadDate TIMESTAMP,\n",
+					"\tCDCStartDate TIMESTAMP,\n",
+					"\tCDCEndDate TIMESTAMP,\n",
+					"\tCDCOps INT,\n",
+					"\tCDCCurrentFlag BOOLEAN,\n",
+					"\tHashKey STRING,\n",
+					"\tHashDiff STRING   \n",
+					")\n",
+					"USING delta\n",
+					"LOCATION 'abfss://{destination_container}@{destination_storage}.dfs.core.windows.net/{destination_path}/{db_tablename}'\n",
+					"\"\"\")"
+				],
+				"execution_count": null
+			},
+			{
+				"cell_type": "code",
+				"source": [
+					"# load parquet file as dataframe\n",
+					"raw_df = spark.read.format(\"parquet\").load(f'abfss://{source_container}@{source_storage}.dfs.core.windows.net/{source_path}/{db_tablename}/')"
+				],
+				"execution_count": null
+			},
+			{
+				"cell_type": "code",
+				"source": [
+					"# Add CDC columns\n",
+					"raw_df = raw_df.withColumn(\"HashKey\", sha2(concat_ws(\"||\", \"EFFECTIVEDATE\", \"VERSIONNO\", \"CONNECTIONPOINTID\"), 256))\n",
+					"raw_df = raw_df.withColumn(\"HashDiff\", sha2(concat_ws(\"||\", \"TRANSMISSIONLOSSFACTOR\", \"REGIONID\", \"LASTCHANGED\", \"SECONDARY_TLF\"), 256))\n",
+					"raw_df = raw_df.withColumn(\"CDCLoadDate\", to_timestamp(lit(Bronze_LoadDate),'yyyy-MM-dd HH:mm:ss'))\n",
+					"raw_df = raw_df.withColumn(\"CDCStartDate\", to_timestamp(lit(Bronze_LoadDate), 'yyyy-MM-dd HH:mm:ss'))\n",
+					"raw_df = raw_df.withColumn(\"CDCEndDate\", to_timestamp(lit(\"9999-12-31 23:59:59\"), 'yyyy-MM-dd HH:mm:ss'))\n",
+					"raw_df = raw_df.withColumn(\"CDCCurrentFlag\", lit(1))\n",
+					"raw_df = raw_df.withColumn(\"CDCOps\", lit(1))"
+				],
+				"execution_count": null
+			},
+			{
+				"cell_type": "code",
+				"source": [
+					"# Row count parameters\n",
+					"Bronze_Insert_Pre=spark.sql(f\"\"\" SELECT COUNT(*) FROM {db_notebookname}.{db_tablename} WHERE CDCOps = 1 \"\"\").collect()[0][0]\n",
+					"Bronze_Update_Pre=spark.sql(f\"\"\" SELECT COUNT(*) FROM {db_notebookname}.{db_tablename} WHERE CDCOps = 2 \"\"\").collect()[0][0]\n",
+					"Bronze_Delete_Pre=spark.sql(f\"\"\" SELECT COUNT(*) FROM {db_notebookname}.{db_tablename} WHERE CDCOps = 0 \"\"\").collect()[0][0]"
+				],
+				"execution_count": null
+			},
+			{
+				"cell_type": "code",
+				"source": [
+					"# SCD2 logic\n",
+					"# Create a temporary view of the dataframe\n",
+					"raw_df.createOrReplaceTempView(\"temp_table\")\n",
+					"\n",
+					"# Use the merge operation to update the target table\n",
+					"spark.sql(f\"\"\"\n",
+					"    MERGE INTO {db_notebookname}.{db_tablename} t\n",
+					"    USING temp_table s\n",
+					"    ON t.HashKey = s.HashKey AND t.CDCCurrentFlag == true\n",
+					"    WHEN MATCHED AND t.HashDiff <> s.HashDiff THEN\n",
+					"      UPDATE SET t.CDCEndDate = '{Bronze_UpdateEndDate}',\n",
+					"                 t.CDCCurrentFlag = false,\n",
+					"                 t.CDCOps = s.CDCOps + 1\n",
+					"    WHEN NOT MATCHED THEN\n",
+					"      INSERT (TransmissionLossFactor, EffectiveDate, VersionNo, ConnectionPointId, RegionId, LastChanged, SecondaryTLF, CDCLoadDate, CDCStartDate, CDCEndDate, CDCOps, CDCCurrentFlag, HashKey, HashDiff)\n",
+					"      VALUES (s.TRANSMISSIONLOSSFACTOR, s.EFFECTIVEDATE, s.VERSIONNO, s.CONNECTIONPOINTID, s.REGIONID, s.LASTCHANGED, s.SECONDARY_TLF, s.CDCLoadDate, s.CDCStartDate, s.CDCEndDate, 1, s.CDCCurrentFlag, s.HashKey, s.HashDiff)\n",
+					"\"\"\")\n",
+					"\n",
+					"# Use the merge operation to Insert updated record \n",
+					"spark.sql(f\"\"\"\n",
+					"    MERGE INTO {db_notebookname}.{db_tablename} t\n",
+					"    USING temp_table s\n",
+					"    ON t.HashKey = s.HashKey AND t.CDCCurrentFlag == true\n",
+					"    WHEN MATCHED AND t.HashDiff <> s.HashDiff THEN\n",
+					"      UPDATE SET t.CDCEndDate = '{Bronze_UpdateEndDate}',\n",
+					"                 t.CDCCurrentFlag = false,\n",
+					"                 t.CDCOps = s.CDCOps + 1\n",
+					"    WHEN NOT MATCHED THEN\n",
+					"      INSERT (TransmissionLossFactor, EffectiveDate, VersionNo, ConnectionPointId, RegionId, LastChanged, SecondaryTLF, CDCLoadDate, CDCStartDate, CDCEndDate, CDCOps, CDCCurrentFlag, HashKey, HashDiff)\n",
+					"      VALUES (s.TRANSMISSIONLOSSFACTOR, s.EFFECTIVEDATE, s.VERSIONNO, s.CONNECTIONPOINTID, s.REGIONID, s.LASTCHANGED, s.SECONDARY_TLF, s.CDCLoadDate, s.CDCStartDate, s.CDCEndDate, 1, s.CDCCurrentFlag, s.HashKey, s.HashDiff)\n",
+					"\"\"\")"
+				],
+				"execution_count": null
+			},
+			{
+				"cell_type": "code",
+				"source": [
+					"#Row count parameters\n",
+					"Bronze_Insert_Post=spark.sql(f\"\"\" SELECT COUNT(*) FROM {db_notebookname}.{db_tablename} WHERE CDCOps = 1 \"\"\").collect()[0][0]\n",
+					"Bronze_Update_Post=spark.sql(f\"\"\" SELECT COUNT(*) FROM {db_notebookname}.{db_tablename} WHERE CDCOps = 2 \"\"\").collect()[0][0]\n",
+					"Bronze_Delete_Post=spark.sql(f\"\"\" SELECT COUNT(*) FROM {db_notebookname}.{db_tablename} WHERE CDCOps = 0 \"\"\").collect()[0][0]\n",
+					"Bronze_TotalRowCount_Post=spark.sql(f\"\"\" SELECT COUNT(*) FROM {db_notebookname}.{db_tablename}\"\"\").collect()[0][0]\n",
+					"Bronze_ActiveRecord_Post=spark.sql(f\"\"\" SELECT COUNT(*) FROM {db_notebookname}.{db_tablename} WHERE CDCCurrentFlag = true \"\"\").collect()[0][0]"
+				],
+				"execution_count": null
+			},
+			{
+				"cell_type": "code",
+				"source": [
+					"#Row calculation\n",
+					"Bronze_Update = Bronze_Update_Post - Bronze_Update_Pre\n",
+					"Bronze_Insert = (Bronze_Insert_Post - Bronze_Insert_Pre) + Bronze_Update\n",
+					"Bronze_Delete = Bronze_Delete_Post - Bronze_Delete_Pre\n",
+					"Bronze_ActiveRows = Bronze_ActiveRecord_Post \n",
+					"Bronze_TotalRows = Bronze_TotalRowCount_Post"
+				],
+				"execution_count": null
+			},
+			{
+				"cell_type": "code",
+				"source": [
+					"log_data = [(db_notebookname,db_tablename,Bronze_LoadDate,Bronze_Insert,Bronze_Update,Bronze_Delete,Bronze_ActiveRows,Bronze_TotalRows)]\n",
+					"print(log_data)\n",
+					"log_columns = ['PIPELINE_NAME', 'TABLE_NAME', 'INGEST_DATETIME', 'INSERT','UPDATE','DELETE','ACTIVE_ROWS','TOTAL_ROWS']\n",
+					"df_log = spark.createDataFrame(log_data, log_columns)"
+				],
+				"execution_count": null
+			},
+			{
+				"cell_type": "code",
+				"source": [
+					"#Write to controldb\n",
+					"db_port = 1433\n",
+					"linked_service_name = \"LS_SQL_ELTFrameworkDB\"\n",
+					"linkedServiceProperties = json.loads(mssparkutils.credentials.getPropertiesAll(linked_service_name))\n",
+					"sql_server_name = linkedServiceProperties.get('Endpoint')\n",
+					"db_name = linkedServiceProperties.get('Database')\n",
+					"access_token = mssparkutils.credentials.getConnectionStringOrCreds(linked_service_name)\n",
+					"write_table_name = \"[CTL].[CFG_INGESTION_LOGS]\"\n",
+					"\n",
+					"try:\n",
+					"    df_log.write.format(\"jdbc\") \\\n",
+					"        .option(\"url\", \"jdbc:sqlserver://%s:%s\" % (sql_server_name, db_port)) \\\n",
+					"        .option(\"dbtable\", write_table_name) \\\n",
+					"        .option(\"accessToken\", access_token) \\\n",
+					"        .option(\"encrypt\", \"true\") \\\n",
+					"        .option(\"databaseName\", db_name) \\\n",
+					"        .option(\"hostNameInCertificate\", \"*.database.windows.net\") \\\n",
+					"        .mode(\"append\") \\\n",
+					"        .save()\n",
+					"except ValueError as error :\n",
+					"    print(\"MSSQL Connector write failed\", error)\n",
+					"\n",
+					"print(\"MSSQL Connector write(append) succeeded  \")"
+				],
+				"execution_count": null
+			},
+			{
+				"cell_type": "code",
+				"source": [
+					"# Drop files raw storage files if exists after they have been processed.\n",
+					"from py4j.protocol import Py4JJavaError\n",
+					"\n",
+					"try:\n",
+					"    raw_output_path = f\"abfss://{source_container}@{source_storage}.dfs.core.windows.net/{source_path}/{db_tablename}/\"\n",
+					"    mssparkutils.fs.rm(raw_output_path,recurse=True)\n",
+					"\n",
+					"    print(\"Delete successful\")\n",
+					"\n",
+					"except Py4JJavaError as error :\n",
+					"    if 'org.apache.hadoop.fs.PathNotFoundException' in str (error.java_exception):\n",
+					"        print(\"No such file or directory\")"
+				],
+				"execution_count": null
+			},
+			{
+				"cell_type": "markdown",
+				"metadata": {
+					"nteract": {
+						"transient": {
+							"deleting": false
+						}
+					}
+				},
+				"source": [
+					"# Table: transmissionlossfactor: END"
+				]
+			}
+		]
+	}
+}

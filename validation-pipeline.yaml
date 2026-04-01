@@ -1,0 +1,17 @@
+trigger:
+  - none
+
+pr:
+  - '*'
+
+variables:
+  agentPoolName: 'datahub-dev-agentpool'  
+
+pool: '$(agentPoolName)'  
+
+steps:
+  - checkout: self
+    fetchDepth: 2
+    displayName: 'Checkout Target Branch'
+  - script: ./check_notebook_modifications.sh
+    displayName: Check Notebooks Modified

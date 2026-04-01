@@ -1,0 +1,14 @@
+{
+	"name": "LS_SQL_ELTFrameworkDB",
+	"properties": {
+		"annotations": [],
+		"type": "AzureSqlDatabase",
+		"typeProperties": {
+			"connectionString": "Integrated Security=False;Encrypt=True;Connection Timeout=30;Data Source=cql-dev-datahub-sql.database.windows.net;Initial Catalog=data-platform-framework-controldb"
+		},
+		"connectVia": {
+			"referenceName": "AutoResolveIntegrationRuntime",
+			"type": "IntegrationRuntimeReference"
+		}
+	}
+}

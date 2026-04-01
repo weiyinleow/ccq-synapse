@@ -1,0 +1,473 @@
+{
+	"name": "fact_retail_electricity_consumption_gold",
+	"properties": {
+		"folder": {
+			"name": "DataHubBatchScripts/GOLD/SustainabilityUseCase"
+		},
+		"nbformat": 4,
+		"nbformat_minor": 2,
+		"bigDataPool": {
+			"referenceName": "JobSparkpool02",
+			"type": "BigDataPoolReference"
+		},
+		"sessionProperties": {
+			"driverMemory": "56g",
+			"driverCores": 8,
+			"executorMemory": "56g",
+			"executorCores": 8,
+			"numExecutors": 2,
+			"conf": {
+				"spark.dynamicAllocation.enabled": "false",
+				"spark.dynamicAllocation.minExecutors": "2",
+				"spark.dynamicAllocation.maxExecutors": "2",
+				"spark.autotune.trackingId": "3215537b-1c39-41b4-980d-0acd5e45a05e"
+			}
+		},
+		"metadata": {
+			"saveOutput": true,
+			"enableDebugMode": false,
+			"kernelspec": {
+				"name": "synapse_pyspark",
+				"display_name": "Synapse PySpark"
+			},
+			"language_info": {
+				"name": "python"
+			},
+			"a365ComputeOptions": {
+				"id": "/subscriptions/2e9f823e-dc76-4e8e-b815-c8a4f22d05ff/resourceGroups/CQL-AZUR1-DEVDATAHUB01-RG/providers/Microsoft.Synapse/workspaces/cql-dev-datahub-synapse01/bigDataPools/JobSparkpool02",
+				"name": "JobSparkpool02",
+				"type": "Spark",
+				"endpoint": "https://cql-dev-datahub-synapse01.dev.azuresynapse.net/livyApi/versions/2019-11-01-preview/sparkPools/JobSparkpool02",
+				"auth": {
+					"type": "AAD",
+					"authResource": "https://dev.azuresynapse.net"
+				},
+				"sparkVersion": "3.4",
+				"nodeCount": 10,
+				"cores": 8,
+				"memory": 56,
+				"automaticScaleJobs": false
+			},
+			"sessionKeepAliveTimeout": 30
+		},
+		"cells": [
+			{
+				"cell_type": "code",
+				"source": [
+					"#Imports\n",
+					"import json\n",
+					"\n",
+					"from pyspark.sql.functions import hash\n",
+					"from pyspark.sql import functions as fn\n",
+					"from pyspark.sql.functions import col, concat, lit, to_timestamp,current_timestamp,date_format\n",
+					"from pyspark.sql.functions import sha2, concat_ws, regexp_replace\n",
+					"\n",
+					"from pyspark.sql.types import StructType, StructField, StringType, IntegerType, BooleanType,DateType, DoubleType,TimestampType\n",
+					"\n",
+					"from py4j.protocol import Py4JJavaError\n",
+					"\n",
+					"import com.microsoft.spark.sqlanalytics\n",
+					"from com.microsoft.spark.sqlanalytics.Constants import Constants"
+				],
+				"execution_count": 2
+			},
+			{
+				"cell_type": "code",
+				"metadata": {
+					"collapsed": false
+				},
+				"source": [
+					"#Get Parameter from controldb\n",
+					"db_port = 1433\n",
+					"linked_service_name = \"LS_SQL_ELTFrameworkDB\"\n",
+					"lake_db_name = \"gold\"\n",
+					"db_notebookname= \"fact_retail_electricity_consumption_gold\"\n",
+					"linkedServiceProperties = json.loads(mssparkutils.credentials.getPropertiesAll(linked_service_name))\n",
+					"sql_server_name = linkedServiceProperties.get('Endpoint')\n",
+					"db_name = linkedServiceProperties.get('Database')\n",
+					"#print(linkedServiceProperties)\n",
+					"access_token = mssparkutils.credentials.getConnectionStringOrCreds(linked_service_name)\n",
+					"\n",
+					"db_query =\"SELECT A.*,B.NotebookParameterId,B.ParameterType,B.Value  FROM [CTL].[CFG_NOTEBOOK] A LEFT JOIN [CTL].[CFG_NOTEBOOK_PARAMETER] B ON A.NotebookId = B.NotebookId\"\n",
+					"\n",
+					"df = spark.read.format(\"jdbc\") \\\n",
+					"    .option(\"url\", \"jdbc:sqlserver://%s:%s\" % (sql_server_name, db_port)) \\\n",
+					"    .option(\"query\", db_query) \\\n",
+					"    .option(\"accessToken\", access_token) \\\n",
+					"    .option(\"encrypt\", \"true\") \\\n",
+					"    .option(\"databaseName\", db_name) \\\n",
+					"    .option(\"hostNameInCertificate\", \"*.database.windows.net\") \\\n",
+					"    .load()\n",
+					"\n",
+					"df2 = df.where(df.NotebookPath==db_notebookname)\n",
+					"#display(df2)"
+				],
+				"execution_count": 3
+			},
+			{
+				"cell_type": "code",
+				"source": [
+					"#Destination DataLake Storage Details\n",
+					"destination_storage = df2.where(df2.ParameterType=='destination_storage').collect()[0][\"Value\"]\n",
+					"destination_container = df2.where(df2.ParameterType=='destination_container').collect()[0][\"Value\"]\n",
+					"destination_path = df2.where(df2.ParameterType=='destination_path').collect()[0][\"Value\"]\n",
+					"\n",
+					"#Get Current Date\n",
+					"Date_Collection = spark.sql(\"select current_timestamp() AS Current,(current_timestamp() + interval '-1' second) AS EndDate\").collect()\n",
+					"Gold_LoadDate = Date_Collection[0]['Current']\n",
+					"Gold_UpdateEndDate = Date_Collection[0]['EndDate']\n",
+					"\n",
+					"#Synapse Dedicated Server detials\n",
+					"SynapseDedicatedServer = df2.where(df2.ParameterType=='destination_storage').collect()[0]['SynapseDedicatedServer'] \n",
+					"TempFolder = df2.where(df2.ParameterType=='destination_storage').collect()[0]['TempFolder']\n",
+					"SynapseDedicatedDatabase = df2.where(df2.ParameterType=='destination_storage').collect()[0]['SynapseDedicatedDatabase']"
+				],
+				"execution_count": 4
+			},
+			{
+				"cell_type": "markdown",
+				"metadata": {
+					"nteract": {
+						"transient": {
+							"deleting": false
+						}
+					}
+				},
+				"source": [
+					"# Table: FactRetailElectricityConsumption: START"
+				]
+			},
+			{
+				"cell_type": "code",
+				"source": [
+					"#UTILS: Set table name\n",
+					"\n",
+					"#drop_tablename=\"fact_retail_electricity_consumption\"\n",
+					"\n",
+					"#UTILS: Drop table\n",
+					"\n",
+					"#spark.sql(f\"\"\"DROP TABLE IF EXISTS {lake_db_name}.{drop_tablename}\"\"\")\n",
+					"#raw_output_path = f\"abfss://{destination_container}@{destination_storage}.dfs.core.windows.net/{destination_path}/{drop_tablename}\"\n",
+					"#mssparkutils.fs.rm(raw_output_path,recurse=True)"
+				],
+				"execution_count": 5
+			},
+			{
+				"cell_type": "code",
+				"source": [
+					"#Set table name\n",
+					"db_tablename=\"fact_retail_electricity_consumption\"\n",
+					"tablename=\"FactRetailElectricityConsumption\""
+				],
+				"execution_count": 6
+			},
+			{
+				"cell_type": "code",
+				"source": [
+					"#Create Gold Table\n",
+					"spark.sql(f\"\"\"CREATE DATABASE IF NOT EXISTS {lake_db_name};\"\"\")\n",
+					"spark.sql(f\"\"\"\n",
+					"CREATE TABLE IF NOT EXISTS {lake_db_name}.{db_tablename}\n",
+					"(\n",
+					"\tFactRetailElectricityConsumptionKey STRING,\n",
+					"\tDimMonthStartDateKey INT,\n",
+					"\tDimSiteKey STRING,\n",
+					"\tDimEmissionScopeKey STRING,\n",
+					"\tElectricityConsumptionMWh DECIMAL(20,6),\n",
+					"\tElectricityConsumptionProRataMWh DECIMAL(20,6),\n",
+					"\tMarketBasedElectricityEmissionsTCO2e DECIMAL(20,6),\n",
+					"\tLocationBasedElectricityEmissionsTCO2e DECIMAL(20,6),\n",
+					"\tCDCLoadDate TIMESTAMP,\n",
+					"\tCDCStartDate TIMESTAMP,\n",
+					"\tCDCEndDate TIMESTAMP,\n",
+					"\tCDCOps INT,\n",
+					"\tCDCCurrentFlag BOOLEAN,\n",
+					"\tHashDiff STRING\n",
+					")\n",
+					"USING delta\n",
+					"LOCATION 'abfss://{destination_container}@{destination_storage}.dfs.core.windows.net/{destination_path}/{db_tablename}'\n",
+					"\"\"\")"
+				],
+				"execution_count": 7
+			},
+			{
+				"cell_type": "code",
+				"metadata": {
+					"collapsed": false
+				},
+				"source": [
+					"# Collect emission factors from reference_data\n",
+					"df_emission_factors = spark.sql(f\"\"\"\n",
+					"                        SELECT  \n",
+					"                            ref.Code AS Code,\n",
+					"                            ref.NumericValue AS NumericValue,\n",
+					"                            ref.ValidFromDate AS ValidFromDate,\n",
+					"                            ref.ValidToDate AS ValidToDate\n",
+					"                        FROM silver.reference_data ref\n",
+					"                        WHERE ref.CDCCurrentFlag = 1 AND ref.Code IN ('EF7', 'EF8')\n",
+					"                    \"\"\")\n",
+					"#display(df_emission_factors)"
+				],
+				"execution_count": 8
+			},
+			{
+				"cell_type": "code",
+				"source": [
+					"df_emission_factors.createOrReplaceTempView(\"emission_factors_temp_view\")"
+				],
+				"execution_count": 9
+			},
+			{
+				"cell_type": "code",
+				"metadata": {
+					"collapsed": false
+				},
+				"source": [
+					"source_sql_df = spark.sql(f\"\"\"\n",
+					"WITH PivotedEmissionFactors AS (\n",
+					"    SELECT\n",
+					"        ValidFromDate,\n",
+					"        ValidToDate,\n",
+					"        MAX(CASE WHEN Code = 'EF7' THEN NumericValue END) AS LocationBasedEmissionFactor,\n",
+					"        MAX(CASE WHEN Code = 'EF8' THEN NumericValue END) AS MarketBasedEmissionFactor\n",
+					"    FROM emission_factors_temp_view\n",
+					"    WHERE Code IN ('EF7', 'EF8')\n",
+					"    GROUP BY ValidFromDate, ValidToDate\n",
+					"),\n",
+					"PreAggregated AS (\n",
+					"    SELECT\n",
+					"        CONCAT(CAST(CAST(d.DateId / 100 AS INT) AS STRING), '01') AS DimMonthStartDateKey,\n",
+					"        s.DimSiteKey,\n",
+					"        e.DimEmissionScopeKey,\n",
+					"        rec.BillingPeriodQuantityKwh / 1000 AS ElectricityConsumptionMWh,\n",
+					"        rec.MonthlyBillingQuantityKwh / 1000 AS ElectricityConsumptionProRataMWh,\n",
+					"        rec.CleanEnergySubscription AS RenewableComponentPercentage,\n",
+					"        ((rec.MonthlyBillingQuantityKwh / 1000) * (1 - (rec.CleanEnergySubscription / 100))) * pf.MarketBasedEmissionFactor AS MarketBasedElectricityEmissionsTCO2e,\n",
+					"        (rec.MonthlyBillingQuantityKwh / 1000) * pf.LocationBasedEmissionFactor AS LocationBasedElectricityEmissionsTCO2e\n",
+					"    FROM silver.retail_electricity_charge_details rec\n",
+					"    JOIN PivotedEmissionFactors pf ON rec.MonthlyBillingPeriod BETWEEN pf.ValidFromDate AND pf.ValidToDate\n",
+					"    JOIN gold.dim_site s ON COALESCE(rec.SiteCode, 'UNK') = s.SiteCode\n",
+					"    JOIN dimtables_gold.dimdate d ON d.Date = rec.MonthlyBillingPeriod\n",
+					"    JOIN gold.dim_emission_scope e ON e.EmissionScopeDescription = 'Scope 2'\n",
+					"    WHERE rec.CDCCurrentFlag = 1\n",
+					")\n",
+					"SELECT\n",
+					"    DimMonthStartDateKey,\n",
+					"    DimSiteKey,\n",
+					"    DimEmissionScopeKey,\n",
+					"    --RenewableComponentPercentage,\n",
+					"    SUM(ElectricityConsumptionMWh) AS ElectricityConsumptionMWh,\n",
+					"    SUM(ElectricityConsumptionProRataMWh) AS ElectricityConsumptionProRataMWh,\n",
+					"    SUM(MarketBasedElectricityEmissionsTCO2e) AS MarketBasedElectricityEmissionsTCO2e,\n",
+					"    SUM(LocationBasedElectricityEmissionsTCO2e) AS LocationBasedElectricityEmissionsTCO2e\n",
+					"FROM PreAggregated\n",
+					"GROUP BY DimMonthStartDateKey, DimSiteKey, DimEmissionScopeKey\n",
+					"--,RenewableComponentPercentage\n",
+					"ORDER BY \n",
+					"DimMonthStartDateKey,DimSiteKey\n",
+					"\"\"\")\n",
+					"\n",
+					"#display(source_sql_df)"
+				],
+				"execution_count": 10
+			},
+			{
+				"cell_type": "code",
+				"metadata": {
+					"collapsed": false
+				},
+				"source": [
+					"# Convert columns to STRING before creating HashDiff\n",
+					"source_sql_df = source_sql_df.withColumn(\"CleanElectricityConsumptionMWh\", col(\"ElectricityConsumptionMWh\").cast(\"string\"))\n",
+					"source_sql_df = source_sql_df.withColumn(\"CleanElectricityConsumptionProRataMWh\", col(\"ElectricityConsumptionProRataMWh\").cast(\"string\"))\n",
+					"source_sql_df = source_sql_df.withColumn(\"CleanMarketBasedElectricityEmissionsTCO2e\", col(\"MarketBasedElectricityEmissionsTCO2e\").cast(\"string\"))\n",
+					"source_sql_df = source_sql_df.withColumn(\"CleanLocationBasedElectricityEmissionsTCO2e\", col(\"LocationBasedElectricityEmissionsTCO2e\").cast(\"string\"))\n",
+					"\n",
+					"#Add FactRetailElectricityConsumptionKey & HashDiff\n",
+					"source_sql_df = source_sql_df.withColumn(\"FactRetailElectricityConsumptionKey\", sha2(concat_ws(\"||\", \"DimSiteKey\", \"DimMonthStartDateKey\", \"DimEmissionScopeKey\"), 256))\n",
+					"source_sql_df = source_sql_df.withColumn(\"HashDiff\", sha2(concat_ws(\"||\", \"CleanElectricityConsumptionMWh\", \"CleanElectricityConsumptionProRataMWh\", \"CleanMarketBasedElectricityEmissionsTCO2e\", \"CleanLocationBasedElectricityEmissionsTCO2e\"), 256))\n",
+					"\n",
+					"                                                                          \n",
+					"# Add CDC columns\n",
+					"source_sql_df = source_sql_df.withColumn(\"CDCLoadDate\", to_timestamp(lit(Gold_LoadDate),'yyyy-MM-dd HH:mm:ss'))\n",
+					"source_sql_df = source_sql_df.withColumn(\"CDCStartDate\", to_timestamp(lit(Gold_LoadDate), 'yyyy-MM-dd HH:mm:ss'))\n",
+					"source_sql_df = source_sql_df.withColumn(\"CDCEndDate\", to_timestamp(lit(\"9999-12-31 23:59:59\"), 'yyyy-MM-dd HH:mm:ss'))\n",
+					"source_sql_df = source_sql_df.withColumn(\"CDCCurrentFlag\", lit(1))\n",
+					"source_sql_df = source_sql_df.withColumn(\"CDCOps\", lit(1))\n",
+					"\n",
+					"#display(source_sql_df)"
+				],
+				"execution_count": 11
+			},
+			{
+				"cell_type": "code",
+				"source": [
+					"# Row count parameters\n",
+					"Gold_Insert_Pre=spark.sql(f\"\"\" SELECT COUNT(*) FROM {lake_db_name}.{db_tablename} WHERE CDCOps = 1 \"\"\").collect()[0][0]\n",
+					"Gold_Update_Pre=spark.sql(f\"\"\" SELECT COUNT(*) FROM {lake_db_name}.{db_tablename} WHERE CDCOps = 2 \"\"\").collect()[0][0]\n",
+					"Gold_Delete_Pre=spark.sql(f\"\"\" SELECT COUNT(*) FROM {lake_db_name}.{db_tablename} WHERE CDCOps = 0 \"\"\").collect()[0][0]"
+				],
+				"execution_count": 12
+			},
+			{
+				"cell_type": "code",
+				"source": [
+					"# Create a temporary view of the dataframe\n",
+					"source_sql_df.createOrReplaceTempView(\"temp_view\")"
+				],
+				"execution_count": 13
+			},
+			{
+				"cell_type": "code",
+				"source": [
+					"# SCD2 logic\n",
+					"# Use the merge operation to update the target table\n",
+					"spark.sql(f\"\"\"\n",
+					"    MERGE INTO {lake_db_name}.{db_tablename} t\n",
+					"    USING temp_view s\n",
+					"    ON t.FactRetailElectricityConsumptionKey = s.FactRetailElectricityConsumptionKey AND t.CDCCurrentFlag == 1\n",
+					"    WHEN MATCHED AND t.HashDiff <> s.HashDiff THEN\n",
+					"      UPDATE SET t.CDCEndDate = '{Gold_UpdateEndDate}',\n",
+					"                 t.CDCCurrentFlag = 0,\n",
+					"                 t.CDCOps = s.CDCOps + 1\n",
+					"    WHEN NOT MATCHED THEN\n",
+					"      INSERT (FactRetailElectricityConsumptionKey, DimMonthStartDateKey, DimSiteKey, DimEmissionScopeKey, ElectricityConsumptionMWh, ElectricityConsumptionProRataMWh, MarketBasedElectricityEmissionsTCO2e, LocationBasedElectricityEmissionsTCO2e, CDCLoadDate, CDCStartDate, CDCEndDate, CDCOps, CDCCurrentFlag, HashDiff)\n",
+					"      VALUES (s.FactRetailElectricityConsumptionKey, s.DimMonthStartDateKey, s.DimSiteKey, s.DimEmissionScopeKey, s.ElectricityConsumptionMWh, s.ElectricityConsumptionProRataMWh, s.MarketBasedElectricityEmissionsTCO2e, s.LocationBasedElectricityEmissionsTCO2e, s.CDCLoadDate, s.CDCStartDate, s.CDCEndDate, s.CDCOps, s.CDCCurrentFlag, s.HashDiff)\n",
+					"\"\"\")\n",
+					"\n",
+					"# Use the merge operation to Insert updated record \n",
+					"spark.sql(f\"\"\"\n",
+					"    MERGE INTO {lake_db_name}.{db_tablename} t\n",
+					"    USING temp_view s\n",
+					"    ON t.FactRetailElectricityConsumptionKey = s.FactRetailElectricityConsumptionKey AND t.CDCCurrentFlag == 1\n",
+					"    WHEN MATCHED AND t.HashDiff <> s.HashDiff THEN\n",
+					"      UPDATE SET t.CDCEndDate = '{Gold_UpdateEndDate}',\n",
+					"                 t.CDCCurrentFlag = 0,\n",
+					"                 t.CDCOps = s.CDCOps + 1\n",
+					"    WHEN NOT MATCHED THEN\n",
+					"      INSERT (FactRetailElectricityConsumptionKey, DimMonthStartDateKey, DimSiteKey, DimEmissionScopeKey, ElectricityConsumptionMWh, ElectricityConsumptionProRataMWh, MarketBasedElectricityEmissionsTCO2e, LocationBasedElectricityEmissionsTCO2e, CDCLoadDate, CDCStartDate, CDCEndDate, CDCOps, CDCCurrentFlag, HashDiff)\n",
+					"      VALUES (s.FactRetailElectricityConsumptionKey, s.DimMonthStartDateKey, s.DimSiteKey, s.DimEmissionScopeKey, s.ElectricityConsumptionMWh, s.ElectricityConsumptionProRataMWh, s.MarketBasedElectricityEmissionsTCO2e, s.LocationBasedElectricityEmissionsTCO2e, s.CDCLoadDate, s.CDCStartDate, s.CDCEndDate, s.CDCOps, s.CDCCurrentFlag, s.HashDiff)\n",
+					"\"\"\")"
+				],
+				"execution_count": 14
+			},
+			{
+				"cell_type": "code",
+				"source": [
+					"#Row count parameters\n",
+					"Gold_Insert_Post=spark.sql(f\"\"\" SELECT COUNT(*) FROM {lake_db_name}.{db_tablename} WHERE CDCOps = 1 \"\"\").collect()[0][0]\n",
+					"Gold_Update_Post=spark.sql(f\"\"\" SELECT COUNT(*) FROM {lake_db_name}.{db_tablename} WHERE CDCOps = 2 \"\"\").collect()[0][0]\n",
+					"Gold_Delete_Post=spark.sql(f\"\"\" SELECT COUNT(*) FROM {lake_db_name}.{db_tablename} WHERE CDCOps = 0 \"\"\").collect()[0][0]\n",
+					"Gold_TotalRowCount_Post=spark.sql(f\"\"\" SELECT COUNT(*) FROM {lake_db_name}.{db_tablename}\"\"\").collect()[0][0]\n",
+					"Gold_ActiveRecord_Post=spark.sql(f\"\"\" SELECT COUNT(*) FROM {lake_db_name}.{db_tablename} WHERE CDCCurrentFlag = 1 \"\"\").collect()[0][0]"
+				],
+				"execution_count": 15
+			},
+			{
+				"cell_type": "code",
+				"source": [
+					"#Row calculation\n",
+					"Gold_Update = Gold_Update_Post - Gold_Update_Pre\n",
+					"Gold_Insert = (Gold_Insert_Post - Gold_Insert_Pre) + Gold_Update\n",
+					"Gold_Delete = Gold_Delete_Post - Gold_Delete_Pre\n",
+					"Gold_ActiveRows = Gold_ActiveRecord_Post \n",
+					"Gold_TotalRows = Gold_TotalRowCount_Post"
+				],
+				"execution_count": 16
+			},
+			{
+				"cell_type": "code",
+				"source": [
+					"log_data = [(db_notebookname,db_tablename,Gold_LoadDate,Gold_Insert,Gold_Update,Gold_Delete,Gold_ActiveRows,Gold_TotalRows)]\n",
+					"print(log_data)\n",
+					"log_columns = ['PIPELINE_NAME', 'TABLE_NAME', 'INGEST_DATETIME', 'INSERT','UPDATE','DELETE','ACTIVE_ROWS','TOTAL_ROWS']\n",
+					"df_log = spark.createDataFrame(log_data, log_columns)"
+				],
+				"execution_count": 17
+			},
+			{
+				"cell_type": "code",
+				"source": [
+					"#Write to controldb\n",
+					"db_port = 1433\n",
+					"linked_service_name = \"LS_SQL_ELTFrameworkDB\"\n",
+					"linkedServiceProperties = json.loads(mssparkutils.credentials.getPropertiesAll(linked_service_name))\n",
+					"sql_server_name = linkedServiceProperties.get('Endpoint')\n",
+					"db_name = linkedServiceProperties.get('Database')\n",
+					"access_token = mssparkutils.credentials.getConnectionStringOrCreds(linked_service_name)\n",
+					"write_table_name = \"[CTL].[CFG_INGESTION_LOGS]\"\n",
+					"\n",
+					"try:\n",
+					"    df_log.write.format(\"jdbc\") \\\n",
+					"        .option(\"url\", \"jdbc:sqlserver://%s:%s\" % (sql_server_name, db_port)) \\\n",
+					"        .option(\"dbtable\", write_table_name) \\\n",
+					"        .option(\"accessToken\", access_token) \\\n",
+					"        .option(\"encrypt\", \"true\") \\\n",
+					"        .option(\"databaseName\", db_name) \\\n",
+					"        .option(\"hostNameInCertificate\", \"*.database.windows.net\") \\\n",
+					"        .mode(\"append\") \\\n",
+					"        .save()\n",
+					"except ValueError as error :\n",
+					"    print(\"MSSQL Connector write failed\", error)\n",
+					"\n",
+					"print(\"MSSQL Connector write(append) succeeded  \")"
+				],
+				"execution_count": 18
+			},
+			{
+				"cell_type": "code",
+				"metadata": {
+					"collapsed": false
+				},
+				"source": [
+					"gold_df = spark.sql(f\"\"\"\n",
+					"SELECT \n",
+					"    FactRetailElectricityConsumptionKey,\n",
+					"\tDimMonthStartDateKey,\n",
+					"\tDimSiteKey,\n",
+					"\tDimEmissionScopeKey,\n",
+					"\tElectricityConsumptionMWh,\n",
+					"\tElectricityConsumptionProRataMWh,\n",
+					"\tMarketBasedElectricityEmissionsTCO2e,\n",
+					"\tLocationBasedElectricityEmissionsTCO2e,\n",
+					"\tCDCLoadDate,\n",
+					"\tCDCStartDate,\n",
+					"\tCDCEndDate,\n",
+					"\tCDCOps,\n",
+					"\tCDCCurrentFlag,\n",
+					"\tHashDiff\n",
+					"FROM\n",
+					"    gold.fact_retail_electricity_consumption\n",
+					"\"\"\")\n",
+					"#display(gold_df)"
+				],
+				"execution_count": 19
+			},
+			{
+				"cell_type": "code",
+				"source": [
+					"# Configure and submit the request to write to Synapse Dedicated SQL Pool\n",
+					"(gold_df.write\n",
+					".option(Constants.SERVER, f\"\"\"{SynapseDedicatedServer}\"\"\")\n",
+					".option(Constants.TEMP_FOLDER, (f\"\"\"abfss://temp@{TempFolder}/{tablename}_staging\"\"\"))\n",
+					".mode(\"overwrite\")\n",
+					".synapsesql(f\"\"\"{SynapseDedicatedDatabase}.dbo.{tablename}\"\"\"))"
+				],
+				"execution_count": 20
+			},
+			{
+				"cell_type": "markdown",
+				"metadata": {
+					"nteract": {
+						"transient": {
+							"deleting": false
+						}
+					}
+				},
+				"source": [
+					"# Table: FactRetailElectricityConsumption: END"
+				]
+			}
+		]
+	}
+}

@@ -1,0 +1,781 @@
+{
+	"name": "AEMO_Gold_FactBillableUsage",
+	"properties": {
+		"folder": {
+			"name": "DataHubBatchScripts/AEMO"
+		},
+		"nbformat": 4,
+		"nbformat_minor": 2,
+		"bigDataPool": {
+			"referenceName": "JobSparkpool03",
+			"type": "BigDataPoolReference"
+		},
+		"sessionProperties": {
+			"driverMemory": "112g",
+			"driverCores": 16,
+			"executorMemory": "112g",
+			"executorCores": 16,
+			"numExecutors": 1,
+			"conf": {
+				"spark.dynamicAllocation.enabled": "true",
+				"spark.dynamicAllocation.minExecutors": "1",
+				"spark.dynamicAllocation.maxExecutors": "5",
+				"spark.autotune.trackingId": "9e753464-dd70-478e-873f-5cfcd792b375"
+			}
+		},
+		"metadata": {
+			"saveOutput": true,
+			"enableDebugMode": false,
+			"kernelspec": {
+				"name": "synapse_pyspark",
+				"display_name": "Synapse PySpark"
+			},
+			"language_info": {
+				"name": "python"
+			},
+			"a365ComputeOptions": {
+				"id": "/subscriptions/2e9f823e-dc76-4e8e-b815-c8a4f22d05ff/resourceGroups/CQL-AZUR1-DEVDATAHUB01-RG/providers/Microsoft.Synapse/workspaces/cql-dev-datahub-synapse01/bigDataPools/JobSparkpool03",
+				"name": "JobSparkpool03",
+				"type": "Spark",
+				"endpoint": "https://cql-dev-datahub-synapse01.dev.azuresynapse.net/livyApi/versions/2019-11-01-preview/sparkPools/JobSparkpool03",
+				"auth": {
+					"type": "AAD",
+					"authResource": "https://dev.azuresynapse.net"
+				},
+				"sparkVersion": "3.4",
+				"nodeCount": 3,
+				"cores": 16,
+				"memory": 112,
+				"automaticScaleJobs": true
+			},
+			"sessionKeepAliveTimeout": 30
+		},
+		"cells": [
+			{
+				"cell_type": "code",
+				"source": [
+					"#Imports\n",
+					"import json\n",
+					"\n",
+					"from pyspark.sql.functions import hash\n",
+					"from pyspark.sql import functions as fn\n",
+					"from pyspark.sql.functions import col, concat, lit, when, to_timestamp, current_timestamp, date_format, to_date\n",
+					"from pyspark.sql.functions import sha2, concat_ws, sum, regexp_replace\n",
+					"\n",
+					"from pyspark.sql.types import StructType, StructField, StringType, IntegerType, BooleanType,DateType, DoubleType,TimestampType\n",
+					"\n",
+					"from py4j.protocol import Py4JJavaError"
+				],
+				"execution_count": 80
+			},
+			{
+				"cell_type": "code",
+				"metadata": {
+					"jupyter": {
+						"source_hidden": false,
+						"outputs_hidden": false
+					},
+					"nteract": {
+						"transient": {
+							"deleting": false
+						}
+					}
+				},
+				"source": [
+					"#Get Parameter from controldb\n",
+					"db_port = 1433\n",
+					"linked_service_name = \"LS_SQL_ELTFrameworkDB\"\n",
+					"db_notebookname= \"AEMO_Gold\"\n",
+					"linkedServiceProperties = json.loads(mssparkutils.credentials.getPropertiesAll(linked_service_name))\n",
+					"sql_server_name = linkedServiceProperties.get('Endpoint')\n",
+					"db_name = linkedServiceProperties.get('Database')\n",
+					"#print(linkedServiceProperties)\n",
+					"access_token = mssparkutils.credentials.getConnectionStringOrCreds(linked_service_name)\n",
+					"\n",
+					"db_query =\"SELECT A.*,B.NotebookParameterId,B.ParameterType,B.Value  FROM [CTL].[CFG_NOTEBOOK] A LEFT JOIN [CTL].[CFG_NOTEBOOK_PARAMETER] B ON A.NotebookId = B.NotebookId\"\n",
+					"\n",
+					"df = spark.read.format(\"jdbc\") \\\n",
+					"    .option(\"url\", \"jdbc:sqlserver://%s:%s\" % (sql_server_name, db_port)) \\\n",
+					"    .option(\"query\", db_query) \\\n",
+					"    .option(\"accessToken\", access_token) \\\n",
+					"    .option(\"encrypt\", \"true\") \\\n",
+					"    .option(\"databaseName\", db_name) \\\n",
+					"    .option(\"hostNameInCertificate\", \"*.database.windows.net\") \\\n",
+					"    .load()\n",
+					"\n",
+					"df2 = df.where(df.NotebookPath==db_notebookname) "
+				],
+				"execution_count": 81
+			},
+			{
+				"cell_type": "code",
+				"metadata": {
+					"jupyter": {
+						"source_hidden": false,
+						"outputs_hidden": false
+					},
+					"nteract": {
+						"transient": {
+							"deleting": false
+						}
+					},
+					"tags": [
+						"parameters"
+					]
+				},
+				"source": [
+					"#Source DataLake storage details\n",
+					"source_storage = df2.where(df2.ParameterType=='source_storage').collect()[0][\"Value\"] #Storage name\n",
+					"source_container = df2.where(df2.ParameterType=='source_container').collect()[0][\"Value\"] #Storage container detail\n",
+					"source_path = df2.where(df2.ParameterType=='source_path').collect()[0][\"Value\"] #internal folder location in container \"demodata/demo_aemo\"\n",
+					"#source_file = '' #CUSTOMER__full_32a72bd2-bd94-467f-9030-6b9f20dad676_20240204_100201\n",
+					"\n",
+					"#Destination DataLake storage details\n",
+					"destination_storage = df2.where(df2.ParameterType=='destination_storage').collect()[0][\"Value\"] #Storage name\n",
+					"destination_container = df2.where(df2.ParameterType=='destination_container').collect()[0][\"Value\"] #raw storage container details\n",
+					"destination_path = df2.where(df2.ParameterType=='destination_path').collect()[0][\"Value\"] #raw delta file patch\n",
+					"\n",
+					"#Get Current Date\n",
+					"Gold_LoadDate=spark.sql(\"select current_timestamp()\").collect()[0][0]\n",
+					"\n",
+					"#Synapse Dedicated Server detials\n",
+					"SynapseDedicatedServer = df2.where(df2.ParameterType=='destination_storage').collect()[0]['SynapseDedicatedServer'] \n",
+					"TempFolder = df2.where(df2.ParameterType=='destination_storage').collect()[0]['TempFolder']\n",
+					"SynapseDedicatedDatabase = df2.where(df2.ParameterType=='destination_storage').collect()[0]['SynapseDedicatedDatabase']"
+				],
+				"execution_count": 82
+			},
+			{
+				"cell_type": "markdown",
+				"metadata": {
+					"nteract": {
+						"transient": {
+							"deleting": false
+						}
+					}
+				},
+				"source": [
+					"# Display values\n",
+					"print(source_storage)\n",
+					"print(source_container)\n",
+					"print(source_path)\n",
+					"print(destination_storage)\n",
+					"print(destination_container)\n",
+					"print(destination_path)\n",
+					"print(SynapseDedicatedServer)\n",
+					"print(TempFolder)\n",
+					"print(SynapseDedicatedDatabase)"
+				]
+			},
+			{
+				"cell_type": "code",
+				"source": [
+					"# Create AEMO Dir if it does not exist\n",
+					"dirs_in_gold =  [f.name for f in mssparkutils.fs.ls(f\"abfss://{destination_container}@{destination_storage}.dfs.core.windows.net/\")]\n",
+					"if \"AEMO\" not in dirs_in_gold:\n",
+					"    mssparkutils.fs.mkdirs(f\"abfss://{destination_container}@{destination_storage}.dfs.core.windows.net/AEMO\")"
+				],
+				"execution_count": 83
+			},
+			{
+				"cell_type": "code",
+				"source": [
+					"# Create NEM12 Dir if it does not exist \n",
+					"dirs_in_aemo =  [f.name for f in mssparkutils.fs.ls(f\"abfss://{destination_container}@{destination_storage}.dfs.core.windows.net/AEMO\")]\n",
+					"\n",
+					"if \"NEM12\" not in dirs_in_aemo:\n",
+					"    mssparkutils.fs.mkdirs(f\"abfss://{destination_container}@{destination_storage}.dfs.core.windows.net/AEMO/NEM12\")"
+				],
+				"execution_count": 84
+			},
+			{
+				"cell_type": "markdown",
+				"metadata": {
+					"nteract": {
+						"transient": {
+							"deleting": false
+						}
+					}
+				},
+				"source": [
+					"# Table FactBillableUsage : START"
+				]
+			},
+			{
+				"cell_type": "code",
+				"metadata": {
+					"jupyter": {
+						"source_hidden": false,
+						"outputs_hidden": false
+					},
+					"nteract": {
+						"transient": {
+							"deleting": false
+						}
+					}
+				},
+				"source": [
+					"#Set table name\n",
+					"db_tablename=\"FactBillableUsage\"\n",
+					"source_dbname = \"aemo_silver\"\n",
+					"source_tablename = \"nem12_silver\"\n",
+					"source_dbname_lf = \"silver\"\n",
+					"source_tablename_lf = \"loss_factors\"\n",
+					"source_tablename_nmilf = \"nmi_loss_factor\"\n",
+					"source_tablename_nmirel = \"nmi_nmi_relationship\"\n",
+					"source_tablename_nmirole = \"nmi\""
+				],
+				"execution_count": 85
+			},
+			{
+				"cell_type": "code",
+				"metadata": {
+					"jupyter": {
+						"source_hidden": false,
+						"outputs_hidden": false
+					},
+					"nteract": {
+						"transient": {
+							"deleting": false
+						}
+					}
+				},
+				"source": [
+					"# Load nem12_silver data into separate data frame\n",
+					"df_gold = spark.sql(f\"\"\"SELECT * FROM \n",
+					"                                    (SELECT\n",
+					"                                       aemo.NMI,\n",
+					"                                        aemo.NMIHashId,\n",
+					"                                        aemo.IntervalDate, \n",
+					"                                        aemo.IntervalLength,\n",
+					"                                        aemo.IntervalIndex,\n",
+					"                                        aemo.Timestamp,\n",
+					"                                        aemo.DisplayTimestamp_d,\n",
+					"                                        aemo.DateHashId, \n",
+					"                                        aemo.NormalizedTimeStart,\n",
+					"                                        aemo.NormalizedTimeEnd,\n",
+					"                                        aemo.TimeHashId,\n",
+					"                                        LEFT(aemo.NMISuffix,1) AS Suffix,\n",
+					"                                        aemo.QualityFlag,\n",
+					"                                        aemo.QualityFlagHashId,\n",
+					"                                        aemo.Usage_d, \n",
+					"                                        aemo.Usage,\n",
+					"                                        msatslf.TNI, \n",
+					"                                        msatslf.DLFCode, \n",
+					"                                        msatslf.Status,\n",
+					"                                        RANK () OVER (PARTITION BY aemo.nmi, aemo.Timestamp ORDER BY msatslf.SequenceNumber DESC) AS MSATSRank\n",
+					"                                    FROM {source_dbname}.{source_tablename} aemo \n",
+					"                                    LEFT JOIN {source_dbname}.{source_tablename_nmilf} msatslf \n",
+					"                                        ON aemo.nmi = msatslf.nmi \n",
+					"                                           AND CAST(aemo.Timestamp AS DATE) BETWEEN CAST(msatslf.ValidFrom_D AS DATE) AND CAST(msatslf.ValidTo_D AS DATE)\n",
+					"                                           AND msatslf.RowStatus = 'A' AND msatslf.ParticipantId = 'CLEANCOR'\n",
+					"                                        ) TEMP\n",
+					"                        WHERE TEMP.MSATSRank = 1\n",
+					"                    \"\"\")"
+				],
+				"execution_count": 86
+			},
+			{
+				"cell_type": "code",
+				"source": [
+					"# Create EndTimeHashId\n",
+					"df_gold = df_gold.withColumn(\"TimeIndex\",regexp_replace(\"NormalizedTimeEnd\",\":\",\"\"))\n",
+					"df_gold = df_gold.withColumn(\"TimeIndex\", col(\"TimeIndex\").cast(\"integer\"))\n",
+					"df_gold = df_gold.withColumn(\"EndTimeHashId\",sha2(concat_ws(\"||\",\"TimeIndex\"),256))\n",
+					"\n",
+					"# Rename TimeHashId to StartTimeHashId\n",
+					"df_gold = df_gold.withColumn(\"StartTimeHashId\", col('TimeHashId'))\n",
+					"\n",
+					"# Convert IntervalDate to date format\n",
+					"df_gold = df_gold.withColumn(\"Date\",to_date(\"IntervalDate\",'yyyyMMdd'))"
+				],
+				"execution_count": 87
+			},
+			{
+				"cell_type": "code",
+				"source": [
+					"# Pivot the 'Suffix' column into separate columns\n",
+					"df_gold_pvt = df_gold.groupBy(\"NMI\",\"Date\",\"IntervalDate\",\"DateHashId\",\"IntervalLength\",\"IntervalIndex\",\"NormalizedTimeStart\",\"StartTimeHashId\",\"NormalizedTimeEnd\",\"EndTimeHashId\",\n",
+					"                              \"QualityFlag\",\"QualityFlagHashId\",\"DLFCode\",\"TNI\",\"Status\").pivot(\"Suffix\").agg(sum(\"Usage\"))\n",
+					"\n",
+					"# Replace NULL values in usage\n",
+					"df_gold_pvt = df_gold_pvt.na.fill({'E':0})\n",
+					"df_gold_pvt = df_gold_pvt.na.fill({'B':0})\n",
+					"\n",
+					"# Calculated field to derive the net usage measure\n",
+					"df_gold_netkwh = df_gold_pvt.withColumn(\"Net_kWh\",col('E')-col('B'))\n",
+					"df_gold_netkwh = df_gold_netkwh.withColumn('NetkWh_usage',col('Net_kWh'))"
+				],
+				"execution_count": 88
+			},
+			{
+				"cell_type": "code",
+				"source": [
+					"# Load DLF and TLF values into separate data frame\n",
+					"df_dlf_tlf = spark.sql(f\"\"\"\n",
+					"                WITH RankedRows AS (\n",
+					"                    SELECT *, RANK() OVER (PARTITION BY LossFactorCode, FromDate, RegionId ORDER BY VersionNo desc) AS rn\n",
+					"                    FROM {source_dbname_lf}.{source_tablename_lf}\n",
+					"                    )\n",
+					"                    SELECT  LossFactorCode,\n",
+					"                            LossFactorValue,\n",
+					"                            FromDate,\n",
+					"                            ToDate,\n",
+					"                            RecordSourceTableName                       \n",
+					"                    FROM RankedRows\n",
+					"                    WHERE rn = 1\n",
+					"\"\"\")"
+				],
+				"execution_count": 89
+			},
+			{
+				"cell_type": "code",
+				"source": [
+					"df_dlf_tlf = df_dlf_tlf.na.fill({'LossFactorValue':1})"
+				],
+				"execution_count": 90
+			},
+			{
+				"cell_type": "code",
+				"source": [
+					"# Join for DLF Value\n",
+					"df_dlf_usage = df_gold_netkwh.join(\n",
+					"    df_dlf_tlf.filter(col(\"RecordSourceTableName\") == \"distributionlossfactor\"), \n",
+					"    [(col('DLFCode') ==  col('LossFactorCode')) & (col(\"Date\").between(col(\"FromDate\"),col(\"ToDate\")))],\n",
+					"    'left'\n",
+					"    )"
+				],
+				"execution_count": 91
+			},
+			{
+				"cell_type": "code",
+				"source": [
+					"df_dlf_usage = df_dlf_usage.withColumn(\"DLFUsage\",col('NetkWh_usage')*col('LossFactorValue'))\n",
+					"df_dlf_usage = df_dlf_usage.select('NMI','Date','IntervalDate','DateHashId','IntervalLength','IntervalIndex','NormalizedTimeStart','StartTimeHashId','NormalizedTimeEnd','EndTimeHashId',\n",
+					"                                    'QualityFlag','QualityFlagHashId','DLFCode','TNI','Status',col('LossFactorValue').alias('DLFValue'),'Net_kWh','DLFUsage')"
+				],
+				"execution_count": 92
+			},
+			{
+				"cell_type": "code",
+				"source": [
+					"# Join for TLF Value\n",
+					"df_dlf_tlf_usage = df_dlf_usage.join(\n",
+					"    df_dlf_tlf.filter(col(\"RecordSourceTableName\") == \"transmissionlossfactor\"), \n",
+					"    [(col('TNI') == col('LossFactorCode')) & (col(\"Date\").between(col(\"FromDate\"),col(\"ToDate\")))],\n",
+					"    'left'\n",
+					"    )"
+				],
+				"execution_count": 93
+			},
+			{
+				"cell_type": "code",
+				"source": [
+					"df_dlf_tlf_usage = df_dlf_tlf_usage.withColumn(\"DLFTLFUsage\",col('DLFUsage')*col('LossFactorValue'))\n",
+					"df_lf_usage = df_dlf_tlf_usage.select('NMI','Date','IntervalDate','DateHashId','IntervalLength','IntervalIndex','NormalizedTimeStart','StartTimeHashId','NormalizedTimeEnd','EndTimeHashId',\n",
+					"                                        'QualityFlag','QualityFlagHashId','DLFCode','DLFValue','TNI',col('LossFactorValue').alias('TLFValue'),'Status','Net_kWh','DLFTLFUsage')"
+				],
+				"execution_count": 94
+			},
+			{
+				"cell_type": "code",
+				"source": [
+					"# Load NMI Role data into separate data frame\n",
+					"df_nmi_role = spark.sql(f\"\"\"\n",
+					"    SELECT \n",
+					"        NMI AS RoleNMI,\n",
+					"        NMIRole,\n",
+					"        CAST(ValidFrom_D AS date) RoleValidFromDate,\n",
+					"        CAST(ValidTo_D AS date) RoleValidToDate   \n",
+					"    FROM {source_dbname}.{source_tablename_nmirole}\n",
+					"    WHERE Party in ('CLEANCO', 'CLEANCOR') and RowStatus = 'A'\n",
+					"\"\"\")"
+				],
+				"execution_count": 95
+			},
+			{
+				"cell_type": "code",
+				"source": [
+					"# Filter LR role and get the respective child NMIs\n",
+					"df_lr = df_lf_usage.join(\n",
+					"    df_nmi_role.filter(col(\"NMIRole\") == \"LR\"),\n",
+					"    [(df_lf_usage.NMI == df_nmi_role.RoleNMI) & (col(\"Date\").between(col(\"RoleValidFromDate\"),col(\"RoleValidToDate\")))],\n",
+					"    'inner'\n",
+					")"
+				],
+				"execution_count": 96
+			},
+			{
+				"cell_type": "code",
+				"source": [
+					"# Load nmi_nmi_relationship data into separate data frame\n",
+					"df_nmi_rel = spark.sql(f\"\"\"\n",
+					"    SELECT \n",
+					"        NMI AS ChildNMI,\n",
+					"        ParentNMI,\n",
+					"        CAST(ValidFrom_D AS date) RelValidFromDate,\n",
+					"        CAST(ValidTo_D AS date) RelValidToDate,\n",
+					"        ENID      \n",
+					"    FROM {source_dbname}.{source_tablename_nmirel}\n",
+					"    WHERE RowStatus = 'A'\n",
+					"\"\"\")"
+				],
+				"execution_count": 97
+			},
+			{
+				"cell_type": "code",
+				"source": [
+					"# Get the parent NMI for the child NMIs with LR role\n",
+					"df_child_lr = df_lr.join(\n",
+					"    df_nmi_rel,\n",
+					"    [(df_lr.NMI == df_nmi_rel.ChildNMI) & (col(\"Date\").between(col(\"RelValidFromDate\"),col(\"RelValidToDate\")))],\n",
+					"    'inner'\n",
+					")"
+				],
+				"execution_count": 98
+			},
+			{
+				"cell_type": "code",
+				"source": [
+					"# add usage for the Date, IntervalIndex, ParentNMI combination\n",
+					"df_child_lr_usage = df_child_lr.groupBy(\"Date\",\"IntervalDate\",\"DateHashId\",\"IntervalLength\",\"IntervalIndex\",\"NormalizedTimeStart\",\"StartTimeHashId\",\"NormalizedTimeEnd\",\"EndTimeHashId\",\n",
+					"                                        \"QualityFlag\",\"QualityFlagHashId\",\"ParentNMI\",\"DLFCode\",\"DLFValue\",\"TNI\",\"TLFValue\",\"Status\").agg(\n",
+					"                                            sum(\"Net_kWh\").alias(\"prelfusage\"),\n",
+					"                                            sum(\"DLFTLFUsage\").alias(\"postlfusage\")\n",
+					"                                            )\n",
+					"                                            \n",
+					"df_child_lr_usage = df_child_lr_usage.select(\"Date\",\"IntervalDate\",\"DateHashId\",\"IntervalLength\",\"IntervalIndex\",\"NormalizedTimeStart\",\"StartTimeHashId\",\"NormalizedTimeEnd\",\"EndTimeHashId\",col(\"ParentNMI\").alias(\"NMI\"),\n",
+					"                                            \"QualityFlag\",\"QualityFlagHashId\",\"DLFCode\",\"DLFValue\",\"TNI\",\"TLFValue\",\"Status\",\"prelfusage\",\"postlfusage\",lit(\"childusage\").alias(\"role\"))"
+				],
+				"execution_count": 99
+			},
+			{
+				"cell_type": "code",
+				"source": [
+					"# Filter FRMP role and get the respective NMIs\n",
+					"df_frmp = df_lf_usage.join(\n",
+					"    df_nmi_role.filter(col(\"NMIRole\") == \"FRMP\"),\n",
+					"    [(df_lf_usage.NMI == df_nmi_role.RoleNMI) & (col(\"Date\").between(col(\"RoleValidFromDate\"),col(\"RoleValidToDate\")))],\n",
+					"    'inner'\n",
+					")"
+				],
+				"execution_count": 100
+			},
+			{
+				"cell_type": "code",
+				"source": [
+					"# add usage for the Date, IntervalIndex and NMI combination\n",
+					"df_frmp_usage = df_frmp.groupBy(\"Date\",\"IntervalDate\",\"DateHashId\",\"IntervalLength\",\"IntervalIndex\",\"NormalizedTimeStart\",\"StartTimeHashId\",\"NormalizedTimeEnd\",\"EndTimeHashId\",\n",
+					"                                \"NMI\",\"QualityFlag\",\"QualityFlagHashId\",\"DLFCode\",\"DLFValue\",\"TNI\",\"TLFValue\",\"Status\").agg(\n",
+					"                                            sum(\"Net_kWh\").alias(\"prelfusage\"),\n",
+					"                                            sum(\"DLFTLFUsage\").alias(\"postlfusage\")\n",
+					"                                            )\n",
+					"\n",
+					"df_frmp_usage = df_frmp_usage.select(\"Date\",\"IntervalDate\",\"DateHashId\",\"IntervalLength\",\"IntervalIndex\",\"NormalizedTimeStart\",\"StartTimeHashId\",\"NormalizedTimeEnd\",\"EndTimeHashId\",\n",
+					"                                    \"NMI\",\"QualityFlag\",\"QualityFlagHashId\",\"DLFCode\",\"DLFValue\",\"TNI\",\"TLFValue\",\"Status\",\"prelfusage\",\"postlfusage\",lit(\"parentusage\").alias(\"role\"))"
+				],
+				"execution_count": 101
+			},
+			{
+				"cell_type": "code",
+				"source": [
+					"# Perform the union\n",
+					"df_usage_union = df_frmp_usage.union(df_child_lr_usage) \n",
+					"\n",
+					"# Pivot the 'role' column into separate columns, aggregating by pre and post lossfactor usage\n",
+					"df_usage = df_usage_union.groupBy(\"Date\",\"IntervalDate\",\"DateHashId\",\"IntervalLength\",\"IntervalIndex\",\"NormalizedTimeStart\",\"StartTimeHashId\",\"NormalizedTimeEnd\",\"EndTimeHashId\",\n",
+					"                                  \"NMI\",\"QualityFlag\",\"QualityFlagHashId\",\"DLFCode\",\"DLFValue\",\"TNI\",\"TLFValue\",\"Status\").pivot(\"role\").agg(\n",
+					"                                            sum(\"prelfusage\").alias(\"sum_prelfusage\"),\n",
+					"                                            sum(\"postlfusage\").alias(\"sum_postlfusage\")\n",
+					"                                            )"
+				],
+				"execution_count": 102
+			},
+			{
+				"cell_type": "code",
+				"source": [
+					"# Replace NULL values in usage\n",
+					"df_usage = df_usage.na.fill({'parentusage_sum_prelfusage':0})\n",
+					"df_usage = df_usage.na.fill({'childusage_sum_prelfusage':0})\n",
+					"df_usage = df_usage.na.fill({'parentusage_sum_postlfusage':0})\n",
+					"df_usage = df_usage.na.fill({'childusage_sum_postlfusage':0})\n",
+					"\n",
+					"# Children with negative usage is set to Zero\n",
+					"df_usage = df_usage.withColumn(\"childusage_sum_prelfusage\",when(col(\"childusage_sum_prelfusage\") < 0, 0).otherwise(col(\"childusage_sum_prelfusage\")))\n",
+					"df_usage = df_usage.withColumn(\"childusage_sum_postlfusage\",when(col(\"childusage_sum_postlfusage\") < 0, 0).otherwise(col(\"childusage_sum_postlfusage\")))"
+				],
+				"execution_count": 103
+			},
+			{
+				"cell_type": "code",
+				"source": [
+					"# Parent NMI remaining usage =  Parent NMI total usage - sum of child NMI usage\n",
+					"df_billable_usage = df_usage.withColumn(\"BillableUsagePreLF\",col('parentusage_sum_prelfusage')-col('childusage_sum_prelfusage'))\n",
+					"df_billable_usage = df_billable_usage.withColumn(\"BillableUsagePostLF\",col('parentusage_sum_postlfusage')-col('childusage_sum_postlfusage'))\n",
+					"\n",
+					"# Add columns\n",
+					"df_billable_usage = df_billable_usage.withColumn(\"NMIHashId\", sha2(concat_ws(\"||\",\"NMI\"),256))"
+				],
+				"execution_count": 104
+			},
+			{
+				"cell_type": "code",
+				"source": [
+					"df_gold_final = df_billable_usage.select('NMI','NMIHashId','IntervalDate','DateHashId','IntervalLength','IntervalIndex','NormalizedTimeStart','StartTimeHashId','NormalizedTimeEnd','EndTimeHashId',\n",
+					"                                         'QualityFlag','QualityFlagHashId','DLFCode','DLFValue',col('TNI').alias('TLFCode'),'TLFValue','Status','BillableUsagePreLF','BillableUsagePostLF')"
+				],
+				"execution_count": 105
+			},
+			{
+				"cell_type": "code",
+				"source": [
+					"# Drop table and storage folder if exists\n",
+					"from py4j.protocol import Py4JJavaError\n",
+					"\n",
+					"spark.sql(f\"\"\"DROP TABLE IF EXISTS {db_notebookname}.{db_tablename}\"\"\")\n",
+					"\n",
+					"try:\n",
+					"    raw_output_path = f\"abfss://{destination_container}@{destination_storage}.dfs.core.windows.net/{destination_path}/{db_tablename}\"\n",
+					"    mssparkutils.fs.rm(raw_output_path,recurse=True)\n",
+					"\n",
+					"    print(\"Delete successful\")\n",
+					"\n",
+					"except Py4JJavaError as error :\n",
+					"    if 'org.apache.hadoop.fs.PathNotFoundException' in str (error.java_exception):\n",
+					"        print(\"No such file or directory\")"
+				],
+				"execution_count": 107
+			},
+			{
+				"cell_type": "code",
+				"source": [
+					"spark.sql(f\"\"\"\n",
+					"CREATE TABLE IF NOT EXISTS {db_notebookname}.{db_tablename}\n",
+					"(\n",
+					"    NMI STRING,\n",
+					"    NMIHashId STRING,\n",
+					"    IntervalDate STRING, \n",
+					"    DateHashId STRING,\n",
+					"    IntervalLength DOUBLE,\n",
+					"    IntervalIndex INT,\n",
+					"    NormalizedTimeStart STRING,\n",
+					"    StartTimeHashId STRING,\n",
+					"    NormalizedTimeEnd STRING,\n",
+					"    EndTimeHashId STRING,\n",
+					"    QualityFlag STRING,\n",
+					"    QualityFlagHashId STRING,\n",
+					"    Status STRING,\n",
+					"    DLFCode STRING,\n",
+					"    DLFValue DECIMAL(15,5),\n",
+					"    TLFCode STRING,\n",
+					"    TLFValue DECIMAL(15,5),\n",
+					"    BillableUsagePreLF DOUBLE,\n",
+					"    BillableUsagePostLF DOUBLE\n",
+					")\n",
+					"USING delta\n",
+					"LOCATION 'abfss://{destination_container}@{destination_storage}.dfs.core.windows.net/{destination_path}/{db_tablename}'\n",
+					"\"\"\")"
+				],
+				"execution_count": 108
+			},
+			{
+				"cell_type": "code",
+				"source": [
+					"# Row count parameters\n",
+					"Gold_Insert_Pre=spark.sql(f\"\"\" SELECT COUNT(*) FROM {db_notebookname}.{db_tablename} \"\"\").collect()[0][0]"
+				],
+				"execution_count": 109
+			},
+			{
+				"cell_type": "code",
+				"source": [
+					"    # Create a temporary view of the dataframe\n",
+					"    df_gold_final.createOrReplaceTempView(f\"\"\"Gold_{db_tablename}\"\"\")\n",
+					"\n",
+					"    # Use insert operation to update the target table\n",
+					"    spark.sql(f\"\"\" \n",
+					"                INSERT INTO {db_notebookname}.{db_tablename} \n",
+					"                    SELECT\n",
+					"                        NMI,\n",
+					"                        NMIHashId,\n",
+					"                        IntervalDate, \n",
+					"                        DateHashId,\n",
+					"                        IntervalLength,\n",
+					"                        IntervalIndex,\n",
+					"                        NormalizedTimeStart,\n",
+					"                        StartTimeHashId,\n",
+					"                        NormalizedTimeEnd,\n",
+					"                        EndTimeHashId,\n",
+					"                        QualityFlag,\n",
+					"                        QualityFlagHashId,\n",
+					"                        Status,\n",
+					"                        DLFCode,\n",
+					"                        DLFValue,\n",
+					"                        TLFCode,\n",
+					"                        TLFValue,\t                  \n",
+					"                        BillableUsagePreLF,\n",
+					"                        BillableUsagePostLF\n",
+					"                    FROM Gold_{db_tablename};\n",
+					"            \"\"\")"
+				],
+				"execution_count": 110
+			},
+			{
+				"cell_type": "code",
+				"source": [
+					" # Create a data frame for dedicated SQL server\n",
+					"df_gold_dsql = spark.sql(f\"\"\" \n",
+					"                                SELECT\n",
+					"                                        NMI,\n",
+					"                                        NMIHashId,\n",
+					"                                        IntervalDate, \n",
+					"                                        DateHashId,\n",
+					"                                        IntervalLength,\n",
+					"                                        IntervalIndex,\n",
+					"                                        NormalizedTimeStart,\n",
+					"                                        StartTimeHashId,\n",
+					"                                        NormalizedTimeEnd,\n",
+					"                                        EndTimeHashId,\n",
+					"                                        QualityFlag,\n",
+					"                                        QualityFlagHashId,\n",
+					"                                        Status,\n",
+					"                                        DLFCode,\n",
+					"                                        DLFValue,\n",
+					"                                        TLFCode,\n",
+					"                                        TLFValue,\t                  \n",
+					"                                        BillableUsagePreLF, \n",
+					"                                        BillableUsagePostLF\n",
+					"                                FROM {db_notebookname}.{db_tablename}\n",
+					"                        \"\"\")"
+				],
+				"execution_count": 111
+			},
+			{
+				"cell_type": "code",
+				"source": [
+					"column_order = [\n",
+					"    \"NMI\",\n",
+					"    \"NMIHashId\",\n",
+					"    \"IntervalDate\",\n",
+					"    \"DateHashId\",\n",
+					"    \"IntervalLength\",\n",
+					"    \"IntervalIndex\",\n",
+					"    \"NormalizedTimeStart\",\n",
+					"    \"StartTimeHashId\",\n",
+					"    \"NormalizedTimeEnd\",\n",
+					"    \"EndTimeHashId\",\n",
+					"    \"QualityFlag\",\n",
+					"    \"QualityFlagHashId\",\n",
+					"    \"Status\",\n",
+					"\t\"DLFCode\",\n",
+					"    \"DLFValue\",\n",
+					"\t\"TLFCode\",\n",
+					"    \"TLFValue\",\n",
+					"\t\"BillableUsagePreLF\",\n",
+					"    \"BillableUsagePostLF\",\n",
+					"    \"LoadDate\" \n",
+					"    ]"
+				],
+				"execution_count": 112
+			},
+			{
+				"cell_type": "code",
+				"source": [
+					"# Write using AAD Auth to internal table\n",
+					"# Add required imports\n",
+					"import com.microsoft.spark.sqlanalytics\n",
+					"from com.microsoft.spark.sqlanalytics.Constants import Constants\n",
+					"from pyspark.sql.functions import *\n",
+					"\n",
+					"df_gold_dsql = df_gold_dsql.withColumn('LoadDate', to_timestamp(lit(Gold_LoadDate),'yyyy-MM-dd HH:mm:ss'))\n",
+					"\n",
+					"#order columns for Azure Synapse insert should match synapse table creation order.\n",
+					"df_gold_dsql =  df_gold_dsql.select(*column_order)\n",
+					"\n",
+					"# Configure and submit the request to write to Synapse Dedicated SQL Pool\n",
+					"# Sample below is using AAD-based authentication approach; See further examples to leverage SQL Basic auth.\n",
+					"(df_gold_dsql.write\n",
+					"    # If `Constants.SERVER` is not provided, the `<database_name>` from the three-part table name argument\n",
+					"    # to `synapsesql` method is used to infer the Synapse Dedicated SQL End Point.\n",
+					"    .option(Constants.SERVER, f\"\"\"{SynapseDedicatedServer}\"\"\")\n",
+					"    # Like-wise, if `Constants.TEMP_FOLDER` is not provided, the connector will use the runtime staging directory config (see section on Configuration Options for details).\n",
+					"    .option(Constants.TEMP_FOLDER, (f\"\"\"abfss://temp@{TempFolder}/{db_tablename}\"\"\"))\n",
+					"    # Choose a save mode that is apt for your use case.\n",
+					"    # Options for save modes are \"error\" or \"errorifexists\" (default), \"overwrite\", \"append\", \"ignore\".\n",
+					"    # refer to https://spark.apache.org/docs/latest/sql-data-sources-load-save-functions.html#save-modes\n",
+					"    .mode(\"overwrite\")\n",
+					"    # Required parameter - Three-part table name to which data will be written\n",
+					"    .synapsesql(f\"\"\"{SynapseDedicatedDatabase}.dbo.{db_tablename}\"\"\"))"
+				],
+				"execution_count": 113
+			},
+			{
+				"cell_type": "code",
+				"source": [
+					"Gold_TotalRowCount_Post=spark.sql(f\"\"\" SELECT COUNT(*) FROM {db_notebookname}.{db_tablename}\"\"\").collect()[0][0]"
+				],
+				"execution_count": 114
+			},
+			{
+				"cell_type": "code",
+				"source": [
+					"#Row calculation\n",
+					"Gold_TotalRows = Gold_TotalRowCount_Post"
+				],
+				"execution_count": 115
+			},
+			{
+				"cell_type": "code",
+				"source": [
+					"log_data = [(db_notebookname,db_tablename,Gold_LoadDate,Gold_TotalRows,0,0,Gold_TotalRows,Gold_TotalRows)]\n",
+					"print(log_data)\n",
+					"log_columns = ['PIPELINE_NAME', 'TABLE_NAME', 'INGEST_DATETIME', 'INSERT','UPDATE','DELETE','ACTIVE_ROWS','TOTAL_ROWS']\n",
+					"df_log = spark.createDataFrame(log_data, log_columns)"
+				],
+				"execution_count": 116
+			},
+			{
+				"cell_type": "code",
+				"source": [
+					"#Write to controldb\n",
+					"db_port = 1433\n",
+					"linked_service_name = \"LS_SQL_ELTFrameworkDB\"\n",
+					"linkedServiceProperties = json.loads(mssparkutils.credentials.getPropertiesAll(linked_service_name))\n",
+					"sql_server_name = linkedServiceProperties.get('Endpoint')\n",
+					"db_name = linkedServiceProperties.get('Database')\n",
+					"access_token = mssparkutils.credentials.getConnectionStringOrCreds(linked_service_name)\n",
+					"write_table_name = \"[CTL].[CFG_INGESTION_LOGS]\"\n",
+					"\n",
+					"try:\n",
+					"    df_log.write.format(\"jdbc\") \\\n",
+					"        .option(\"url\", \"jdbc:sqlserver://%s:%s\" % (sql_server_name, db_port)) \\\n",
+					"        .option(\"dbtable\", write_table_name) \\\n",
+					"        .option(\"accessToken\", access_token) \\\n",
+					"        .option(\"encrypt\", \"true\") \\\n",
+					"        .option(\"databaseName\", db_name) \\\n",
+					"        .option(\"hostNameInCertificate\", \"*.database.windows.net\") \\\n",
+					"        .mode(\"append\") \\\n",
+					"        .save()\n",
+					"except ValueError as error :\n",
+					"    print(\"MSSQL Connector write failed\", error)\n",
+					"\n",
+					"print(\"MSSQL Connector write(append) succeeded  \")"
+				],
+				"execution_count": 117
+			},
+			{
+				"cell_type": "markdown",
+				"metadata": {
+					"nteract": {
+						"transient": {
+							"deleting": false
+						}
+					}
+				},
+				"source": [
+					"# Table FactBillableUsage : END"
+				]
+			}
+		]
+	}
+}

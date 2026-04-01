@@ -1,0 +1,162 @@
+{
+	"name": "feature_flags_template_script",
+	"properties": {
+		"folder": {
+			"name": "DataHubBatchScripts/DEVELOPMENT_TOOLS"
+		},
+		"nbformat": 4,
+		"nbformat_minor": 2,
+		"bigDataPool": {
+			"referenceName": "Sparkpool01",
+			"type": "BigDataPoolReference"
+		},
+		"sessionProperties": {
+			"driverMemory": "28g",
+			"driverCores": 4,
+			"executorMemory": "28g",
+			"executorCores": 4,
+			"numExecutors": 2,
+			"conf": {
+				"spark.dynamicAllocation.enabled": "false",
+				"spark.dynamicAllocation.minExecutors": "2",
+				"spark.dynamicAllocation.maxExecutors": "2",
+				"spark.autotune.trackingId": "3eddf305-3cf3-4389-87ce-74919a8d9829"
+			}
+		},
+		"metadata": {
+			"saveOutput": true,
+			"enableDebugMode": true,
+			"kernelspec": {
+				"name": "synapse_pyspark",
+				"display_name": "Synapse PySpark"
+			},
+			"language_info": {
+				"name": "python"
+			},
+			"a365ComputeOptions": {
+				"id": "/subscriptions/2e9f823e-dc76-4e8e-b815-c8a4f22d05ff/resourceGroups/CQL-AZUR1-DEVDATAHUB01-RG/providers/Microsoft.Synapse/workspaces/cql-dev-datahub-synapse01/bigDataPools/Sparkpool01",
+				"name": "Sparkpool01",
+				"type": "Spark",
+				"endpoint": "https://cql-dev-datahub-synapse01.dev.azuresynapse.net/livyApi/versions/2019-11-01-preview/sparkPools/Sparkpool01",
+				"auth": {
+					"type": "AAD",
+					"authResource": "https://dev.azuresynapse.net"
+				},
+				"sparkVersion": "3.4",
+				"nodeCount": 10,
+				"cores": 8,
+				"memory": 56,
+				"automaticScaleJobs": false
+			},
+			"sessionKeepAliveTimeout": 30
+		},
+		"cells": [
+			{
+				"cell_type": "code",
+				"source": [
+					"# This Notebook can be used as the template for creating a new Notebook, or for taking the sections of code required to update an existing\n",
+					"# Notebook with an appropriate Feature Flag implemented.\n",
+					"\n",
+					"# Feature Flags must be instantiated at the top of your Notebooks - this allows you to implement the Feature Flag cell(s) below before\n",
+					"# the flag itself has been configured in the Unify database. Assiging it to False is mandatory to ensure old code always runs by default.\n",
+					"\n",
+					"test_feature_flag = False\n",
+					"blank_feature_flag = False\n",
+					"new_notebook_feature_flag = False"
+				],
+				"execution_count": 52
+			},
+			{
+				"cell_type": "markdown",
+				"metadata": {
+					"nteract": {
+						"transient": {
+							"deleting": false
+						}
+					}
+				},
+				"source": [
+					"Run the get_feature_flags Notebook to fetch all Feature Flags from the Unify database"
+				]
+			},
+			{
+				"cell_type": "code",
+				"source": [
+					"%run \"DataHubBatchScripts/DEVELOPMENT_TOOLS/get_feature_flags\""
+				],
+				"execution_count": 53
+			},
+			{
+				"cell_type": "code",
+				"metadata": {
+					"collapsed": false
+				},
+				"source": [
+					"# Assign the configured state of your Feature Flag based on the name of the flag in the Unify database.\n",
+					"# The try statement allows for code to continue to run despite unconfigured / non-existent flags.\n",
+					"# This cell can be copied into an existing Notebook, in any cell in that Notebook, where code is to be updated.\n",
+					"# Simply copy the below and paste in the top of the cell being updated and indent the existing code to fit within the else statement.\n",
+					"try:\n",
+					"    test_feature_flag = df_feature_flags.where(\"FlagName = 'TestFeature'\").collect()[0][\"FlagState\"]\n",
+					"except Exception as e:\n",
+					"    print(e)\n",
+					"\n",
+					"# Use your Feature Flag in your code as below\n",
+					"if test_feature_flag:\n",
+					"    print(\"Feature Flag turned on, new code allowed to run.\")\n",
+					"    # place new code here\n",
+					"\n",
+					"else:\n",
+					"    print(\"Feature Flag turned off, new code not allowed to run.\")\n",
+					"    # place old code here"
+				],
+				"execution_count": 54
+			},
+			{
+				"cell_type": "code",
+				"source": [
+					"# This cell is simply a demonstrative section of code to show what happens when the Feature Flag doesn't exist yet.\n",
+					"try:\n",
+					"    blank_feature_flag = df_feature_flags.where(\"FlagName = 'Not a real flag'\").collect()[0][\"FlagState\"]\n",
+					"except Exception as e:\n",
+					"    print(e) # printing error output in case unexpected errors occur with the above\n",
+					"\n",
+					"if blank_feature_flag:\n",
+					"    print(\"This doesn't work because it's not a real feature flag.\")\n",
+					"    # place new code here\n",
+					"else:\n",
+					"    print(\"Feature flag doesn't exist, so this section runs by default.\")\n",
+					"    # place old code here"
+				],
+				"execution_count": 55
+			},
+			{
+				"cell_type": "code",
+				"source": [
+					"# This cell is simply a demonstrative section of code to show what happens when the Feature Flag doesn't exist yet.\n",
+					"try:\n",
+					"    new_notebook_feature_flag = df_feature_flags.where(\"FlagName = 'Another Fake Flag'\").collect()[0][\"FlagState\"]\n",
+					"except Exception as e:\n",
+					"    print(e) # printing error output in case unexpected errors occur with the above\n",
+					"\n",
+					"if new_notebook_feature_flag:\n",
+					"    print(\"This doesn't work because it's still not a real feature flag.\")\n",
+					"    # place your code here\n",
+					"else:\n",
+					"    # Feature flag doesn't exist, so this section runs by default. The below kill command stops the Notebook from running. Use this cell\n",
+					"    # at the top of a new Notebook to prevent the Notebook from running at all.\n",
+					"    mssparkutils.notebook.exit(\"Feature is not Production-ready. Closing Notebook.\")"
+				],
+				"execution_count": 56
+			},
+			{
+				"cell_type": "code",
+				"source": [
+					"# Using the cell above means everything from this cell onwards is protected from running. The below print() statement never completes.\n",
+					"print(\"This cell will never run because the Feature Flag above is not configured or in the True state.\")"
+				],
+				"execution_count": null
+			}
+		]
+	}
+}

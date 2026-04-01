@@ -1,0 +1,283 @@
+{
+	"name": "adls_file_cleanup",
+	"properties": {
+		"folder": {
+			"name": "DataHubBatchScripts/ESG_SHAREPOINT"
+		},
+		"nbformat": 4,
+		"nbformat_minor": 2,
+		"bigDataPool": {
+			"referenceName": "Sparkpool01",
+			"type": "BigDataPoolReference"
+		},
+		"sessionProperties": {
+			"driverMemory": "56g",
+			"driverCores": 8,
+			"executorMemory": "56g",
+			"executorCores": 8,
+			"numExecutors": 2,
+			"conf": {
+				"spark.dynamicAllocation.enabled": "false",
+				"spark.dynamicAllocation.minExecutors": "2",
+				"spark.dynamicAllocation.maxExecutors": "2",
+				"spark.autotune.trackingId": "6023a449-83ed-4f4d-abca-6b51f528b98f"
+			}
+		},
+		"metadata": {
+			"saveOutput": true,
+			"enableDebugMode": false,
+			"kernelspec": {
+				"name": "synapse_pyspark",
+				"display_name": "Synapse PySpark"
+			},
+			"language_info": {
+				"name": "python"
+			},
+			"a365ComputeOptions": {
+				"id": "/subscriptions/2e9f823e-dc76-4e8e-b815-c8a4f22d05ff/resourceGroups/CQL-AZUR1-DEVDATAHUB01-RG/providers/Microsoft.Synapse/workspaces/cql-dev-datahub-synapse01/bigDataPools/Sparkpool01",
+				"name": "Sparkpool01",
+				"type": "Spark",
+				"endpoint": "https://cql-dev-datahub-synapse01.dev.azuresynapse.net/livyApi/versions/2019-11-01-preview/sparkPools/Sparkpool01",
+				"auth": {
+					"type": "AAD",
+					"authResource": "https://dev.azuresynapse.net"
+				},
+				"sparkVersion": "3.4",
+				"nodeCount": 10,
+				"cores": 8,
+				"memory": 56,
+				"automaticScaleJobs": false
+			},
+			"sessionKeepAliveTimeout": 30
+		},
+		"cells": [
+			{
+				"cell_type": "markdown",
+				"metadata": {
+					"nteract": {
+						"transient": {
+							"deleting": false
+						}
+					}
+				},
+				"source": [
+					"# Get parameters from CTL db\n",
+					"### db_notebookname & NotebookPath: **adls_file_cleanup**"
+				]
+			},
+			{
+				"cell_type": "code",
+				"metadata": {
+					"collapsed": false
+				},
+				"source": [
+					"import json\n",
+					"db_port = 1433\n",
+					"linked_service_name = \"LS_SQL_ELTFrameworkDB\"\n",
+					"db_notebookname= \"adls_file_cleanup\"\n",
+					"linkedServiceProperties = json.loads(mssparkutils.credentials.getPropertiesAll(linked_service_name))\n",
+					"sql_server_name = linkedServiceProperties.get('Endpoint')\n",
+					"db_name = linkedServiceProperties.get('Database')\n",
+					"#print(linkedServiceProperties)\n",
+					"access_token = mssparkutils.credentials.getConnectionStringOrCreds(linked_service_name)\n",
+					"\n",
+					"#Get load meta from controldb\n",
+					"\n",
+					"db_query =\"SELECT A.*,B.NotebookParameterId,B.ParameterType,B.Value  FROM [CTL].[CFG_NOTEBOOK] A LEFT JOIN [CTL].[CFG_NOTEBOOK_PARAMETER] B ON A.NotebookId = B.NotebookId\"\n",
+					"\n",
+					"df = spark.read.format(\"jdbc\") \\\n",
+					"    .option(\"url\", \"jdbc:sqlserver://%s:%s\" % (sql_server_name, db_port)) \\\n",
+					"    .option(\"query\", db_query) \\\n",
+					"    .option(\"accessToken\", access_token) \\\n",
+					"    .option(\"encrypt\", \"true\") \\\n",
+					"    .option(\"databaseName\", db_name) \\\n",
+					"    .option(\"hostNameInCertificate\", \"*.database.windows.net\") \\\n",
+					"    .load()\n",
+					"\n",
+					"#Join cfg_notebook and cfg_notebook_parameter tables to retrieve source & target meta from controldb\n",
+					"\n",
+					"df2 = df.where(df.NotebookPath==db_notebookname) \n",
+					"\n",
+					"#display(df2)"
+				],
+				"execution_count": 52
+			},
+			{
+				"cell_type": "code",
+				"source": [
+					"# Retrieve files to delete from controldb\n",
+					"\n",
+					"cleanup_folder_1 = df2.where(df2.ParameterType=='cleanup_folder_1').collect()[0][\"Value\"] #cleanup_folder1 name\n",
+					"cleanup_folder_2 = df2.where(df2.ParameterType=='cleanup_folder_2').collect()[0][\"Value\"] #cleanup_folder2 name\n",
+					"cleanup_folder_3 = df2.where(df2.ParameterType=='cleanup_folder_3').collect()[0][\"Value\"] #cleanup_folder3 name\n",
+					"\n",
+					"\n",
+					"# Create list of files to delete\n",
+					"\n",
+					"folder_names = [cleanup_folder_1, cleanup_folder_2, cleanup_folder_3]\n",
+					"\n",
+					"#print(folder_names)"
+				],
+				"execution_count": 53
+			},
+			{
+				"cell_type": "markdown",
+				"metadata": {
+					"nteract": {
+						"transient": {
+							"deleting": false
+						}
+					}
+				},
+				"source": [
+					"## Delete files from ADLS (Landing): **START**"
+				]
+			},
+			{
+				"cell_type": "code",
+				"source": [
+					"#Set params for landing container\n",
+					"\n",
+					"destination_storage = df2.where(df2.ParameterType=='datahubdata_storage').collect()[0][\"Value\"] #datahubdata storage name\n",
+					"\n",
+					"destination_container = df2.where(df2.ParameterType=='landing_container').collect()[0][\"Value\"] #Landing container name"
+				],
+				"execution_count": 54
+			},
+			{
+				"cell_type": "code",
+				"source": [
+					"# For loop to delete sensitive files (Landing):\n",
+					"\n",
+					"for folder_name in folder_names:\n",
+					"    try:\n",
+					"        raw_output_path = f\"abfss://{destination_container}@{destination_storage}.dfs.core.windows.net/{folder_name}\"\n",
+					"        mssparkutils.fs.rm(raw_output_path,recurse=True)\n",
+					"        print(f\"Folder {folder_name} deleted successfully.\")\n",
+					"\n",
+					"    except Exception as e:\n",
+					"            print(f\"Folder {folder_name} does not exist.\")"
+				],
+				"execution_count": 55
+			},
+			{
+				"cell_type": "markdown",
+				"metadata": {
+					"nteract": {
+						"transient": {
+							"deleting": false
+						}
+					}
+				},
+				"source": [
+					"## Delete files from ADLS (Landing): **END**"
+				]
+			},
+			{
+				"cell_type": "markdown",
+				"metadata": {
+					"nteract": {
+						"transient": {
+							"deleting": false
+						}
+					}
+				},
+				"source": [
+					"## Delete files from ADLS (Archive): **START**"
+				]
+			},
+			{
+				"cell_type": "code",
+				"source": [
+					"#Set params for archive container\n",
+					"\n",
+					"destination_storage = df2.where(df2.ParameterType=='datahubdata_storage').collect()[0][\"Value\"] #datahubdata storage name\n",
+					"\n",
+					"destination_container = df2.where(df2.ParameterType=='archive_container').collect()[0][\"Value\"] #Archive container name"
+				],
+				"execution_count": 56
+			},
+			{
+				"cell_type": "code",
+				"source": [
+					"# For loop to delete sensitive files (Archive):\n",
+					"for folder_name in folder_names:\n",
+					"    try:\n",
+					"        raw_output_path = f\"abfss://{destination_container}@{destination_storage}.dfs.core.windows.net/{folder_name}\"\n",
+					"        mssparkutils.fs.rm(raw_output_path,recurse=True)\n",
+					"        print(f\"Folder {folder_name} deleted successfully.\")\n",
+					"\n",
+					"    except Exception as e:\n",
+					"            print(f\"Folder {folder_name} does not exist.\")"
+				],
+				"execution_count": 57
+			},
+			{
+				"cell_type": "markdown",
+				"metadata": {
+					"nteract": {
+						"transient": {
+							"deleting": false
+						}
+					}
+				},
+				"source": [
+					"## Delete files from ADLS (Archive): **END**"
+				]
+			},
+			{
+				"cell_type": "markdown",
+				"metadata": {
+					"nteract": {
+						"transient": {
+							"deleting": false
+						}
+					}
+				},
+				"source": [
+					"## Delete files from ADLS (Raw): **START**"
+				]
+			},
+			{
+				"cell_type": "code",
+				"source": [
+					"#Set params for raw container\n",
+					"\n",
+					"destination_storage = df2.where(df2.ParameterType=='datahubsynapse_storage').collect()[0][\"Value\"] #datahubsynapse storage name\n",
+					"\n",
+					"destination_container = df2.where(df2.ParameterType=='raw_container').collect()[0][\"Value\"] #Raw container name"
+				],
+				"execution_count": 58
+			},
+			{
+				"cell_type": "code",
+				"source": [
+					"# For loop to delete sensitive files (Raw):\n",
+					"\n",
+					"for folder_name in folder_names:\n",
+					"    try:\n",
+					"        raw_output_path = f\"abfss://{destination_container}@{destination_storage}.dfs.core.windows.net/{folder_name}\"\n",
+					"        mssparkutils.fs.rm(raw_output_path,recurse=True)\n",
+					"        print(f\"Folder {folder_name} deleted successfully.\")\n",
+					"\n",
+					"    except Exception as e:\n",
+					"            print(f\"Folder {folder_name} does not exist.\")"
+				],
+				"execution_count": 59
+			},
+			{
+				"cell_type": "markdown",
+				"metadata": {
+					"nteract": {
+						"transient": {
+							"deleting": false
+						}
+					}
+				},
+				"source": [
+					"## Delete files from ADLS (Raw): **END**"
+				]
+			}
+		]
+	}
+}

@@ -1,0 +1,1081 @@
+{
+	"name": "override_bronze",
+	"properties": {
+		"folder": {
+			"name": "DataHubBatchScripts/ESG_SHAREPOINT"
+		},
+		"nbformat": 4,
+		"nbformat_minor": 2,
+		"bigDataPool": {
+			"referenceName": "Sparkpool01",
+			"type": "BigDataPoolReference"
+		},
+		"sessionProperties": {
+			"driverMemory": "56g",
+			"driverCores": 8,
+			"executorMemory": "56g",
+			"executorCores": 8,
+			"numExecutors": 2,
+			"conf": {
+				"spark.dynamicAllocation.enabled": "false",
+				"spark.dynamicAllocation.minExecutors": "2",
+				"spark.dynamicAllocation.maxExecutors": "2",
+				"spark.autotune.trackingId": "ded00020-2595-47d8-9dff-17ca1f82ee82"
+			}
+		},
+		"metadata": {
+			"saveOutput": true,
+			"enableDebugMode": false,
+			"kernelspec": {
+				"name": "synapse_pyspark",
+				"display_name": "Synapse PySpark"
+			},
+			"language_info": {
+				"name": "python"
+			},
+			"a365ComputeOptions": {
+				"id": "/subscriptions/2e9f823e-dc76-4e8e-b815-c8a4f22d05ff/resourceGroups/CQL-AZUR1-DEVDATAHUB01-RG/providers/Microsoft.Synapse/workspaces/cql-dev-datahub-synapse01/bigDataPools/Sparkpool01",
+				"name": "Sparkpool01",
+				"type": "Spark",
+				"endpoint": "https://cql-dev-datahub-synapse01.dev.azuresynapse.net/livyApi/versions/2019-11-01-preview/sparkPools/Sparkpool01",
+				"auth": {
+					"type": "AAD",
+					"authResource": "https://dev.azuresynapse.net"
+				},
+				"sparkVersion": "3.4",
+				"nodeCount": 10,
+				"cores": 8,
+				"memory": 56,
+				"automaticScaleJobs": false
+			},
+			"sessionKeepAliveTimeout": 30
+		},
+		"cells": [
+			{
+				"cell_type": "markdown",
+				"metadata": {
+					"nteract": {
+						"transient": {
+							"deleting": false
+						}
+					}
+				},
+				"source": [
+					"# Get parameters from CTL db\n",
+					"### db_notebookname & NotebookPath: **override_bronze**\n",
+					""
+				]
+			},
+			{
+				"cell_type": "code",
+				"metadata": {
+					"jupyter": {
+						"source_hidden": false,
+						"outputs_hidden": false
+					},
+					"nteract": {
+						"transient": {
+							"deleting": false
+						}
+					},
+					"collapsed": false
+				},
+				"source": [
+					"#Get Parameters from controldb\n",
+					"from pyspark.sql.functions import col, to_date, date_format\n",
+					"import json\n",
+					"import sys\n",
+					"import logging\n",
+					"db_port = 1433\n",
+					"linked_service_name = \"LS_SQL_ELTFrameworkDB\"\n",
+					"db_notebookname= \"override_bronze\"\n",
+					"linkedServiceProperties = json.loads(mssparkutils.credentials.getPropertiesAll(linked_service_name))\n",
+					"sql_server_name = linkedServiceProperties.get('Endpoint')\n",
+					"db_name = linkedServiceProperties.get('Database')\n",
+					"#print(linkedServiceProperties)\n",
+					"access_token = mssparkutils.credentials.getConnectionStringOrCreds(linked_service_name)\n",
+					"\n",
+					"#Get load meta from controldb\n",
+					"db_query =\"SELECT A.*,B.NotebookParameterId,B.ParameterType,B.Value  FROM [CTL].[CFG_NOTEBOOK] A LEFT JOIN [CTL].[CFG_NOTEBOOK_PARAMETER] B ON A.NotebookId = B.NotebookId\"\n",
+					"\n",
+					"df = spark.read.format(\"jdbc\") \\\n",
+					"    .option(\"url\", \"jdbc:sqlserver://%s:%s\" % (sql_server_name, db_port)) \\\n",
+					"    .option(\"query\", db_query) \\\n",
+					"    .option(\"accessToken\", access_token) \\\n",
+					"    .option(\"encrypt\", \"true\") \\\n",
+					"    .option(\"databaseName\", db_name) \\\n",
+					"    .option(\"hostNameInCertificate\", \"*.database.windows.net\") \\\n",
+					"    .load()\n",
+					"\n",
+					"#Join cfg_notebook and cfg_notebook_parameter tables to retrieve source & target meta from controldb\n",
+					"\n",
+					"df2 = df.where(df.NotebookPath==db_notebookname) \n",
+					"\n",
+					"#display(df2)"
+				],
+				"execution_count": 27
+			},
+			{
+				"cell_type": "code",
+				"metadata": {
+					"collapsed": false
+				},
+				"source": [
+					"#Source DataLake storage details\n",
+					"source_storage = df2.where(df2.ParameterType=='source_storage').collect()[0][\"Value\"] #Storage name\n",
+					"source_container = df2.where(df2.ParameterType=='source_container').collect()[0][\"Value\"] #Storage container detail\n",
+					"source_path = df2.where(df2.ParameterType=='source_path').collect()[0][\"Value\"] #internal folder location in container \n",
+					"\n",
+					"#Destination DataLake storage details\n",
+					"destination_storage = df2.where(df2.ParameterType=='destination_storage').collect()[0][\"Value\"] #Storage name\n",
+					"destination_container = df2.where(df2.ParameterType=='destination_container').collect()[0][\"Value\"] #raw storage container details\n",
+					"destination_path = df2.where(df2.ParameterType=='destination_path').collect()[0][\"Value\"] #raw delta file patch\n",
+					"\n",
+					"#Get Current Date\n",
+					"Date_Collection = spark.sql(\"select current_timestamp() AS Current,(current_timestamp() + interval '-1' second) AS EndDate\").collect()\n",
+					"Bronze_LoadDate = Date_Collection[0]['Current']\n",
+					"Bronze_UpdateEndDate = Date_Collection[0]['EndDate']"
+				],
+				"execution_count": 12
+			},
+			{
+				"cell_type": "markdown",
+				"metadata": {
+					"nteract": {
+						"transient": {
+							"deleting": false
+						}
+					}
+				},
+				"source": [
+					"#### Configure logging"
+				]
+			},
+			{
+				"cell_type": "code",
+				"source": [
+					"# Configure logging\n",
+					"def setup_logger(notebook_name):\n",
+					"    # Get or create logger\n",
+					"    logger = logging.getLogger(notebook_name)\n",
+					"    logger.setLevel(logging.DEBUG)  # Set to DEBUG for detailed logs\n",
+					"\n",
+					"    # Remove any existing handlers to prevent duplicates\n",
+					"    logger.handlers.clear()\n",
+					"\n",
+					"    # Prevent propagation to root logger (avoids default handlers)\n",
+					"    logger.propagate = False\n",
+					"\n",
+					"    # Create console handler\n",
+					"    console_handler = logging.StreamHandler(sys.stdout)\n",
+					"    console_handler.setLevel(logging.DEBUG)\n",
+					"\n",
+					"    # Define log format (only the formatted line will appear)\n",
+					"    log_format = logging.Formatter('%(asctime)s - %(name)s - %(levelname)s - %(message)s')\n",
+					"    console_handler.setFormatter(log_format)\n",
+					"\n",
+					"    # Add handler to logger\n",
+					"    logger.addHandler(console_handler)\n",
+					"    \n",
+					"    return logger"
+				],
+				"execution_count": 13
+			},
+			{
+				"cell_type": "code",
+				"source": [
+					"# Set up logger for this notebook\n",
+					"logger = setup_logger(\"override_bronze\")"
+				],
+				"execution_count": 14
+			},
+			{
+				"cell_type": "markdown",
+				"metadata": {
+					"nteract": {
+						"transient": {
+							"deleting": false
+						}
+					}
+				},
+				"source": [
+					"# Table Creation: START"
+				]
+			},
+			{
+				"cell_type": "code",
+				"source": [
+					"#UTILS: Set table name\n",
+					"\n",
+					"#tablename=\"fuel_override\"\n",
+					"\n",
+					"#UTILS: Drop db\n",
+					"\n",
+					"#spark.sql(f\"\"\"DROP DATABASE IF EXISTS {db_notebookname} CASCADE\"\"\")\n",
+					"#raw_output_path = f\"abfss://{destination_container}@{destination_storage}.dfs.core.windows.net/{destination_path}\"\n",
+					"#mssparkutils.fs.rm(raw_output_path,recurse=True)\n",
+					"\n",
+					"#UTILS: Drop table\n",
+					"\n",
+					"#spark.sql(f\"\"\"DROP TABLE IF EXISTS {db_notebookname}.{tablename}\"\"\")\n",
+					"#raw_output_path = f\"abfss://raw@cqldevdatahubsynapse.dfs.core.windows.net/esg_sharepoint_files/{tablename}\"\n",
+					"#mssparkutils.fs.rm(raw_output_path,recurse=True)"
+				],
+				"execution_count": null
+			},
+			{
+				"cell_type": "code",
+				"source": [
+					"#Set table name\n",
+					"db_tablename=\"fuel_override\"\n",
+					"raw_tablename=\"fuel_override/s43_fuel_override\""
+				],
+				"execution_count": 8
+			},
+			{
+				"cell_type": "code",
+				"source": [
+					"#Create fuel_override: Bronze Table\n",
+					"spark.sql(f\"\"\"CREATE DATABASE IF NOT EXISTS {db_notebookname};\"\"\")\n",
+					"spark.sql(f\"\"\"\n",
+					"CREATE TABLE IF NOT EXISTS {db_notebookname}.{db_tablename}\n",
+					"(\n",
+					"    Id BIGINT,\n",
+					"    InvoiceDate STRING,\n",
+					"    TransactionDate STRING,\n",
+					"    SupplyPoint STRING,\n",
+					"    Product STRING,\n",
+					"    Quantity STRING,\n",
+					"    TransactionNumber STRING,\n",
+					"    SiteCode STRING,\n",
+					"    UsageCategory STRING,\n",
+					"    Supplier STRING,\n",
+					"    CDCLoadDate TIMESTAMP,\n",
+					"    CDCStartDate TIMESTAMP,\n",
+					"    CDCEndDate TIMESTAMP,\n",
+					"    CDCOps INT,\n",
+					"    CDCCurrentFlag BOOLEAN,\n",
+					"    HashKey STRING,\n",
+					"    HashDiff STRING\n",
+					")\n",
+					"USING delta\n",
+					"LOCATION 'abfss://{destination_container}@{destination_storage}.dfs.core.windows.net/{destination_path}/{db_tablename}'\n",
+					"\"\"\")"
+				],
+				"execution_count": null
+			},
+			{
+				"cell_type": "code",
+				"source": [
+					"#UTILS: Set table name\n",
+					"\n",
+					"#tablename=\"electricity_override\"\n",
+					"\n",
+					"#UTILS: Drop db\n",
+					"\n",
+					"#spark.sql(f\"\"\"DROP DATABASE IF EXISTS {db_notebookname} CASCADE\"\"\")\n",
+					"#raw_output_path = f\"abfss://{destination_container}@{destination_storage}.dfs.core.windows.net/{destination_path}\"\n",
+					"#mssparkutils.fs.rm(raw_output_path,recurse=True)\n",
+					"\n",
+					"#UTILS: Drop table\n",
+					"\n",
+					"#spark.sql(f\"\"\"DROP TABLE IF EXISTS {db_notebookname}.{tablename}\"\"\")\n",
+					"#raw_output_path = f\"abfss://{destination_container}@{destination_storage}.dfs.core.windows.net/{destination_path}/{tablename}\"\n",
+					"#mssparkutils.fs.rm(raw_output_path,recurse=True)"
+				],
+				"execution_count": null
+			},
+			{
+				"cell_type": "code",
+				"source": [
+					"#Set table name\n",
+					"db_tablename=\"electricity_override\"\n",
+					"raw_tablename=\"electricity_override/s44_electricity_override\""
+				],
+				"execution_count": 7
+			},
+			{
+				"cell_type": "code",
+				"source": [
+					"#Create electricity_override: Bronze Table\n",
+					"spark.sql(f\"\"\"CREATE DATABASE IF NOT EXISTS {db_notebookname};\"\"\")\n",
+					"spark.sql(f\"\"\"\n",
+					"CREATE TABLE IF NOT EXISTS {db_notebookname}.{db_tablename}\n",
+					"(   \n",
+					"    Id BIGINT,\n",
+					"    SiteCode STRING,\n",
+					"    LocationIdentifier STRING,\n",
+					"    InvoiceNumber STRING,\n",
+					"    InvoiceDate STRING,\n",
+					"    PreviousReadDate STRING,\n",
+					"    CurrentReadDate STRING,\n",
+					"    SupplyAddress STRING,\n",
+					"    MeterReadingType STRING,\n",
+					"    ChargeType STRING,\n",
+					"    QuantityKWH STRING,\n",
+					"    CleanEnergySubscription STRING,\n",
+					"    Supplier STRING,\n",
+					"    CDCLoadDate TIMESTAMP,\n",
+					"    CDCStartDate TIMESTAMP,\n",
+					"    CDCEndDate TIMESTAMP,\n",
+					"    CDCOps INT,\n",
+					"    CDCCurrentFlag BOOLEAN,\n",
+					"    HashKey STRING,\n",
+					"    HashDiff STRING\n",
+					")\n",
+					"USING delta\n",
+					"LOCATION 'abfss://{destination_container}@{destination_storage}.dfs.core.windows.net/{destination_path}/{db_tablename}'\n",
+					"\"\"\")"
+				],
+				"execution_count": null
+			},
+			{
+				"cell_type": "markdown",
+				"metadata": {
+					"nteract": {
+						"transient": {
+							"deleting": false
+						}
+					}
+				},
+				"source": [
+					"# Table Creation: END"
+				]
+			},
+			{
+				"cell_type": "markdown",
+				"metadata": {
+					"nteract": {
+						"transient": {
+							"deleting": false
+						}
+					}
+				},
+				"source": [
+					"# Table: **fuel_override**: START\n",
+					""
+				]
+			},
+			{
+				"cell_type": "code",
+				"metadata": {
+					"editable": true,
+					"run_control": {
+						"frozen": false
+					}
+				},
+				"source": [
+					"#Set table name\n",
+					"db_tablename=\"fuel_override\"\n",
+					"raw_tablename=\"fuel_override/s43_fuel_override\""
+				],
+				"execution_count": 15
+			},
+			{
+				"cell_type": "code",
+				"metadata": {
+					"jupyter": {
+						"source_hidden": false,
+						"outputs_hidden": false
+					},
+					"nteract": {
+						"transient": {
+							"deleting": false
+						}
+					},
+					"collapsed": false
+				},
+				"source": [
+					"try:\n",
+					"    raw_df = spark.read.format(\"parquet\").load(f'abfss://{source_container}@{source_storage}.dfs.core.windows.net/{source_path}/{raw_tablename}/')\n",
+					"    raw_df = raw_df.withColumn(\"InvoiceDate\", date_format(to_date(col(\"InvoiceDate\"), \"d/M/yyyy\"), \"dd/MM/yyyy\"))\n",
+					"    raw_df = raw_df.withColumn(\"TransactionDate\", date_format(to_date(col(\"TransactionDate\"), \"d/M/yyyy\"), \"dd/MM/yyyy\"))\n",
+					"    #display(raw_df)\n",
+					"\n",
+					"except Exception as e:\n",
+					"    logger.error(f\"Error - Reading parquet file: 'abfss://{source_container}@{source_storage}.dfs.core.windows.net/{source_path}/{raw_tablename}/: {str(e)}\")\n",
+					"    raise"
+				],
+				"execution_count": 29
+			},
+			{
+				"cell_type": "code",
+				"metadata": {
+					"jupyter": {
+						"source_hidden": false,
+						"outputs_hidden": false
+					},
+					"nteract": {
+						"transient": {
+							"deleting": false
+						}
+					},
+					"collapsed": false
+				},
+				"source": [
+					"from pyspark.sql.functions import hash\n",
+					"from pyspark.sql import functions as fn\n",
+					"from pyspark.sql.functions import col, concat, lit, to_timestamp,current_timestamp,date_format, to_date, when, substring\n",
+					"from pyspark.sql.functions import sha2, concat_ws, regexp_replace, row_number\n",
+					"from pyspark.sql.types import DecimalType\n",
+					"from pyspark.sql.window import Window\n",
+					"\n",
+					"# Add CDC columns\n",
+					"raw_df = raw_df.withColumn(\"HashKey\", sha2(concat_ws(\"||\", \"Id\", regexp_replace(\"TransactionDate\", \"-|[/.:]\", \"\"), \"TransactionNumber\" ), 256))\n",
+					"raw_df = raw_df.withColumn(\"HashDiff\", sha2(concat_ws(\"||\", regexp_replace(\"InvoiceDate\", \"-|[/.:]\", \"\"), \"SupplyPoint\", \"Product\" ,\"Quantity\", \"SiteCode\", \"UsageCategory\", \"Supplier\"), 256))\n",
+					"raw_df = raw_df.withColumn(\"CDCLoadDate\", to_timestamp(lit(Bronze_LoadDate),'yyyy-MM-dd HH:mm:ss'))\n",
+					"raw_df = raw_df.withColumn(\"CDCStartDate\", to_timestamp(lit(Bronze_LoadDate), 'yyyy-MM-dd HH:mm:ss'))\n",
+					"raw_df = raw_df.withColumn(\"CDCEndDate\", to_timestamp(lit(\"9999-12-31 23:59:59\"), 'yyyy-MM-dd HH:mm:ss'))\n",
+					"raw_df = raw_df.withColumn(\"CDCCurrentFlag\", lit(1))\n",
+					"raw_df = raw_df.withColumn(\"CDCOps\", lit(1))\n",
+					"\n",
+					"#display(raw_df)"
+				],
+				"execution_count": null
+			},
+			{
+				"cell_type": "code",
+				"metadata": {
+					"jupyter": {
+						"source_hidden": false,
+						"outputs_hidden": false
+					},
+					"nteract": {
+						"transient": {
+							"deleting": false
+						}
+					}
+				},
+				"source": [
+					"# Row count parameters\n",
+					"Bronze_Insert_Pre=spark.sql(f\"\"\" SELECT COUNT(*) FROM {db_notebookname}.{db_tablename} WHERE CDCOps = 1 \"\"\").collect()[0][0]\n",
+					"Bronze_Update_Pre=spark.sql(f\"\"\" SELECT COUNT(*) FROM {db_notebookname}.{db_tablename} WHERE CDCOps = 2 \"\"\").collect()[0][0]\n",
+					"Bronze_Delete_Pre=spark.sql(f\"\"\" SELECT COUNT(*) FROM {db_notebookname}.{db_tablename} WHERE CDCOps = 0 \"\"\").collect()[0][0]"
+				],
+				"execution_count": null
+			},
+			{
+				"cell_type": "code",
+				"metadata": {
+					"jupyter": {
+						"source_hidden": false,
+						"outputs_hidden": false
+					},
+					"nteract": {
+						"transient": {
+							"deleting": false
+						}
+					}
+				},
+				"source": [
+					"# SCD2 logic\n",
+					"\n",
+					"# Create a temporary view of the dataframe\n",
+					"raw_df.createOrReplaceTempView(\"temp_table\")\n",
+					"\n",
+					"# Use the merge operation to update the target table\n",
+					"spark.sql(f\"\"\"\n",
+					"    MERGE INTO {db_notebookname}.{db_tablename} t\n",
+					"    USING temp_table s\n",
+					"    ON t.HashKey = s.HashKey AND t.CDCCurrentFlag == true\n",
+					"    WHEN MATCHED AND t.HashDiff <> s.HashDiff THEN\n",
+					"      UPDATE SET t.CDCEndDate = '{Bronze_UpdateEndDate}',\n",
+					"                 t.CDCCurrentFlag = false,\n",
+					"                 t.CDCOps = s.CDCOps + 1\n",
+					"    WHEN NOT MATCHED THEN\n",
+					"      INSERT ( Id, InvoiceDate, TransactionDate, SupplyPoint, Product, Quantity, TransactionNumber, SiteCode, UsageCategory, Supplier, CDCLoadDate, CDCStartDate, CDCEndDate, CDCOps, CDCCurrentFlag, HashKey, HashDiff)\n",
+					"      VALUES (s.Id, s.InvoiceDate, s.TransactionDate, s.SupplyPoint, s.Product, s.Quantity, s.TransactionNumber, s.SiteCode, s.UsageCategory, s.Supplier, s.CDCLoadDate, s.CDCStartDate, s.CDCEndDate, 1, s.CDCCurrentFlag, s.HashKey, s.HashDiff)\n",
+					"\"\"\")\n",
+					"\n",
+					"# Use the merge operation to Insert updated record \n",
+					"spark.sql(f\"\"\"\n",
+					"    MERGE INTO {db_notebookname}.{db_tablename} t\n",
+					"    USING temp_table s\n",
+					"    ON t.HashKey = s.HashKey AND t.CDCCurrentFlag == true\n",
+					"    WHEN MATCHED AND t.HashDiff <> s.HashDiff THEN\n",
+					"      UPDATE SET t.CDCEndDate = '{Bronze_UpdateEndDate}',\n",
+					"                 t.CDCCurrentFlag = false,\n",
+					"                 t.CDCOps = s.CDCOps + 1\n",
+					"    WHEN NOT MATCHED THEN\n",
+					"      INSERT ( Id, InvoiceDate, TransactionDate, SupplyPoint, Product, Quantity, TransactionNumber, SiteCode, UsageCategory, Supplier, CDCLoadDate, CDCStartDate, CDCEndDate, CDCOps, CDCCurrentFlag, HashKey, HashDiff)\n",
+					"      VALUES (s.Id, s.InvoiceDate, s.TransactionDate, s.SupplyPoint, s.Product, s.Quantity, s.TransactionNumber, s.SiteCode, s.UsageCategory, s.Supplier, s.CDCLoadDate, s.CDCStartDate, s.CDCEndDate, 1, s.CDCCurrentFlag, s.HashKey, s.HashDiff)\n",
+					"\"\"\")"
+				],
+				"execution_count": null
+			},
+			{
+				"cell_type": "code",
+				"metadata": {
+					"collapsed": false
+				},
+				"source": [
+					"# Update FileOverrideFlag for marano_bronze.marano_fuel_transactions to override the ingested file\n",
+					"# Determine the key for the fuel override table records inserted \n",
+					"marano_override_key_df = spark.sql(f\"\"\"\n",
+					"SELECT distinct \n",
+					"    t.SourceFileID, t.CDCLoadDate, t.InvoiceDate\n",
+					"FROM\n",
+					"    marano_bronze.marano_fuel_transactions t\n",
+					"join\n",
+					"    temp_table s on date_format(to_date(t.InvoiceDate, 'd/MM/yyyy'), 'dd/MM/yyyy') = date_format(to_date(s.InvoiceDate, 'd/MM/yyyy'), 'dd/MM/yyyy') AND t.CDCCurrentFlag = true\n",
+					"WHERE \n",
+					"    Supplier = 'marano'\n",
+					"\"\"\")\n",
+					"marano_override_key_df.createOrReplaceTempView(\"marano_override_key\")\n",
+					"\n",
+					"# Update marano_bronze.marano_fuel_transactions to disable records that match the override key\n",
+					"# Records from fuel override will move to silver, instead of the equivalent records from marano_bronze.marano_fuel_transactions\n",
+					"spark.sql(f\"\"\"\n",
+					"    MERGE INTO marano_bronze.marano_fuel_transactions t\n",
+					"    USING marano_override_key s\n",
+					"    ON t.SourceFileID = s.SourceFileID and t.CDCLoadDate = s.CDCLoadDate and date_format(to_date(t.InvoiceDate, 'd/MM/yyyy'), 'dd/MM/yyyy') = date_format(to_date(s.InvoiceDate, 'd/MM/yyyy'), 'dd/MM/yyyy') AND t.CDCCurrentFlag = true\n",
+					"    WHEN MATCHED THEN\n",
+					"      UPDATE SET t.FileOverrideFlag = True    \n",
+					"\"\"\")\n",
+					""
+				],
+				"execution_count": null
+			},
+			{
+				"cell_type": "code",
+				"source": [
+					"# Update FileOverrideFlag for marano_bronze.marano_bulk_fuel_transactions to override the ingested file\n",
+					"# Determine the key for the fuel override table records inserted \n",
+					"marano_bulk_override_key_df = spark.sql(f\"\"\"\n",
+					"SELECT distinct \n",
+					"    t.SourceFileID, t.CDCLoadDate, t.InvoiceDate\n",
+					"FROM\n",
+					"    marano_bronze.marano_bulk_fuel_transactions t\n",
+					"join\n",
+					"    temp_table s on date_format(to_date(t.InvoiceDate, 'd/MM/yyyy'), 'dd/MM/yyyy') = date_format(to_date(s.InvoiceDate, 'd/MM/yyyy'), 'dd/MM/yyyy') AND t.CDCCurrentFlag = true\n",
+					"WHERE \n",
+					"    Supplier = 'marano_bulk'\n",
+					"\"\"\")\n",
+					"marano_bulk_override_key_df.createOrReplaceTempView(\"marano_bulk_override_key\")\n",
+					"\n",
+					"# Update marano_bronze.marano_bulk_fuel_transactions to disable records that match the override key\n",
+					"# Records from fuel override will move to silver, instead of the equivalent records from marano_bronze.marano_bulk_fuel_transactions\n",
+					"spark.sql(f\"\"\"\n",
+					"    MERGE INTO marano_bronze.marano_bulk_fuel_transactions t\n",
+					"    USING marano_bulk_override_key s\n",
+					"    ON t.SourceFileID = s.SourceFileID and t.CDCLoadDate = s.CDCLoadDate and date_format(to_date(t.InvoiceDate, 'd/MM/yyyy'), 'dd/MM/yyyy') = date_format(to_date(s.InvoiceDate, 'd/MM/yyyy'), 'dd/MM/yyyy') AND t.CDCCurrentFlag = true\n",
+					"    WHEN MATCHED THEN\n",
+					"      UPDATE SET t.FileOverrideFlag = True    \n",
+					"\"\"\")\n",
+					"\n",
+					""
+				],
+				"execution_count": null
+			},
+			{
+				"cell_type": "code",
+				"metadata": {
+					"jupyter": {
+						"source_hidden": false,
+						"outputs_hidden": false
+					},
+					"nteract": {
+						"transient": {
+							"deleting": false
+						}
+					}
+				},
+				"source": [
+					"#Row count parameters\n",
+					"Bronze_Insert_Post=spark.sql(f\"\"\" SELECT COUNT(*) FROM {db_notebookname}.{db_tablename} WHERE CDCOps = 1 \"\"\").collect()[0][0]\n",
+					"Bronze_Update_Post=spark.sql(f\"\"\" SELECT COUNT(*) FROM {db_notebookname}.{db_tablename} WHERE CDCOps = 2 \"\"\").collect()[0][0]\n",
+					"Bronze_Delete_Post=spark.sql(f\"\"\" SELECT COUNT(*) FROM {db_notebookname}.{db_tablename} WHERE CDCOps = 0 \"\"\").collect()[0][0]\n",
+					"Bronze_TotalRowCount_Post=spark.sql(f\"\"\" SELECT COUNT(*) FROM {db_notebookname}.{db_tablename}\"\"\").collect()[0][0]\n",
+					"Bronze_ActiveRecord_Post=spark.sql(f\"\"\" SELECT COUNT(*) FROM {db_notebookname}.{db_tablename} WHERE CDCCurrentFlag = true \"\"\").collect()[0][0]"
+				],
+				"execution_count": null
+			},
+			{
+				"cell_type": "code",
+				"metadata": {
+					"jupyter": {
+						"source_hidden": false,
+						"outputs_hidden": false
+					},
+					"nteract": {
+						"transient": {
+							"deleting": false
+						}
+					}
+				},
+				"source": [
+					"#Row calculation\n",
+					"Bronze_Update = Bronze_Update_Post - Bronze_Update_Pre\n",
+					"Bronze_Insert = (Bronze_Insert_Post - Bronze_Insert_Pre) + Bronze_Update\n",
+					"Bronze_Delete = Bronze_Delete_Post - Bronze_Delete_Pre\n",
+					"Bronze_ActiveRows = Bronze_ActiveRecord_Post \n",
+					"Bronze_TotalRows = Bronze_TotalRowCount_Post"
+				],
+				"execution_count": null
+			},
+			{
+				"cell_type": "code",
+				"metadata": {
+					"jupyter": {
+						"source_hidden": false,
+						"outputs_hidden": false
+					},
+					"nteract": {
+						"transient": {
+							"deleting": false
+						}
+					},
+					"collapsed": false
+				},
+				"source": [
+					"#Create dataframe to insert log to controldb\n",
+					"from pyspark.sql.types import StructType, StructField, StringType, IntegerType, BooleanType,DateType, DoubleType,TimestampType\n",
+					"\n",
+					"log_data = [(db_notebookname,db_tablename,Bronze_LoadDate,Bronze_Insert,Bronze_Update,Bronze_Delete,Bronze_ActiveRows,Bronze_TotalRows)]\n",
+					"print(log_data)\n",
+					"log_columns = ['PIPELINE_NAME', 'TABLE_NAME', 'INGEST_DATETIME', 'INSERT','UPDATE','DELETE','ACTIVE_ROWS','TOTAL_ROWS']\n",
+					"df_log = spark.createDataFrame(log_data, log_columns)\n",
+					"\n",
+					"#display(df_log)"
+				],
+				"execution_count": null
+			},
+			{
+				"cell_type": "code",
+				"metadata": {
+					"jupyter": {
+						"source_hidden": false,
+						"outputs_hidden": false
+					},
+					"nteract": {
+						"transient": {
+							"deleting": false
+						}
+					},
+					"collapsed": false
+				},
+				"source": [
+					"#Write df_log to logging table in controldb\n",
+					"import json\n",
+					"db_port = 1433\n",
+					"linked_service_name = \"LS_SQL_ELTFrameworkDB\"\n",
+					"linkedServiceProperties = json.loads(mssparkutils.credentials.getPropertiesAll(linked_service_name))\n",
+					"sql_server_name = linkedServiceProperties.get('Endpoint')\n",
+					"db_name = linkedServiceProperties.get('Database')\n",
+					"access_token = mssparkutils.credentials.getConnectionStringOrCreds(linked_service_name)\n",
+					"write_table_name = \"[CTL].[CFG_INGESTION_LOGS]\"\n",
+					"\n",
+					"try:\n",
+					"    df_log.write.format(\"jdbc\") \\\n",
+					"        .option(\"url\", \"jdbc:sqlserver://%s:%s\" % (sql_server_name, db_port)) \\\n",
+					"        .option(\"dbtable\", write_table_name) \\\n",
+					"        .option(\"accessToken\", access_token) \\\n",
+					"        .option(\"encrypt\", \"true\") \\\n",
+					"        .option(\"databaseName\", db_name) \\\n",
+					"        .option(\"hostNameInCertificate\", \"*.database.windows.net\") \\\n",
+					"        .mode(\"append\") \\\n",
+					"        .save()\n",
+					"except ValueError as error :\n",
+					"    print(\"MSSQL Connector write failed\", error)\n",
+					"\n",
+					"print(\"MSSQL Connector write(append) succeeded  \")\n",
+					""
+				],
+				"execution_count": null
+			},
+			{
+				"cell_type": "markdown",
+				"metadata": {
+					"nteract": {
+						"transient": {
+							"deleting": false
+						}
+					}
+				},
+				"source": [
+					"#  Table: **fuel_override**: END"
+				]
+			},
+			{
+				"cell_type": "markdown",
+				"metadata": {
+					"nteract": {
+						"transient": {
+							"deleting": false
+						}
+					}
+				},
+				"source": [
+					"# Table: **electricity_override**: START"
+				]
+			},
+			{
+				"cell_type": "code",
+				"metadata": {
+					"editable": true,
+					"run_control": {
+						"frozen": false
+					}
+				},
+				"source": [
+					"#Set table name\n",
+					"db_tablename=\"electricity_override\"\n",
+					"raw_tablename=\"electricity_override/s44_electricity_override\""
+				],
+				"execution_count": null
+			},
+			{
+				"cell_type": "code",
+				"metadata": {
+					"editable": true,
+					"run_control": {
+						"frozen": false
+					},
+					"collapsed": false
+				},
+				"source": [
+					"try: \n",
+					"    # load parquet file as dataframe\n",
+					"    raw_df = spark.read.format(\"parquet\").load(f'abfss://{source_container}@{source_storage}.dfs.core.windows.net/{source_path}/{raw_tablename}/')\n",
+					"    raw_df = raw_df.withColumn(\"InvoiceDate\", date_format(to_date(col(\"InvoiceDate\"), \"d/M/yyyy\"), \"dd/MM/yyyy\"))\n",
+					"    raw_df = raw_df.withColumn(\"CurrentReadDate\", date_format(to_date(col(\"CurrentReadDate\"), \"d/M/yyyy\"), \"dd/MM/yyyy\"))\n",
+					"    raw_df = raw_df.withColumn(\"PreviousReadDate\", date_format(to_date(col(\"PreviousReadDate\"), \"d/M/yyyy\"), \"dd/MM/yyyy\"))\n",
+					"    #display(raw_df)\n",
+					"\n",
+					"except Exception as e:\n",
+					"    logger.error(f\"Error - Reading parquet file: 'abfss://{source_container}@{source_storage}.dfs.core.windows.net/{source_path}/{raw_tablename}/: {str(e)}\")\n",
+					"    raise"
+				],
+				"execution_count": null
+			},
+			{
+				"cell_type": "code",
+				"metadata": {
+					"editable": true,
+					"run_control": {
+						"frozen": false
+					},
+					"collapsed": false
+				},
+				"source": [
+					"from pyspark.sql.functions import hash\n",
+					"from pyspark.sql import functions as fn\n",
+					"from pyspark.sql.functions import col, concat, lit, to_timestamp,current_timestamp,date_format, to_date, when, substring\n",
+					"from pyspark.sql.functions import sha2, concat_ws, regexp_replace, row_number\n",
+					"from pyspark.sql.types import DecimalType\n",
+					"from pyspark.sql.window import Window\n",
+					"\n",
+					"# Add CDC columns\n",
+					"raw_df = raw_df.withColumn(\"HashKey\", sha2(concat_ws(\"||\", \"Id\", \"SiteCode\", \"LocationIdentifier\", \"InvoiceNumber\", regexp_replace(\"InvoiceDate\", \"-|[/.:]\", \"\"), regexp_replace(\"CurrentReadDate\", \"-|[/.:]\", \"\"), regexp_replace(\"PreviousReadDate\", \"-|[/.:]\", \"\"), \"Supplier\"), 256))\n",
+					"raw_df = raw_df.withColumn(\"HashDiff\", sha2(concat_ws(\"||\" , regexp_replace(\"SupplyAddress\", \"-|[/.:]\", \"\"), \"MeterReadingType\" , \"ChargeType\", \"QuantityKWH\", \"CleanEnergySubscription\"), 256))\n",
+					"raw_df = raw_df.withColumn(\"CDCLoadDate\", to_timestamp(lit(Bronze_LoadDate),'yyyy-MM-dd HH:mm:ss'))\n",
+					"raw_df = raw_df.withColumn(\"CDCStartDate\", to_timestamp(lit(Bronze_LoadDate), 'yyyy-MM-dd HH:mm:ss'))\n",
+					"raw_df = raw_df.withColumn(\"CDCEndDate\", to_timestamp(lit(\"9999-12-31 23:59:59\"), 'yyyy-MM-dd HH:mm:ss'))\n",
+					"raw_df = raw_df.withColumn(\"CDCCurrentFlag\", lit(1))\n",
+					"raw_df = raw_df.withColumn(\"CDCOps\", lit(1))\n",
+					"#display(raw_df)"
+				],
+				"execution_count": null
+			},
+			{
+				"cell_type": "code",
+				"metadata": {
+					"editable": true,
+					"run_control": {
+						"frozen": false
+					}
+				},
+				"source": [
+					"# Row count parameters\n",
+					"Bronze_Insert_Pre=spark.sql(f\"\"\" SELECT COUNT(*) FROM {db_notebookname}.{db_tablename} WHERE CDCOps = 1 \"\"\").collect()[0][0]\n",
+					"Bronze_Update_Pre=spark.sql(f\"\"\" SELECT COUNT(*) FROM {db_notebookname}.{db_tablename} WHERE CDCOps = 2 \"\"\").collect()[0][0]\n",
+					"Bronze_Delete_Pre=spark.sql(f\"\"\" SELECT COUNT(*) FROM {db_notebookname}.{db_tablename} WHERE CDCOps = 0 \"\"\").collect()[0][0]"
+				],
+				"execution_count": null
+			},
+			{
+				"cell_type": "code",
+				"source": [
+					"# SCD2 logic\n",
+					"\n",
+					"# Create a temporary view of the dataframe\n",
+					"raw_df.createOrReplaceTempView(\"temp_table\")\n",
+					"\n",
+					"# Use the merge operation to update the target table\n",
+					"spark.sql(f\"\"\"\n",
+					"    MERGE INTO {db_notebookname}.{db_tablename} t\n",
+					"    USING temp_table s\n",
+					"    ON t.HashKey = s.HashKey AND t.CDCCurrentFlag == true\n",
+					"    WHEN MATCHED AND t.HashDiff <> s.HashDiff THEN\n",
+					"      UPDATE SET t.CDCEndDate = '{Bronze_UpdateEndDate}',\n",
+					"                 t.CDCCurrentFlag = false,\n",
+					"                 t.CDCOps = s.CDCOps + 1\n",
+					"    WHEN NOT MATCHED THEN\n",
+					"      INSERT ( Id, SiteCode, LocationIdentifier, InvoiceNumber, InvoiceDate, PreviousReadDate, CurrentReadDate, SupplyAddress, MeterReadingType, ChargeType, QuantityKWH, CleanEnergySubscription, Supplier, CDCLoadDate, CDCStartDate, CDCEndDate, CDCOps, CDCCurrentFlag, HashKey, HashDiff)\n",
+					"      VALUES (s.Id, s.SiteCode, s.LocationIdentifier, s.InvoiceNumber, s.InvoiceDate, s.PreviousReadDate, s.CurrentReadDate, s.SupplyAddress, s.MeterReadingType, s.ChargeType, s.QuantityKWH, s.CleanEnergySubscription, s.Supplier, s.CDCLoadDate, s.CDCStartDate, s.CDCEndDate, 1, s.CDCCurrentFlag, s.HashKey, s.HashDiff)\n",
+					"\"\"\")\n",
+					"\n",
+					"# Use the merge operation to Insert updated record \n",
+					"spark.sql(f\"\"\"\n",
+					"    MERGE INTO {db_notebookname}.{db_tablename} t\n",
+					"    USING temp_table s\n",
+					"    ON t.HashKey = s.HashKey AND t.CDCCurrentFlag == true\n",
+					"    WHEN MATCHED AND t.HashDiff <> s.HashDiff THEN\n",
+					"      UPDATE SET t.CDCEndDate = '{Bronze_UpdateEndDate}',\n",
+					"                 t.CDCCurrentFlag = false,\n",
+					"                 t.CDCOps = s.CDCOps + 1\n",
+					"    WHEN NOT MATCHED THEN\n",
+					"      INSERT ( Id, SiteCode, LocationIdentifier, InvoiceNumber, InvoiceDate, PreviousReadDate, CurrentReadDate, SupplyAddress, MeterReadingType, ChargeType, QuantityKWH, CleanEnergySubscription, Supplier, CDCLoadDate, CDCStartDate, CDCEndDate, CDCOps, CDCCurrentFlag, HashKey, HashDiff)\n",
+					"      VALUES (s.Id, s.SiteCode, s.LocationIdentifier, s.InvoiceNumber, s.InvoiceDate, s.PreviousReadDate, s.CurrentReadDate, s.SupplyAddress, s.MeterReadingType, s.ChargeType, s.QuantityKWH, s.CleanEnergySubscription, s.Supplier, s.CDCLoadDate, s.CDCStartDate, s.CDCEndDate, 1, s.CDCCurrentFlag, s.HashKey, s.HashDiff)\n",
+					"\"\"\")"
+				],
+				"execution_count": null
+			},
+			{
+				"cell_type": "code",
+				"source": [
+					"# Update FileOverrideFlag for origin_bronze to override the ingested file\n",
+					"# Determine the key for the electricity override table records inserted \n",
+					"origin_invoice_override_key_df = spark.sql(f\"\"\"\n",
+					"SELECT distinct \n",
+					"     t.SourceFileID, t.CDCLoadDate, t.InvoiceDate, t.InvoiceNumber\n",
+					"FROM\n",
+					"    origin_bronze.origin_invoice_details t\n",
+					"join\n",
+					"    temp_table s ON date_format(to_date(t.InvoiceDate, 'dd MMM yyyy'), 'dd/MM/yyyy') = date_format(to_date(s.InvoiceDate, 'd/MM/yyyy'), 'dd/MM/yyyy') and t.InvoiceNumber = s.InvoiceNumber AND t.CDCCurrentFlag = true\n",
+					"WHERE \n",
+					"    Supplier = 'origin'\n",
+					"\"\"\")\n",
+					"origin_invoice_override_key_df.createOrReplaceTempView(\"origin_invoice_override_key\")\n",
+					"# Update origin_bronze tables to disable records that match the override key\n",
+					"# Records from electricity override will move to silver, instead of the equivalent records from origin_bronze\n",
+					"spark.sql(f\"\"\"\n",
+					"    MERGE INTO origin_bronze.origin_invoice_details t\n",
+					"    USING origin_invoice_override_key s\n",
+					"    ON t.SourceFileID = s.SourceFileID and t.CDCLoadDate = s.CDCLoadDate and t.InvoiceDate = s.InvoiceDate and t.InvoiceNumber = s.InvoiceNumber AND t.CDCCurrentFlag = true\n",
+					"    WHEN MATCHED THEN\n",
+					"      UPDATE SET t.FileOverrideFlag = True    \n",
+					"\"\"\")\n",
+					"\n",
+					"\n",
+					"# Determine the key for the electricity override table records inserted \n",
+					"origin_charges_override_key_df = spark.sql(f\"\"\"\n",
+					"SELECT distinct \n",
+					"      t.SourceFileID, t.CDCLoadDate, t.InvoiceDate, t.InvoiceNumber\n",
+					"FROM\n",
+					"    origin_bronze.origin_charge_details t\n",
+					"join\n",
+					"    temp_table s ON date_format(to_date(t.InvoiceDate, 'dd MMM yyyy'), 'dd/MM/yyyy') = date_format(to_date(s.InvoiceDate, 'd/MM/yyyy'), 'dd/MM/yyyy') and t.InvoiceNumber = s.InvoiceNumber AND t.CDCCurrentFlag = true\n",
+					"WHERE \n",
+					"    Supplier = 'origin'\n",
+					"\"\"\")\n",
+					"origin_charges_override_key_df.createOrReplaceTempView(\"origin_charges_override_key\")\n",
+					"# Update origin_bronze tables to disable records that match the override key\n",
+					"# Records from electricity override will move to silver, instead of the equivalent records from origin_bronze\n",
+					"spark.sql(f\"\"\"\n",
+					"    MERGE INTO origin_bronze.origin_charge_details t\n",
+					"    USING origin_charges_override_key s\n",
+					"    ON t.SourceFileID = s.SourceFileID and t.CDCLoadDate = s.CDCLoadDate and t.InvoiceDate = s.InvoiceDate and t.InvoiceNumber = s.InvoiceNumber AND t.CDCCurrentFlag = true\n",
+					"    WHEN MATCHED THEN\n",
+					"      UPDATE SET t.FileOverrideFlag = True    \n",
+					"\"\"\")\n",
+					"\n",
+					"\n",
+					"# Determine the key for the electricity override table records inserted \n",
+					"origin_meter_override_key_df = spark.sql(f\"\"\"\n",
+					"SELECT distinct \n",
+					"      t.SourceFileID, t.CDCLoadDate, t.InvoiceDate, t.InvoiceNumber\n",
+					"FROM\n",
+					"    origin_bronze.origin_meter_details t\n",
+					"join\n",
+					"    temp_table s ON date_format(to_date(t.InvoiceDate, 'dd MMM yyyy'), 'dd/MM/yyyy') = date_format(to_date(s.InvoiceDate, 'd/MM/yyyy'), 'dd/MM/yyyy') and t.InvoiceNumber = s.InvoiceNumber AND t.CDCCurrentFlag = true\n",
+					"WHERE \n",
+					"    Supplier = 'origin'\n",
+					"\"\"\")\n",
+					"origin_meter_override_key_df.createOrReplaceTempView(\"origin_meter_override_key\")\n",
+					"# Update origin_bronze tables to disable records that match the override key\n",
+					"# Records from electricity override will move to silver, instead of the equivalent records from origin_bronze\n",
+					"spark.sql(f\"\"\"\n",
+					"    MERGE INTO origin_bronze.origin_meter_details t\n",
+					"    USING origin_meter_override_key s\n",
+					"    ON t.SourceFileID = s.SourceFileID and t.CDCLoadDate = s.CDCLoadDate and t.InvoiceDate = s.InvoiceDate and t.InvoiceNumber = s.InvoiceNumber AND t.CDCCurrentFlag = true\n",
+					"    WHEN MATCHED THEN\n",
+					"      UPDATE SET t.FileOverrideFlag = True    \n",
+					"\"\"\")\n",
+					""
+				],
+				"execution_count": null
+			},
+			{
+				"cell_type": "code",
+				"source": [
+					"# Update FileOverrideFlag for ergon_bronze to override the ingested file\n",
+					"# Determine the key for the electricity override table records inserted \n",
+					"ergon_invoice_override_key_df = spark.sql(f\"\"\"\n",
+					"SELECT distinct \n",
+					"     t.SourceFileID, t.CDCLoadDate, t.InvoiceDate, t.InvoiceNumber\n",
+					"FROM\n",
+					"    ergon_bronze.ergon_invoice_details t\n",
+					"join\n",
+					"    temp_table s ON (CASE\n",
+					"            WHEN to_date(t.InvoiceDate, 'dd MMM yyyy') IS NOT NULL THEN date_format(to_date(t.InvoiceDate, 'dd MMM yyyy'), 'dd/MM/yyyy')\n",
+					"            WHEN to_date(t.InvoiceDate, 'dd/MM/yy') IS NOT NULL THEN date_format(to_date(t.InvoiceDate, 'dd/MM/yy'), 'dd/MM/yyyy')\n",
+					"        END = date_format(to_date(s.InvoiceDate, 'd/MM/yyyy'), 'dd/MM/yyyy') and t.InvoiceNumber = s.InvoiceNumber) AND t.InvoiceNumber = s.InvoiceNumber and t.CDCCurrentFlag = true\n",
+					"WHERE \n",
+					"    Supplier = 'ergon'\n",
+					"\"\"\")\n",
+					"ergon_invoice_override_key_df.createOrReplaceTempView(\"ergon_invoice_override_key\")\n",
+					"# Update ergon_bronze tables to disable records that match the override key\n",
+					"# Records from electricity override will move to silver, instead of the equivalent records from ergon_bronze\n",
+					"spark.sql(f\"\"\"\n",
+					"    MERGE INTO ergon_bronze.ergon_invoice_details t\n",
+					"    USING ergon_invoice_override_key s\n",
+					"    ON t.SourceFileID = s.SourceFileID and t.CDCLoadDate = s.CDCLoadDate and t.InvoiceDate = s.InvoiceDate and t.InvoiceNumber = s.InvoiceNumber AND t.CDCCurrentFlag = true\n",
+					"    WHEN MATCHED THEN\n",
+					"      UPDATE SET t.FileOverrideFlag = True\n",
+					"\"\"\")\n",
+					"\n",
+					"\n",
+					"# Determine the key for the electricity override table records inserted \n",
+					"ergon_charges_override_key_df = spark.sql(f\"\"\"\n",
+					"SELECT distinct \n",
+					"     t.SourceFileID, t.CDCLoadDate, t.InvoiceDate, t.InvoiceNumber\n",
+					"FROM\n",
+					"    ergon_bronze.ergon_charge_details t\n",
+					"join\n",
+					"    temp_table s ON (CASE\n",
+					"            WHEN to_date(t.InvoiceDate, 'dd MMM yyyy') IS NOT NULL THEN date_format(to_date(t.InvoiceDate, 'dd MMM yyyy'), 'dd/MM/yyyy')\n",
+					"            WHEN to_date(t.InvoiceDate, 'dd/MM/yy') IS NOT NULL THEN date_format(to_date(t.InvoiceDate, 'dd/MM/yy'), 'dd/MM/yyyy')\n",
+					"        END = date_format(to_date(s.InvoiceDate, 'd/MM/yyyy'), 'dd/MM/yyyy') and t.InvoiceNumber = s.InvoiceNumber) AND t.InvoiceNumber = s.InvoiceNumber and t.CDCCurrentFlag = true\n",
+					"WHERE \n",
+					"    Supplier = 'ergon'\n",
+					"\"\"\")\n",
+					"ergon_charges_override_key_df.createOrReplaceTempView(\"ergon_charges_override_key\")\n",
+					"# Update ergon_bronze tables to disable records that match the override key\n",
+					"# Records from electricity override will move to silver, instead of the equivalent records from ergon_bronze\n",
+					"spark.sql(f\"\"\"\n",
+					"    MERGE INTO ergon_bronze.ergon_charge_details t\n",
+					"    USING ergon_charges_override_key s\n",
+					"    ON t.SourceFileID = s.SourceFileID and t.CDCLoadDate = s.CDCLoadDate and t.InvoiceDate = s.InvoiceDate and t.InvoiceNumber = s.InvoiceNumber AND t.CDCCurrentFlag = true\n",
+					"    WHEN MATCHED THEN\n",
+					"      UPDATE SET t.FileOverrideFlag = True\n",
+					"\"\"\")\n",
+					""
+				],
+				"execution_count": null
+			},
+			{
+				"cell_type": "code",
+				"source": [
+					"# Update FileOverrideFlag for cbre_bronze to override the ingested file\n",
+					"# Determine the key for the electricity override table records inserted \n",
+					"cbre_override_key_df = spark.sql(f\"\"\"\n",
+					"SELECT distinct \n",
+					"     t.SourceFileID, t.CDCLoadDate, t.LocationIdentifier\n",
+					"FROM\n",
+					"    cbre_bronze.cbre_meter_details t\n",
+					"join\n",
+					"    temp_table s on s.LocationIdentifier = t.LocationIdentifier and date_format(to_date(s.InvoiceDate, 'd/MM/yyyy'), 'dd/MM/yyyy') = t.CurrentReadDate AND t.CDCCurrentFlag = true\n",
+					"WHERE \n",
+					"    Supplier = 'cbre'\n",
+					"\"\"\")\n",
+					"cbre_override_key_df.createOrReplaceTempView(\"cbre_override_key\")\n",
+					"\n",
+					"# Update cbre_bronze table to disable records that match the override key\n",
+					"# Records from electricity override will move to silver, instead of the equivalent records from cbre_bronze\n",
+					"spark.sql(f\"\"\"\n",
+					"    MERGE INTO cbre_bronze.cbre_meter_details t\n",
+					"    USING cbre_override_key s\n",
+					"    ON t.SourceFileID = s.SourceFileID and t.CDCLoadDate = s.CDCLoadDate and t.LocationIdentifier = s.LocationIdentifier AND t.CDCCurrentFlag = true\n",
+					"    WHEN MATCHED THEN\n",
+					"      UPDATE SET t.FileOverrideFlag = True    \n",
+					"\"\"\")\n",
+					""
+				],
+				"execution_count": null
+			},
+			{
+				"cell_type": "code",
+				"source": [
+					"#Row count parameters\n",
+					"Bronze_Insert_Post=spark.sql(f\"\"\" SELECT COUNT(*) FROM {db_notebookname}.{db_tablename} WHERE CDCOps = 1 \"\"\").collect()[0][0]\n",
+					"Bronze_Update_Post=spark.sql(f\"\"\" SELECT COUNT(*) FROM {db_notebookname}.{db_tablename} WHERE CDCOps = 2 \"\"\").collect()[0][0]\n",
+					"Bronze_Delete_Post=spark.sql(f\"\"\" SELECT COUNT(*) FROM {db_notebookname}.{db_tablename} WHERE CDCOps = 0 \"\"\").collect()[0][0]\n",
+					"Bronze_TotalRowCount_Post=spark.sql(f\"\"\" SELECT COUNT(*) FROM {db_notebookname}.{db_tablename}\"\"\").collect()[0][0]\n",
+					"Bronze_ActiveRecord_Post=spark.sql(f\"\"\" SELECT COUNT(*) FROM {db_notebookname}.{db_tablename} WHERE CDCCurrentFlag = true \"\"\").collect()[0][0]"
+				],
+				"execution_count": null
+			},
+			{
+				"cell_type": "code",
+				"source": [
+					"#Row calculation\n",
+					"Bronze_Update = Bronze_Update_Post - Bronze_Update_Pre\n",
+					"Bronze_Insert = (Bronze_Insert_Post - Bronze_Insert_Pre) + Bronze_Update\n",
+					"Bronze_Delete = Bronze_Delete_Post - Bronze_Delete_Pre\n",
+					"Bronze_ActiveRows = Bronze_ActiveRecord_Post \n",
+					"Bronze_TotalRows = Bronze_TotalRowCount_Post"
+				],
+				"execution_count": null
+			},
+			{
+				"cell_type": "code",
+				"source": [
+					"#Create dataframe to insert log to controldb\n",
+					"from pyspark.sql.types import StructType, StructField, StringType, IntegerType, BooleanType,DateType, DoubleType,TimestampType\n",
+					"\n",
+					"log_data = [(db_notebookname,db_tablename,Bronze_LoadDate,Bronze_Insert,Bronze_Update,Bronze_Delete,Bronze_ActiveRows,Bronze_TotalRows)]\n",
+					"print(log_data)\n",
+					"log_columns = ['PIPELINE_NAME', 'TABLE_NAME', 'INGEST_DATETIME', 'INSERT','UPDATE','DELETE','ACTIVE_ROWS','TOTAL_ROWS']\n",
+					"df_log = spark.createDataFrame(log_data, log_columns)\n",
+					"\n",
+					"#display(df_log)"
+				],
+				"execution_count": null
+			},
+			{
+				"cell_type": "code",
+				"source": [
+					"#Write df_log to logging table in controldb\n",
+					"import json\n",
+					"db_port = 1433\n",
+					"linked_service_name = \"LS_SQL_ELTFrameworkDB\"\n",
+					"linkedServiceProperties = json.loads(mssparkutils.credentials.getPropertiesAll(linked_service_name))\n",
+					"sql_server_name = linkedServiceProperties.get('Endpoint')\n",
+					"db_name = linkedServiceProperties.get('Database')\n",
+					"access_token = mssparkutils.credentials.getConnectionStringOrCreds(linked_service_name)\n",
+					"write_table_name = \"[CTL].[CFG_INGESTION_LOGS]\"\n",
+					"\n",
+					"try:\n",
+					"    df_log.write.format(\"jdbc\") \\\n",
+					"        .option(\"url\", \"jdbc:sqlserver://%s:%s\" % (sql_server_name, db_port)) \\\n",
+					"        .option(\"dbtable\", write_table_name) \\\n",
+					"        .option(\"accessToken\", access_token) \\\n",
+					"        .option(\"encrypt\", \"true\") \\\n",
+					"        .option(\"databaseName\", db_name) \\\n",
+					"        .option(\"hostNameInCertificate\", \"*.database.windows.net\") \\\n",
+					"        .mode(\"append\") \\\n",
+					"        .save()\n",
+					"except ValueError as error :\n",
+					"    print(\"MSSQL Connector write failed\", error)\n",
+					"\n",
+					"print(\"MSSQL Connector write(append) succeeded  \")"
+				],
+				"execution_count": null
+			},
+			{
+				"cell_type": "markdown",
+				"metadata": {
+					"nteract": {
+						"transient": {
+							"deleting": false
+						}
+					}
+				},
+				"source": [
+					"#  Table: **electricity_override**: END"
+				]
+			}
+		]
+	}
+}

@@ -1,0 +1,947 @@
+{
+	"name": "AEMO_Landing",
+	"properties": {
+		"folder": {
+			"name": "DataHubBatchScripts/AEMO"
+		},
+		"nbformat": 4,
+		"nbformat_minor": 2,
+		"bigDataPool": {
+			"referenceName": "Sparkpool01",
+			"type": "BigDataPoolReference"
+		},
+		"sessionProperties": {
+			"driverMemory": "56g",
+			"driverCores": 8,
+			"executorMemory": "56g",
+			"executorCores": 8,
+			"numExecutors": 2,
+			"conf": {
+				"spark.dynamicAllocation.enabled": "false",
+				"spark.dynamicAllocation.minExecutors": "2",
+				"spark.dynamicAllocation.maxExecutors": "2",
+				"spark.autotune.trackingId": "d5af1d17-4688-4058-8dac-e8dd30efc90d"
+			}
+		},
+		"metadata": {
+			"saveOutput": true,
+			"enableDebugMode": false,
+			"kernelspec": {
+				"name": "synapse_pyspark",
+				"display_name": "Synapse PySpark"
+			},
+			"language_info": {
+				"name": "python"
+			},
+			"a365ComputeOptions": {
+				"id": "/subscriptions/2e9f823e-dc76-4e8e-b815-c8a4f22d05ff/resourceGroups/CQL-AZUR1-DEVDATAHUB01-RG/providers/Microsoft.Synapse/workspaces/cql-dev-datahub-synapse01/bigDataPools/Sparkpool01",
+				"name": "Sparkpool01",
+				"type": "Spark",
+				"endpoint": "https://cql-dev-datahub-synapse01.dev.azuresynapse.net/livyApi/versions/2019-11-01-preview/sparkPools/Sparkpool01",
+				"auth": {
+					"type": "AAD",
+					"authResource": "https://dev.azuresynapse.net"
+				},
+				"sparkVersion": "3.4",
+				"nodeCount": 10,
+				"cores": 8,
+				"memory": 56,
+				"automaticScaleJobs": false
+			},
+			"sessionKeepAliveTimeout": 30
+		},
+		"cells": [
+			{
+				"cell_type": "markdown",
+				"metadata": {
+					"nteract": {
+						"transient": {
+							"deleting": false
+						}
+					}
+				},
+				"source": [
+					"print(f\"{file_text}\")"
+				]
+			},
+			{
+				"cell_type": "code",
+				"metadata": {
+					"jupyter": {
+						"source_hidden": false,
+						"outputs_hidden": false
+					},
+					"nteract": {
+						"transient": {
+							"deleting": false
+						}
+					},
+					"tags": [
+						"parameters"
+					]
+				},
+				"source": [
+					"#CSVIntervalData Tag Data\r\n",
+					"file_text = ''\r\n",
+					"\r\n",
+					"#Source DataLake storage details\r\n",
+					"source_storage = 'cqldevdatahubdata' #Storage name\r\n",
+					"source_container = 'drop-zone' #Storage container detail\r\n",
+					"source_path = 'aemo' #internal folder location in container \"demodata/demo_aemo\"\r\n",
+					"source_file = 'mtrdl_mdymdp_toht_msg_0024757913.xml' #CUSTOMER__full_32a72bd2-bd94-467f-9030-6b9f20dad676_20240204_100201\r\n",
+					"\r\n",
+					"destination_storage = 'cqldevdatahubsynapse' #Storage name\r\n",
+					"destination_container = 'bronze' #raw storage container details\r\n",
+					"destination_path = 'AEMO/NEM12' #raw delta file patch"
+				],
+				"execution_count": 14
+			},
+			{
+				"cell_type": "code",
+				"metadata": {
+					"jupyter": {
+						"source_hidden": false,
+						"outputs_hidden": false
+					},
+					"nteract": {
+						"transient": {
+							"deleting": false
+						}
+					}
+				},
+				"source": [
+					"extracted_text = f\"{file_text}\"\r\n",
+					"extracted_text = extracted_text.splitlines()\r\n",
+					"extracted_text = list(map(lambda x:(x.split(\",\")),extracted_text))"
+				],
+				"execution_count": 15
+			},
+			{
+				"cell_type": "code",
+				"metadata": {
+					"jupyter": {
+						"source_hidden": false,
+						"outputs_hidden": false
+					},
+					"nteract": {
+						"transient": {
+							"deleting": false
+						}
+					}
+				},
+				"source": [
+					"\r\n",
+					"TOTAL_MIN_IN_DAY = 1440\r\n",
+					"\r\n",
+					"\r\n",
+					"COLUMN_ORDER = [\"VersionHeader\",\"CreationDate\",\"FromParticipant\",\"ToParticipant\",\"NMI\",\"NMIConfiguration\",\"RegisterID\",\"NMISuffix\",\r\n",
+					"                \"MDMDataStreamIdentifier\",\r\n",
+					"           \"MeterSerialNumber\",\"UnitOfMeasurementId\",\"IntervalLength\",\"IntervalIndex\",\"IntervalDate\",\"NextScheduledReadDate\",\"Usage\",\"FinalQualityMethodId\",\r\n",
+					"           \"FinalReasonCodeId\",\"FinalReasonDescription\",\"UpdateDateTime\",\"MSATSLoadDateTime\",\"QualityMethodId\",\r\n",
+					"           \"ReasonCodeId\",\"ReasonDescription\",\"NormalizedTimeStart\",\"NormalizedTimeEnd\",\"TransCodeId\",\"RetServiceOrder\",\"ReadDatetime\",\"IndexRead\"]\r\n",
+					"\r\n",
+					"NMI_SUFFIX_LOOKUP = {\r\n",
+					"        \"E1\": \"Usage\",\r\n",
+					"        \"E2\": \"Usage\",\r\n",
+					"        \"B1\": \"Generation\",\r\n",
+					"        \"B2\":  \"Generation\",\r\n",
+					"        \"Q1\":\"Demand\",\r\n",
+					"        \"K1\":\"Demand\",\r\n",
+					"        \"K2\":\"Demand\"\r\n",
+					"\r\n",
+					"        }\r\n",
+					"QUALITY_METHOD_LOOKUP = {\r\n",
+					"        \"A\":\"Actual\",\r\n",
+					"        \"S\":\"Substituted\",\r\n",
+					"        \"F\": \"Final Substituted\",\r\n",
+					"        \"V\": \"Varied\",\r\n",
+					"        \"N\": \"No Data Exists\",\r\n",
+					"        \"E\": \"Forward Estimate\",\r\n",
+					"        \"F14\":\"Final Substituted\"\r\n",
+					"        }\r\n",
+					"\r\n",
+					"RECORD_INDICATOR_100 = {\r\n",
+					" \"RECORD_INDICATOR\":{\r\n",
+					"        \"Column\":\"A\",\r\n",
+					"        \"Index\":0\r\n",
+					"        },\r\n",
+					"    \"FILE_TYPE\":{\r\n",
+					"        \"Column\":\"B\",\r\n",
+					"        \"Index\":1\r\n",
+					"        },\r\n",
+					"    \"DATE_FILE_GENERATION\":{\r\n",
+					"        \"Column\":\"C\",\r\n",
+					"        \"Index\":2\r\n",
+					"        },\r\n",
+					"    \"COMPANY_THAT_SENT_METERING_DATA\":{\r\n",
+					"        \"Column\":\"D\",\r\n",
+					"        \"Index\":3\r\n",
+					"        },\r\n",
+					"    \"PARTICIPANT_ID\":{\r\n",
+					"        \"Column\":\"E\",\r\n",
+					"        \"Index\":4\r\n",
+					"        },\r\n",
+					"}\r\n",
+					"\r\n",
+					"\r\n",
+					"RECORD_INDICATOR_200 = {\r\n",
+					"    \"RECORD_INDICATOR\":{\r\n",
+					"        \"Column\":\"A\",\r\n",
+					"        \"Index\":0\r\n",
+					"        },\r\n",
+					"    \"NMI\":{\r\n",
+					"        \"Column\":\"B\",\r\n",
+					"        \"Index\":1\r\n",
+					"        },\r\n",
+					"    \"NMI_CONFIGURATION\":{\r\n",
+					"        \"Column\":\"C\",\r\n",
+					"        \"Index\":2\r\n",
+					"        },\r\n",
+					"    \"REGISTER_ID\":{\r\n",
+					"        \"Column\":\"D\",\r\n",
+					"        \"Index\":3\r\n",
+					"        },\r\n",
+					"    \"NMI_SUFFIX\":{\r\n",
+					"        \"Column\":\"E\",\r\n",
+					"        \"Index\":4\r\n",
+					"        },\r\n",
+					"    \"MDM_DATA_STREAM_IDENTIFIER\":{\r\n",
+					"        \"Column\":\"F\",\r\n",
+					"        \"Index\":5\r\n",
+					"        },\r\n",
+					"\r\n",
+					"    \"METER_SERIAL_NUMBER\":{\r\n",
+					"        \"Column\":\"G\",\r\n",
+					"        \"Index\":6\r\n",
+					"        },\r\n",
+					"   \"UNIT_OF_MEASUREMENT\":{\r\n",
+					"        \"Column\":\"H\",\r\n",
+					"        \"Index\":7\r\n",
+					"        },\r\n",
+					"\r\n",
+					"    \"INTERVAL_LENGTH\":{\r\n",
+					"        \"Column\":\"I\",\r\n",
+					"        \"Index\":8\r\n",
+					"        },\r\n",
+					"\r\n",
+					"    \"NEXT_SCHEDULED_READ_DATE\":{\r\n",
+					"        \"Column\":\"J\",\r\n",
+					"        \"Index\":9\r\n",
+					"        },\r\n",
+					"}\r\n",
+					"\r\n",
+					"RECORD_INDICATOR_500 = {\r\n",
+					" \"RECORD_INDICATOR\":{\r\n",
+					"        \"Column\":\"A\",\r\n",
+					"        \"Index\":0\r\n",
+					"        },\r\n",
+					"    \"TRANS_CODE\":{\r\n",
+					"        \"Column\":\"B\",\r\n",
+					"        \"Index\":1\r\n",
+					"        },\r\n",
+					"    \"RET_SERVICE_ORDER\":{\r\n",
+					"        \"Column\":\"C\",\r\n",
+					"        \"Index\":2\r\n",
+					"        },\r\n",
+					"    \"READ_DATETIME\":{\r\n",
+					"        \"Column\":\"D\",\r\n",
+					"        \"Index\":3\r\n",
+					"        },\r\n",
+					"    \"INDEX_READ\":{\r\n",
+					"        \"Column\":\"E\",\r\n",
+					"        \"Index\":4\r\n",
+					"        },\r\n",
+					"}\r\n",
+					"\r\n",
+					"\r\n",
+					"\r\n",
+					"\r\n",
+					"NUMBER_OF_KEYS_IN_RECORD_200 = len(RECORD_INDICATOR_200.keys()) - 1 # Subtracting 1 since we don't need the Record Indicator\r\n",
+					"NUMBER_OF_KEYS_IN_RECORD_500 = len(RECORD_INDICATOR_500.keys()) - 1 # Subtracting 1 since we don't need the Record Indicator\r\n",
+					"\r\n",
+					"\r\n",
+					""
+				],
+				"execution_count": 17
+			},
+			{
+				"cell_type": "code",
+				"metadata": {
+					"jupyter": {
+						"source_hidden": false,
+						"outputs_hidden": false
+					},
+					"nteract": {
+						"transient": {
+							"deleting": false
+						}
+					}
+				},
+				"source": [
+					"\r\n",
+					"import xml.etree.ElementTree as et \r\n",
+					"import pandas as pd\r\n",
+					"import csv\r\n",
+					"import datetime\r\n",
+					"from typing import List,Union,Dict\r\n",
+					"\r\n",
+					"\r\n",
+					"\r\n",
+					"def break_into_groups(lines):\r\n",
+					"    groups = []\r\n",
+					"    subgroup = []\r\n",
+					"    interval_events = []\r\n",
+					"\t\r\n",
+					"    #Block 200\t\t\t   \r\n",
+					"    nmi = None\r\n",
+					"    nmi_configuration = None\r\n",
+					"    register_id = None\r\n",
+					"    nmi_suffix = None\r\n",
+					"    mdm_data_stream_identifier = None\r\n",
+					"    meter_serial_number = None\r\n",
+					"    unit_of_measurement = None\r\n",
+					"    interval_length = None\r\n",
+					"    next_scheduled_read_date = None\r\n",
+					"    record_500_data = None\r\n",
+					"\r\n",
+					"    #Block 500\r\n",
+					"    trans_code = None\r\n",
+					"    ret_service_order = None\r\n",
+					"    read_datetime = None\r\n",
+					"    index_read = None\r\n",
+					"    \"\"\"\r\n",
+					"    subgroup: {\r\n",
+					"            \"data\", \"interval_events\"\r\n",
+					"            }\r\n",
+					"    \"\"\"\r\n",
+					"    file_metadata = None\r\n",
+					"    for line in lines:\r\n",
+					"        if line[0] == \"100\":\r\n",
+					"            file_metadata = line\r\n",
+					"        elif line[0] == \"200\": #Start a new group\r\n",
+					"            if len(subgroup) != 0:\r\n",
+					"\t\t\t\t\t\t\t\t\t\t\t\t\t\t\t\t\t\t\t\t\t\t\t\t\t\t\t\t\t\t\t\t\t\t\t\t\t\t  \r\n",
+					"                block_200_metadata = [nmi,nmi_configuration,register_id,nmi_suffix,\r\n",
+					"                                      mdm_data_stream_identifier,meter_serial_number,unit_of_measurement,interval_length,next_scheduled_read_date]\r\n",
+					"                block_500_metadata =  [trans_code,ret_service_order,read_datetime,index_read]\r\n",
+					"                subgroup = [{\"data\":block_200_metadata + block_500_metadata + ls[\"data\"],\"interval_events\":ls[\"interval_events\"],\"record_500_data\": record_500_data } for ls in subgroup]\r\n",
+					"                groups.append(subgroup) # Append existing running group\r\n",
+					"                subgroup = [] # Create new group\r\n",
+					"                record_500_data = None\r\n",
+					"                trans_code = None\r\n",
+					"                ret_service_order = None\r\n",
+					"                read_datetime = None\r\n",
+					"                index_read = None\r\n",
+					"            interval_events = []\r\n",
+					"            nmi = line[RECORD_INDICATOR_200[\"NMI\"][\"Index\"]]\r\n",
+					"            nmi_configuration = line[RECORD_INDICATOR_200[\"NMI_CONFIGURATION\"][\"Index\"]]\r\n",
+					"            register_id = line[RECORD_INDICATOR_200[\"REGISTER_ID\"][\"Index\"]]\r\n",
+					"            nmi_suffix = line[RECORD_INDICATOR_200[\"NMI_SUFFIX\"][\"Index\"]]\r\n",
+					"            mdm_data_stream_identifier = line[RECORD_INDICATOR_200[\"MDM_DATA_STREAM_IDENTIFIER\"][\"Index\"]]\r\n",
+					"            meter_serial_number = line[RECORD_INDICATOR_200[\"METER_SERIAL_NUMBER\"][\"Index\"]]\r\n",
+					"            unit_of_measurement = line[RECORD_INDICATOR_200[\"UNIT_OF_MEASUREMENT\"][\"Index\"]]\r\n",
+					"            interval_length = float(line[RECORD_INDICATOR_200[\"INTERVAL_LENGTH\"][\"Index\"]])\r\n",
+					"            next_scheduled_read_date = line[RECORD_INDICATOR_200[\"NEXT_SCHEDULED_READ_DATE\"][\"Index\"]]\r\n",
+					"\r\n",
+					"        elif line[0] == \"300\":\r\n",
+					"            #18322-correcting-QualityMethod-from-400-record-addition-to-respective-300-record\r\n",
+					"            #subgroup.append({\"data\":line,\"interval_events\":interval_events})\r\n",
+					"            subgroup.append({\"data\":line,\"interval_events\":[]})\r\n",
+					"            interval_events = []\r\n",
+					"        elif line[0] == \"400\":\r\n",
+					"            interval_events.append({\"beg_interval\":line[1],\"end_interval\":line[2],\"quality_method\":line[3],\"reason_code\":line[4],\"reason_description\":line[5]})\r\n",
+					"            #18322-correcting-QualityMethod-from-400-record-addition-to-respective-300-record\r\n",
+					"            subgroup[-1][\"interval_events\"] = interval_events\r\n",
+					"        elif line[0] == \"500\":\r\n",
+					"            trans_code = line[RECORD_INDICATOR_500[\"TRANS_CODE\"][\"Index\"]]\r\n",
+					"            ret_service_order = line[RECORD_INDICATOR_500[\"RET_SERVICE_ORDER\"][\"Index\"]]\r\n",
+					"            read_datetime = line[RECORD_INDICATOR_500[\"READ_DATETIME\"][\"Index\"]]\r\n",
+					"            index_read = line[RECORD_INDICATOR_500[\"INDEX_READ\"][\"Index\"]]\r\n",
+					"        elif line[0] == \"900\": \r\n",
+					"            if len(subgroup) != 0:\t\t\t\t\t\t\t\t\t\t\t\t\t\t\t\t\t\t\t\t\t\t\t\t\t\t\t\t\t\t\t\t\t\t  \r\n",
+					"                block_200_metadata = [nmi,nmi_configuration,register_id,nmi_suffix,\r\n",
+					"                                      mdm_data_stream_identifier,meter_serial_number,unit_of_measurement,interval_length,next_scheduled_read_date]\r\n",
+					"                block_500_metadata =  [trans_code,ret_service_order,read_datetime,index_read]\r\n",
+					"                subgroup = [{\"data\":block_200_metadata + block_500_metadata + ls[\"data\"],\"interval_events\":ls[\"interval_events\"],\"record_500_data\": record_500_data } for ls in subgroup]\r\n",
+					"                groups.append(subgroup) # Append existing running group\r\n",
+					"    return groups,file_metadata\r\n",
+					"\r\n",
+					"def combine_into_single_list(rows:List[List[List[str]]]):\r\n",
+					"    return [item for sublist in rows for item in sublist]\r\n",
+					"\r\n",
+					"\r\n",
+					"def generate_blocks_in_days(interval_length:int) -> int:\r\n",
+					"    blocks = TOTAL_MIN_IN_DAY / interval_length\r\n",
+					"    return int(blocks)\r\n",
+					"\r\n",
+					"\r\n",
+					"def generate_time_mapping_from_interval_length(interval_length,end:bool=False):\r\n",
+					"    mapping = {}\r\n",
+					"    blocks_in_day = generate_blocks_in_days(interval_length)\r\n",
+					"    # start_time = datetime.datetime.strptime(f\"00:{int(interval_length):02}\", \"%H:%M\")\r\n",
+					"    if not end:\r\n",
+					"        start_time = datetime.datetime.strptime(f\"00:00\", \"%H:%M\")\r\n",
+					"    else:\r\n",
+					"        start_time = datetime.datetime.strptime(f\"00:{int(interval_length)}\", \"%H:%M\")\r\n",
+					"\r\n",
+					"    for i in range(blocks_in_day):\r\n",
+					"        time_str = start_time.strftime(\"%H:%M\")\r\n",
+					"        mapping[i] = time_str\r\n",
+					"        start_time += datetime.timedelta(minutes=interval_length)\r\n",
+					"\r\n",
+					"    return mapping\r\n",
+					"\r\n",
+					"\r\n",
+					"def generate_time_mapping_5min():\r\n",
+					"    mapping = {}\r\n",
+					"    start_time = datetime.datetime.strptime(\"00:00\", \"%H:%M\")\r\n",
+					"    for i in range(FIVE_MIN_BLOCKS_IN_DAY):  # 0,...,287 -> 288 total intervals\r\n",
+					"        time_str = start_time.strftime(\"%I:%M%p\").lower().lstrip(\"0\")\r\n",
+					"        mapping[i] = time_str\r\n",
+					"        start_time += datetime.timedelta(minutes=5)\r\n",
+					"    return mapping\r\n",
+					"\r\n",
+					"def generate_time_mapping_30min():\r\n",
+					"    mapping = {}\r\n",
+					"    start_time = datetime.datetime.strptime(\"00:00\", \"%H:%M\")\r\n",
+					"    # 48 intervals for 30-minute intervals in a day\r\n",
+					"    for i in range(THIRTY_MIN_BLOCKS_IN_DAY): # 0,...,47 -> 48 total intervals\r\n",
+					"        time_str = start_time.strftime(\"%I:%M%p\").lower().lstrip(\"0\")\r\n",
+					"        mapping[i] = time_str\r\n",
+					"        start_time += datetime.timedelta(minutes=30)\r\n",
+					"    return mapping\r\n",
+					"\r\n",
+					"def modify_values_with_interval_event_metadata(data):\r\n",
+					"    \"\"\" This is going to make values into: value | quality_method | reason_code | trans_code | rest_service_order | read_datetime | index_read \"\"\"\r\n",
+					"    has_interval_events = False\r\n",
+					"    for item in data:\r\n",
+					"        for event in item[\"interval_events\"]:\r\n",
+					"            has_interval_events = True if has_interval_events is False else has_interval_events\r\n",
+					"            beg_interval = int(event[\"beg_interval\"]) + 14 # Because there are 14 columns that precede the value columns\r\n",
+					"            end_interval = int(event[\"end_interval\"]) + 14\r\n",
+					"            quality_method = event[\"quality_method\"]\r\n",
+					"            reason_code = event[\"reason_code\"]\r\n",
+					"#18322-bring FinalReasonDescription from 400 header\r\n",
+					"            reason_description = event[\"reason_description\"]\r\n",
+					"            cols_to_modify = [i for i in range(beg_interval,end_interval + 1)]\r\n",
+					"            for col in cols_to_modify:\r\n",
+					"                item[\"data\"][col] = f\"{item['data'][col]}|{quality_method}|{reason_code}|{reason_description}\"\r\n",
+					"    return [item[\"data\"] for item in data],has_interval_events\r\n",
+					"\r\n",
+					"\r\n",
+					"\r\n",
+					"def get_unique_interval_lengths(data) -> List[Union[float,int]]:\r\n",
+					"    interval_lengths = [d[7] for d in data]\r\n",
+					"    return list(set(interval_lengths))\r\n",
+					""
+				],
+				"execution_count": 18
+			},
+			{
+				"cell_type": "code",
+				"metadata": {
+					"jupyter": {
+						"source_hidden": false,
+						"outputs_hidden": false
+					},
+					"nteract": {
+						"transient": {
+							"deleting": false
+						}
+					}
+				},
+				"source": [
+					"import numpy as np \r\n",
+					"class CleanData:\r\n",
+					"    file_metadata_index = {\r\n",
+					"            \"RECORD_INDICATOR\":0,\r\n",
+					"            \"FILE_TYPE\":1,\r\n",
+					"            \"FILE_GENERATION_DATE\":2,\r\n",
+					"            \"COMPANY_THAT_SENT_DATA\":3,\r\n",
+					"            \"PARTICIPANT_ID\":4}\r\n",
+					"\r\n",
+					"    def __init__(self,df,interval_length,file_metadata) -> None:\r\n",
+					"        self.df = df\r\n",
+					"        self.interval_length = interval_length\r\n",
+					"        self.file_metadata = file_metadata\r\n",
+					"        self.time_mapping_start = generate_time_mapping_from_interval_length(self.interval_length)\r\n",
+					"        self.time_mapping_end = generate_time_mapping_from_interval_length(self.interval_length, True)\r\n",
+					"\r\n",
+					"\r\n",
+					"    def format(self,has_interval_events:bool) -> pd.DataFrame:\r\n",
+					"        index = self._generate_indices(self.interval_length)\r\n",
+					"        quality_method_index = index[\"QUALITY_METHOD\"]\r\n",
+					"        reason_code_index = index[\"REASON_CODE\"]\r\n",
+					"        reason_description_index = index[\"REASON_DESCRIPTION\"]\r\n",
+					"        updated_datetime_index = index[\"UPDATED_DATETIME\"]\r\n",
+					"        #16266-bring UpdateDateTime and MSATSLoadDateTime from 300 header\r\n",
+					"        msats_loaddatetime_index = index[\"MSATS_LOADDATETIME\"]\r\n",
+					"\r\n",
+					"        self.df.rename(columns={0:\"NMI\",1:\"NMIConfiguration\",2:\"RegisterID\",3:\"NMISuffix\",4:\"MDMDataStreamIdentifier\",\r\n",
+					"                                5:\"MeterSerialNumber\",6:\"UnitOfMeasurementId\",7:\"IntervalLength\",8:\"NextScheduledReadDate\",\r\n",
+					"                                9:\"TransCodeId\",10:\"RetServiceOrder\",11:\"ReadDatetime\",12:\"IndexRead\",\r\n",
+					"                                13:\"RecordIndicator\",14:\"IntervalDate\",\r\n",
+					"                                quality_method_index:\"QualityMethodId\",\r\n",
+					"                                reason_code_index:\"ReasonCodeId\",\r\n",
+					"                                reason_description_index:\"ReasonDescription\",\r\n",
+					"        #16266-bring UpdateDateTime and MSATSLoadDateTime from 300 header\r\n",
+					"                                updated_datetime_index: \"UpdateDateTime\",\r\n",
+					"                                msats_loaddatetime_index: \"MSATSLoadDateTime\"\r\n",
+					"                                },inplace=True)\r\n",
+					"\r\n",
+					"        cols_to_melt = [col for col in self.df.columns if isinstance(col,int)]\r\n",
+					"        renamed_cols = {col:col - 15 for col in cols_to_melt }\r\n",
+					"\t\t\t\t\t\t   \r\n",
+					"        self.df.rename(columns=renamed_cols,inplace=True)\r\n",
+					"        cols_to_drop = [col for col in self.df.columns if isinstance(col,int) and col > ( generate_blocks_in_days(self.interval_length)- 1)]\r\n",
+					"        self.df.drop(columns=cols_to_drop,inplace=True)\r\n",
+					"        self.df = self._add_file_metadata_cols()\r\n",
+					"        #16266-bring UpdateDateTime and MSATSLoadDateTime from 300 header\r\n",
+					"        self.df = self.df.melt(id_vars=[\"NMI\",\"NMIConfiguration\",\"QualityMethodId\",\"ReasonCodeId\",\r\n",
+					"                                        \"ReasonDescription\",\r\n",
+					"                                        \"RecordIndicator\",\"RegisterID\",\"NMISuffix\",\"MDMDataStreamIdentifier\",\"MeterSerialNumber\",\r\n",
+					"                                        \"UnitOfMeasurementId\",\"IntervalLength\",\"NextScheduledReadDate\",\"VersionHeader\",\"CreationDate\",\"FromParticipant\",\r\n",
+					"                                        \"ToParticipant\",\"IntervalDate\",\"UpdateDateTime\",\"MSATSLoadDateTime\",\"TransCodeId\",\"RetServiceOrder\",\"ReadDatetime\",\"IndexRead\"], var_name='Time', value_name='Value')\r\n",
+					"        if has_interval_events:\r\n",
+					"            try:\r\n",
+					"                #print(self.df[\"Value\"])\r\n",
+					"                split_columns = self.df[\"Value\"].str.split(\"|\",expand=True)\r\n",
+					"                #print(split_columns)\r\n",
+					"        #18322-bring FinalReasonDescription from 400 header\r\n",
+					"                self.df[[\"Value\",\"FinalQualityMethodId\",\"FinalReasonCodeId\",\"FinalReasonDescription\"]] = split_columns\r\n",
+					"            except ValueError:\r\n",
+					"                self.df[\"FinalQualityMethodId\"] = None\r\n",
+					"                self.df[\"FinalReasonCodeId\"] = None\r\n",
+					"                self.df[\"FinalReasonDescription\"] = None\r\n",
+					"        else:\r\n",
+					"            self.df[\"FinalQualityMethodId\"] = None\r\n",
+					"            self.df[\"FinalReasonCodeId\"] = None\r\n",
+					"            self.df[\"FinalReasonDescription\"] = None\r\n",
+					"\r\n",
+					"        indices_to_drop = self.df[(self.df[\"IntervalLength\"] == self.interval_length ) & (self.df[\"Time\"] > generate_blocks_in_days(self.interval_length) - 1)].index\r\n",
+					"        self.df.drop(indices_to_drop,inplace=True)\r\n",
+					"        self.df[\"Value\"] = self.df[\"Value\"].replace(r'^\\s*$', np.nan, regex=True)\r\n",
+					"        self.df[\"Value\"] = pd.to_numeric(self.df[\"Value\"], errors='coerce')\r\n",
+					"        self.df[\"NormalizedTimeStart\"] = self.df.apply(lambda x: self.time_mapping_start[x[\"Time\"]], axis=1)\r\n",
+					"        self.df[\"NormalizedTimeEnd\"] = self.df.apply(lambda x: self.time_mapping_end[x[\"Time\"]], axis=1)\r\n",
+					"        self.df.sort_values(by=[\"IntervalDate\",\"Time\"],ascending=True,inplace=True)\r\n",
+					"        self._add_file_metadata_cols() # Adds metadata columns\r\n",
+					"        self.df.rename(columns={\"Value\":\"Usage\",\"Time\":\"IntervalIndex\"},inplace=True)\r\n",
+					"        self._reorder_cols()\r\n",
+					"\t\t\t\t\t\t\t\t\t\t\t\t \r\n",
+					"        return self.df\r\n",
+					"\r\n",
+					"    def _add_file_metadata_cols(self) -> pd.DataFrame:\r\n",
+					"        self.df[\"VersionHeader\"] = self.file_metadata[self.file_metadata_index[\"FILE_TYPE\"]]\r\n",
+					"        self.df[\"CreationDate\"] = self.file_metadata[self.file_metadata_index[\"FILE_GENERATION_DATE\"]]\r\n",
+					"        self.df[\"FromParticipant\"] = self.file_metadata[self.file_metadata_index[\"COMPANY_THAT_SENT_DATA\"]]\r\n",
+					"        self.df[\"ToParticipant\"] = self.file_metadata[self.file_metadata_index[\"PARTICIPANT_ID\"]]\r\n",
+					"        return self.df\r\n",
+					"\r\n",
+					"    def _reorder_cols(self) -> pd.DataFrame:\r\n",
+					"        self.df = self.df[COLUMN_ORDER]\r\n",
+					"\r\n",
+					"\r\n",
+					"    @classmethod\r\n",
+					"    def _generate_indices(cls,interval_length):\r\n",
+					"        \"\"\"\r\n",
+					"\r\n",
+					"        Generates dynamic indices based on interval length.\r\n",
+					"\r\n",
+					"        \"\"\"\r\n",
+					"        blocks_in_day = TOTAL_MIN_IN_DAY / interval_length\r\n",
+					"        quality_method_index = blocks_in_day + 2 + NUMBER_OF_KEYS_IN_RECORD_200 +  NUMBER_OF_KEYS_IN_RECORD_500\r\n",
+					"        reason_code_index = quality_method_index + 1\r\n",
+					"        reason_description_index = reason_code_index + 1\r\n",
+					"        updated_datetime_index = reason_description_index + 1\r\n",
+					"        #16266-bring UpdateDateTime and MSATSLoadDateTime from 300 header\r\n",
+					"        msats_loaddatetime_index = updated_datetime_index + 1\r\n",
+					"        index = {\r\n",
+					"                \"QUALITY_METHOD\": int(quality_method_index),\r\n",
+					"                \"REASON_CODE\": int(reason_code_index) ,\r\n",
+					"                \"REASON_DESCRIPTION\": int(reason_description_index),\r\n",
+					"                \"UPDATED_DATETIME\": int(updated_datetime_index),\r\n",
+					"        #16266-bring UpdateDateTime and MSATSLoadDateTime from 300 header\r\n",
+					"                \"MSATS_LOADDATETIME\": int(msats_loaddatetime_index),\r\n",
+					"        }\r\n",
+					"        return index\r\n",
+					""
+				],
+				"execution_count": 19
+			},
+			{
+				"cell_type": "code",
+				"metadata": {
+					"jupyter": {
+						"source_hidden": false,
+						"outputs_hidden": false
+					},
+					"nteract": {
+						"transient": {
+							"deleting": false
+						}
+					}
+				},
+				"source": [
+					"data,file_metadata = break_into_groups(extracted_text)\r\n",
+					"data = combine_into_single_list(data)"
+				],
+				"execution_count": 20
+			},
+			{
+				"cell_type": "code",
+				"metadata": {
+					"jupyter": {
+						"source_hidden": false,
+						"outputs_hidden": false
+					},
+					"nteract": {
+						"transient": {
+							"deleting": false
+						}
+					}
+				},
+				"source": [
+					"data,has_interval_events = modify_values_with_interval_event_metadata(data)\r\n",
+					"interval_lengths:List[Union[float,int]] = get_unique_interval_lengths(data)"
+				],
+				"execution_count": 21
+			},
+			{
+				"cell_type": "code",
+				"metadata": {
+					"jupyter": {
+						"source_hidden": false,
+						"outputs_hidden": false
+					},
+					"nteract": {
+						"transient": {
+							"deleting": false
+						}
+					}
+				},
+				"source": [
+					"combined_df = []\r\n",
+					"for il in interval_lengths: # When porting over to spark we can make this parallel \r\n",
+					"    filtered_data = list(filter(lambda x: (x[(RECORD_INDICATOR_200[\"INTERVAL_LENGTH\"][\"Index\"] - 1)] == il),data))\r\n",
+					"    df = pd.DataFrame(filtered_data)\r\n",
+					"    formatted_df = CleanData(df,il,file_metadata).format(has_interval_events)\r\n",
+					"    combined_df.append(formatted_df)\r\n",
+					"df_combined = pd.concat(combined_df)\r\n",
+					""
+				],
+				"execution_count": 22
+			},
+			{
+				"cell_type": "code",
+				"metadata": {
+					"jupyter": {
+						"source_hidden": false,
+						"outputs_hidden": false
+					},
+					"nteract": {
+						"transient": {
+							"deleting": false
+						}
+					}
+				},
+				"source": [
+					"# Enforce Schema\r\n",
+					"\r\n",
+					"from pyspark.sql.types import StructType, StructField, StringType, IntegerType, BooleanType,DateType, DoubleType,TimestampType\r\n",
+					"landing_schema = StructType([\r\n",
+					"    StructField(\"VersionHeader\",StringType(),True),\r\n",
+					"    StructField(\"CreationDate\",StringType(),True),\r\n",
+					"    StructField(\"FromParticipant\",StringType(),True),\r\n",
+					"    StructField(\"ToParticipant\",StringType(),True),\r\n",
+					"    StructField(\"NMI\",StringType(),True),\r\n",
+					"    StructField(\"NMIConfiguration\",StringType(),True),\r\n",
+					"    StructField(\"RegisterID\",StringType(),True),\r\n",
+					"    StructField(\"NMISuffix\",StringType(),True),\r\n",
+					"    StructField(\"MDMDataStreamIdentifiers\",StringType(),True),\r\n",
+					"    StructField(\"MeterSerialNumber\",StringType(),True),\r\n",
+					"    StructField(\"UnitOfMeasurementId\",StringType(),True),\r\n",
+					"    StructField(\"IntervalLength\",DoubleType(),True),\r\n",
+					"    StructField(\"IntervalIndex\",IntegerType(),False),\r\n",
+					"    StructField(\"IntervalDate\",StringType(),True),\r\n",
+					"    StructField(\"NextScheduledReadDate\",StringType(),True),\r\n",
+					"    StructField(\"Usage\",DoubleType(),True),\r\n",
+					"    StructField(\"FinalQualityMethodId\",StringType(),True),\r\n",
+					"    StructField(\"FinalReasonCodeId\",StringType(),False),\r\n",
+					"    StructField(\"FinalReasonDescription\",StringType(),False),\r\n",
+					"    StructField(\"UpdateDateTime\",StringType(),True),\r\n",
+					"    StructField(\"MSATSLoadDateTime\",StringType(),True),\r\n",
+					"    StructField(\"QualityMethod\",StringType(),True),\r\n",
+					"    StructField(\"ReasonCodeId\",StringType(),True),\r\n",
+					"    StructField(\"ReasonDescription\",StringType(),True),\r\n",
+					"    StructField(\"NormalizedTimeStart\",StringType(),True),\r\n",
+					"    StructField(\"NormalizedTimeEnd\",StringType(),True),\r\n",
+					"    StructField(\"TransCodeId\",StringType(),True),\r\n",
+					"    StructField(\"RetServiceOrder\",StringType(),True),\r\n",
+					"    StructField(\"ReadDatetime\",StringType(),True),\r\n",
+					"    StructField(\"IndexRead\",StringType(),True)\r\n",
+					"\r\n",
+					"])\r\n",
+					""
+				],
+				"execution_count": 40
+			},
+			{
+				"cell_type": "code",
+				"metadata": {
+					"jupyter": {
+						"source_hidden": false,
+						"outputs_hidden": false
+					},
+					"nteract": {
+						"transient": {
+							"deleting": false
+						}
+					}
+				},
+				"source": [
+					"# Converting back to spark dataframe\r\n",
+					"df = spark.createDataFrame(df_combined)"
+				],
+				"execution_count": 16
+			},
+			{
+				"cell_type": "code",
+				"metadata": {
+					"jupyter": {
+						"source_hidden": false,
+						"outputs_hidden": false
+					},
+					"nteract": {
+						"transient": {
+							"deleting": false
+						}
+					}
+				},
+				"source": [
+					"from pyspark.sql.functions import lit, current_timestamp,hash,col\r\n",
+					"\r\n",
+					"# Add File Name\r\n",
+					"df = df.withColumn(\"FileName\",lit(source_file))\r\n",
+					"\r\n",
+					"# Start Interval Index at 1 \r\n",
+					"df = df.withColumn(\"IntervalIndex\", col(\"IntervalIndex\") + 1)\r\n",
+					"\r\n",
+					""
+				],
+				"execution_count": 17
+			},
+			{
+				"cell_type": "markdown",
+				"metadata": {
+					"nteract": {
+						"transient": {
+							"deleting": false
+						}
+					}
+				},
+				"source": [
+					"display(df)"
+				]
+			},
+			{
+				"cell_type": "markdown",
+				"metadata": {
+					"nteract": {
+						"transient": {
+							"deleting": false
+						}
+					}
+				},
+				"source": [
+					"## Testing Script"
+				]
+			},
+			{
+				"cell_type": "markdown",
+				"metadata": {
+					"nteract": {
+						"transient": {
+							"deleting": false
+						}
+					}
+				},
+				"source": [
+					"display(df)"
+				]
+			},
+			{
+				"cell_type": "code",
+				"metadata": {
+					"jupyter": {
+						"source_hidden": false,
+						"outputs_hidden": false
+					},
+					"nteract": {
+						"transient": {
+							"deleting": false
+						}
+					}
+				},
+				"source": [
+					"from pyspark.sql.functions import col, when\r\n",
+					"df = df.withColumn(\"FinalReasonCodeId\", col(\"FinalReasonCodeId\").cast(IntegerType()))\r\n",
+					"df = df.withColumn(\"FinalQualityMethodId\", col(\"FinalQualityMethodId\").cast(StringType()))\r\n",
+					"df = df.withColumn(\"FinalReasonDescription\", col(\"FinalReasonDescription\").cast(StringType()))\r\n",
+					"df = df.withColumn(\"TransCodeId\", col(\"TransCodeId\").cast(StringType()))\r\n",
+					"df = df.withColumn(\"RetServiceOrder\", col(\"RetServiceOrder\").cast(StringType()))\r\n",
+					"df = df.withColumn(\"ReadDatetime\", col(\"ReadDatetime\").cast(StringType()))\r\n",
+					"df = df.withColumn(\"IndexRead\", col(\"IndexRead\").cast(StringType()))\r\n",
+					"df = df.withColumn(\"Usage\", col(\"Usage\").cast(DoubleType()))"
+				],
+				"execution_count": 43
+			},
+			{
+				"cell_type": "markdown",
+				"metadata": {
+					"nteract": {
+						"transient": {
+							"deleting": false
+						}
+					}
+				},
+				"source": [
+					"## Testing Script"
+				]
+			},
+			{
+				"cell_type": "markdown",
+				"metadata": {
+					"nteract": {
+						"transient": {
+							"deleting": false
+						}
+					}
+				},
+				"source": [
+					"display(df)"
+				]
+			},
+			{
+				"cell_type": "code",
+				"source": [
+					"spark.sql(\"CREATE DATABASE IF NOT EXISTS aemo_bronze;\")\r\n",
+					"spark.sql(f\"\"\"\r\n",
+					"CREATE TABLE IF NOT EXISTS aemo_bronze.nem12_raw\r\n",
+					"USING delta\r\n",
+					"LOCATION 'abfss://{destination_container}@{destination_storage}.dfs.core.windows.net/{destination_path}/nem12_raw'\r\n",
+					"\"\"\")"
+				],
+				"execution_count": null
+			},
+			{
+				"cell_type": "code",
+				"metadata": {
+					"jupyter": {
+						"source_hidden": false,
+						"outputs_hidden": false
+					},
+					"nteract": {
+						"transient": {
+							"deleting": false
+						}
+					}
+				},
+				"source": [
+					"spark.sql(\"SHOW TABLES IN aemo_bronze\").show()\r\n",
+					"spark.sql(\"USE aemo_bronze;\")"
+				],
+				"execution_count": null
+			},
+			{
+				"cell_type": "code",
+				"metadata": {
+					"jupyter": {
+						"source_hidden": false,
+						"outputs_hidden": false
+					},
+					"nteract": {
+						"transient": {
+							"deleting": false
+						}
+					}
+				},
+				"source": [
+					"from datetime import datetime\r\n",
+					"now = datetime.now()\r\n",
+					"current_datetime = now.strftime(\"%Y-%m-%d %H:%M:%S\")\r\n",
+					"# output_path = f\"abfss://{destination_container}@{destination_storage}.dfs.core.windows.net/{destination_path}/nem12_raw\"\r\n",
+					"output_path = f\"abfss://{destination_container}@{destination_storage}.dfs.core.windows.net/{destination_path}/nem12_raw\"\r\n",
+					"df.write.format(\"delta\").mode(\"append\").option(\"mergeSchema\",\"true\").option(\"path\", output_path).save()"
+				],
+				"execution_count": null
+			},
+			{
+				"cell_type": "markdown",
+				"metadata": {
+					"nteract": {
+						"transient": {
+							"deleting": false
+						}
+					}
+				},
+				"source": [
+					"## Testing Script"
+				]
+			},
+			{
+				"cell_type": "markdown",
+				"metadata": {
+					"nteract": {
+						"transient": {
+							"deleting": false
+						}
+					}
+				},
+				"source": [
+					"%%sql \r\n",
+					"select * from aemo_bronze.nem12_raw;"
+				]
+			},
+			{
+				"cell_type": "code",
+				"metadata": {
+					"jupyter": {
+						"source_hidden": false,
+						"outputs_hidden": false
+					},
+					"nteract": {
+						"transient": {
+							"deleting": false
+						}
+					},
+					"collapsed": false
+				},
+				"source": [
+					"import datetime\r\n",
+					"def generate_blocks_in_days(interval_length:int) -> int:\r\n",
+					"    blocks = TOTAL_MIN_IN_DAY / interval_length\r\n",
+					"    return int(blocks)\r\n",
+					"\r\n",
+					"def generate_time_mapping_from_interval_length(interval_length,end:bool=False):\r\n",
+					"    mapping = {}\r\n",
+					"    blocks_in_day = generate_blocks_in_days(interval_length)\r\n",
+					"    # start_time = datetime.datetime.strptime(f\"00:{int(interval_length):02}\", \"%H:%M\")\r\n",
+					"    if not end:\r\n",
+					"        start_time = datetime.datetime.strptime(f\"00:00\", \"%H:%M\")\r\n",
+					"    else:\r\n",
+					"        start_time = datetime.datetime.strptime(f\"00:{interval_length}\", \"%H:%M\")\r\n",
+					"\r\n",
+					"    for i in range(blocks_in_day):\r\n",
+					"        time_str = start_time.strftime(\"%H:%M\")\r\n",
+					"        mapping[i] = time_str\r\n",
+					"        start_time += datetime.timedelta(minutes=interval_length)\r\n",
+					"\r\n",
+					"    return mapping\r\n",
+					""
+				],
+				"execution_count": 8
+			}
+		]
+	}
+}

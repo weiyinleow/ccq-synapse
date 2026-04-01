@@ -1,0 +1,485 @@
+{
+	"name": "Load_CreationDate2",
+	"properties": {
+		"folder": {
+			"name": "DataHubBatchScripts/AEMO/AEMO_15308"
+		},
+		"nbformat": 4,
+		"nbformat_minor": 2,
+		"bigDataPool": {
+			"referenceName": "JobSparkpool02",
+			"type": "BigDataPoolReference"
+		},
+		"sessionProperties": {
+			"driverMemory": "56g",
+			"driverCores": 8,
+			"executorMemory": "56g",
+			"executorCores": 8,
+			"numExecutors": 1,
+			"conf": {
+				"spark.dynamicAllocation.enabled": "true",
+				"spark.dynamicAllocation.minExecutors": "1",
+				"spark.dynamicAllocation.maxExecutors": "5",
+				"spark.autotune.trackingId": "712a4f23-33fc-4d50-9e91-39a2c4c65070"
+			}
+		},
+		"metadata": {
+			"saveOutput": true,
+			"enableDebugMode": false,
+			"kernelspec": {
+				"name": "synapse_pyspark",
+				"display_name": "Synapse PySpark"
+			},
+			"language_info": {
+				"name": "python"
+			},
+			"a365ComputeOptions": {
+				"id": "/subscriptions/2e9f823e-dc76-4e8e-b815-c8a4f22d05ff/resourceGroups/CQL-AZUR1-DEVDATAHUB01-RG/providers/Microsoft.Synapse/workspaces/cql-dev-datahub-synapse01/bigDataPools/JobSparkpool02",
+				"name": "JobSparkpool02",
+				"type": "Spark",
+				"endpoint": "https://cql-dev-datahub-synapse01.dev.azuresynapse.net/livyApi/versions/2019-11-01-preview/sparkPools/JobSparkpool02",
+				"auth": {
+					"type": "AAD",
+					"authResource": "https://dev.azuresynapse.net"
+				},
+				"sparkVersion": "3.4",
+				"nodeCount": 10,
+				"cores": 8,
+				"memory": 56
+			},
+			"sessionKeepAliveTimeout": 30
+		},
+		"cells": [
+			{
+				"cell_type": "markdown",
+				"metadata": {
+					"nteract": {
+						"transient": {
+							"deleting": false
+						}
+					}
+				},
+				"source": [
+					"# Source to Landing (AEMO NEM12)"
+				]
+			},
+			{
+				"cell_type": "code",
+				"metadata": {
+					"jupyter": {
+						"source_hidden": false,
+						"outputs_hidden": false
+					},
+					"nteract": {
+						"transient": {
+							"deleting": false
+						}
+					}
+				},
+				"source": [
+					"drop_zone_folder = \"AEMO_CopyCreationDate\""
+				],
+				"execution_count": null
+			},
+			{
+				"cell_type": "code",
+				"metadata": {
+					"jupyter": {
+						"source_hidden": false,
+						"outputs_hidden": false
+					},
+					"nteract": {
+						"transient": {
+							"deleting": false
+						}
+					}
+				},
+				"source": [
+					"import json\n",
+					"db_port = 1433\n",
+					"linked_service_name = \"LS_SQL_ELTFrameworkDB\"\n",
+					"db_notebookname= \"AEMO_DZ_To_Landing\"\n",
+					"linkedServiceProperties = json.loads(mssparkutils.credentials.getPropertiesAll(linked_service_name))\n",
+					"sql_server_name = linkedServiceProperties.get('Endpoint')\n",
+					"db_name = linkedServiceProperties.get('Database')\n",
+					"#print(linkedServiceProperties)\n",
+					"access_token = mssparkutils.credentials.getConnectionStringOrCreds(linked_service_name)\n",
+					"\n",
+					"db_query =\"SELECT A.*,B.NotebookParameterId,B.ParameterType,B.Value  FROM [CTL].[CFG_NOTEBOOK] A LEFT JOIN [CTL].[CFG_NOTEBOOK_PARAMETER] B ON A.NotebookId = B.NotebookId\"\n",
+					"\n",
+					"df = spark.read.format(\"jdbc\") \\\n",
+					"    .option(\"url\", \"jdbc:sqlserver://%s:%s\" % (sql_server_name, db_port)) \\\n",
+					"    .option(\"query\", db_query) \\\n",
+					"    .option(\"accessToken\", access_token) \\\n",
+					"    .option(\"encrypt\", \"true\") \\\n",
+					"    .option(\"databaseName\", db_name) \\\n",
+					"    .option(\"hostNameInCertificate\", \"*.database.windows.net\") \\\n",
+					"    .load()\n",
+					"\n",
+					"df2 = df.where(df.NotebookPath==db_notebookname) "
+				],
+				"execution_count": 2
+			},
+			{
+				"cell_type": "code",
+				"metadata": {
+					"jupyter": {
+						"source_hidden": false,
+						"outputs_hidden": false
+					},
+					"nteract": {
+						"transient": {
+							"deleting": false
+						}
+					}
+				},
+				"source": [
+					"#Source DataLake storage details\n",
+					"source_storage = df2.where(df2.ParameterType=='source_storage').collect()[0][\"Value\"] #Storage name\n",
+					"source_container = df2.where(df2.ParameterType=='source_container').collect()[0][\"Value\"] #Storage container detail\n",
+					"source_path = df2.where(df2.ParameterType=='source_path').collect()[0][\"Value\"] #internal folder location in container \"demodata/demo_aemo\"\n",
+					"#source_file = '' #CUSTOMER__full_32a72bd2-bd94-467f-9030-6b9f20dad676_20240204_100201\n",
+					"\n",
+					"#Destination DataLake storage details\n",
+					"destination_storage = df2.where(df2.ParameterType=='destination_storage').collect()[0][\"Value\"] #Storage name\n",
+					"destination_container = df2.where(df2.ParameterType=='destination_container').collect()[0][\"Value\"] #raw storage container details\n",
+					"destination_path = df2.where(df2.ParameterType=='destination_path').collect()[0][\"Value\"] #raw delta file patch"
+				],
+				"execution_count": 3
+			},
+			{
+				"cell_type": "code",
+				"metadata": {
+					"jupyter": {
+						"source_hidden": false,
+						"outputs_hidden": false
+					},
+					"nteract": {
+						"transient": {
+							"deleting": false
+						}
+					}
+				},
+				"source": [
+					"source_path = f'abfss://{source_container}@{source_storage}.dfs.core.windows.net/{drop_zone_folder}'\n",
+					"landing_path = f'abfss://{destination_container}@{destination_storage}.dfs.core.windows.net/{destination_path}'"
+				],
+				"execution_count": 4
+			},
+			{
+				"cell_type": "code",
+				"metadata": {
+					"jupyter": {
+						"source_hidden": false,
+						"outputs_hidden": false
+					},
+					"nteract": {
+						"transient": {
+							"deleting": false
+						}
+					}
+				},
+				"source": [
+					"from py4j.java_gateway import java_import\n",
+					"import json\n",
+					"\n",
+					"# Function to execute SQL Queries \n",
+					"\n",
+					"def execute_query(db_query:str):\n",
+					"    db_port = 1433\n",
+					"    linked_service_name = \"LS_SQL_ELTFrameworkDB\"\n",
+					"    linkedServiceProperties = json.loads(mssparkutils.credentials.getPropertiesAll(linked_service_name))\n",
+					"    sql_server_name = linkedServiceProperties.get('Endpoint')\n",
+					"    db_name = linkedServiceProperties.get('Database')\n",
+					"    #print(linkedServiceProperties)\n",
+					"    access_token = mssparkutils.credentials.getConnectionStringOrCreds(linked_service_name)\n",
+					"\n",
+					"    df = spark.read.format(\"jdbc\") \\\n",
+					"        .option(\"url\", \"jdbc:sqlserver://%s:%s\" % (sql_server_name, db_port)) \\\n",
+					"        .option(\"query\", db_query) \\\n",
+					"        .option(\"accessToken\", access_token) \\\n",
+					"        .option(\"encrypt\", \"true\") \\\n",
+					"        .option(\"databaseName\", db_name) \\\n",
+					"        .option(\"hostNameInCertificate\", \"*.database.windows.net\") \\\n",
+					"        .load()\n",
+					"\n",
+					"    return df\n",
+					"\n",
+					"\n",
+					"def execute_raw_sql(db_query):\n",
+					"    \n",
+					"    db_port = 1433\n",
+					"    linked_service_name = \"LS_SQL_ELTFrameworkDB\"\n",
+					"    linkedServiceProperties = json.loads(mssparkutils.credentials.getPropertiesAll(linked_service_name))\n",
+					"    sql_server_name = linkedServiceProperties.get('Endpoint')\n",
+					"    db_name = linkedServiceProperties.get('Database')\n",
+					"    access_token = mssparkutils.credentials.getConnectionStringOrCreds(linked_service_name)\n",
+					"\n",
+					"    jdbc_url = f\"jdbc:sqlserver://{sql_server_name}:1433;database={db_name};encrypt=true;hostNameInCertificate=*.database.windows.net\"\n",
+					"    java_import(spark._sc._gateway.jvm, \"java.util.Properties\")\n",
+					"\n",
+					"    # Create Java Properties object\n",
+					"    props = spark._sc._gateway.jvm.Properties()\n",
+					"    props.setProperty(\"accessToken\", access_token)\n",
+					"    props.setProperty(\"driver\", \"com.microsoft.sqlserver.jdbc.SQLServerDriver\")\n",
+					"    \n",
+					"    # Establish a JDBC connection\n",
+					"    connection = spark._sc._gateway.jvm.java.sql.DriverManager.getConnection(jdbc_url, props)\n",
+					"    \n",
+					"    \n",
+					"    # Create a cursor object\n",
+					"    statement = connection.createStatement()\n",
+					" \n",
+					"    # Pass in Query \n",
+					"    statement.execute(db_query) \n",
+					"\n",
+					"    connection.commit()\n",
+					"    statement.close()\n",
+					"    connection.close()\n",
+					"\n",
+					"# Determines if it is the files we want\n",
+					"def is_correct_file(name:str) -> bool:\n",
+					"    return name[:5] in [\"mtrdl\"]\n",
+					"\n",
+					"# Extract file name from path\n",
+					"import re\n",
+					"\n",
+					"def extract_file_from_path(path:str):\n",
+					"    match = re.search(r'[^/]+$',path)\n",
+					"    if match:\n",
+					"        return match.group(0)\n",
+					"    return None\n",
+					"\n",
+					"def extract_creation_date(s:str,file_path:str):\n",
+					"    pattern = r'^[^,]*,[^,]*,([^,]*),'\n",
+					"    match = re.search(pattern,s)\n",
+					"    file_name = file_path.rsplit(\"/\",1)[-1]\n",
+					"    if match:\n",
+					"        return (file_name,match.group(1))\n",
+					"    print(s,file_path)\n",
+					"    return None\n",
+					"\n",
+					"def extract_content(s):\n",
+					"    pattern = r'<CSVIntervalData>(.*?)</CSVIntervalData>'\n",
+					"    match = re.search(pattern, s, re.DOTALL)\n",
+					"    extracted_text = match.group(1)\n",
+					"    return extracted_text\n",
+					""
+				],
+				"execution_count": 36
+			},
+			{
+				"cell_type": "code",
+				"metadata": {
+					"jupyter": {
+						"source_hidden": false,
+						"outputs_hidden": false
+					},
+					"nteract": {
+						"transient": {
+							"deleting": false
+						}
+					}
+				},
+				"source": [
+					"# source_path = \"abfss://drop-zone@cqldevdatahubdata.dfs.core.windows.net/AEMO_SourceCopy/\"\n",
+					"\n",
+					"dir_obj = {f.name:None for f in mssparkutils.fs.ls(source_path)}\n",
+					"\n",
+					"full_paths = []\n",
+					"\n",
+					"for year in dir_obj.keys():\n",
+					"    year_path = mssparkutils.fs.ls(f\"{source_path}/{year}\")\n",
+					"    dir_obj[year] = {f.name:None for f in year_path}\n",
+					"\n",
+					"    for month in dir_obj[year].keys(): # Day\n",
+					"        day_path =  mssparkutils.fs.ls(f\"{source_path}/{year}/{month}\")\n",
+					"        dir_obj[year][month] = {f.name:None for f in day_path}\n",
+					"        print(\"File Path\", day_path)\n",
+					"        for day in dir_obj[year][month].keys(): # Exact Date\n",
+					"            date_path =  mssparkutils.fs.ls(f\"{source_path}/{year}/{month}/{day}\")\n",
+					"            dir_obj[year][month][day] = {f.name:None for f in date_path}\n",
+					"\n",
+					"\n",
+					"            for date in dir_obj[year][month][day].keys(): # File Dir\n",
+					"                file_path = mssparkutils.fs.ls(f\"{source_path}/{year}/{month}/{day}/{date}\")\n",
+					"                dir_obj[year][month][day][date] = {f.name:None for f in file_path}\n",
+					"                for actual_file in dir_obj[year][month][day][date].keys():\n",
+					"                    actual_file_path = mssparkutils.fs.ls(f\"{source_path}/{year}/{month}/{day}/{date}/{actual_file}\")\n",
+					"                    \n",
+					"                    for f in actual_file_path:\n",
+					"                        full_paths.append(f.path)\n",
+					"\n",
+					"\n",
+					"    \n",
+					"  "
+				],
+				"execution_count": 56
+			},
+			{
+				"cell_type": "code",
+				"metadata": {
+					"jupyter": {
+						"source_hidden": false,
+						"outputs_hidden": false
+					},
+					"nteract": {
+						"transient": {
+							"deleting": false
+						}
+					}
+				},
+				"source": [
+					"full_paths = [f for f in full_paths if is_correct_file(extract_file_from_path(f))]\n",
+					""
+				],
+				"execution_count": 57
+			},
+			{
+				"cell_type": "code",
+				"metadata": {
+					"jupyter": {
+						"source_hidden": false,
+						"outputs_hidden": false
+					},
+					"nteract": {
+						"transient": {
+							"deleting": false
+						}
+					}
+				},
+				"source": [
+					"for f in full_paths[:2]: print(f)"
+				],
+				"execution_count": 8
+			},
+			{
+				"cell_type": "code",
+				"metadata": {
+					"jupyter": {
+						"source_hidden": false,
+						"outputs_hidden": false
+					},
+					"nteract": {
+						"transient": {
+							"deleting": false
+						}
+					}
+				},
+				"source": [
+					"lookup = {}\n",
+					"for f in full_paths:\n",
+					"    file_content = spark.read.text(f,wholetext=True).collect()[0].value\n",
+					"    try:\n",
+					"        contents = extract_content(file_content)\n",
+					"        file_name,creation_date = extract_creation_date(contents,f)\n",
+					"        lookup[file_name] = creation_date\n",
+					"    except Exception as e: continue\n",
+					"\n",
+					""
+				],
+				"execution_count": 95
+			},
+			{
+				"cell_type": "code",
+				"metadata": {
+					"jupyter": {
+						"source_hidden": false,
+						"outputs_hidden": false
+					},
+					"nteract": {
+						"transient": {
+							"deleting": false
+						}
+					},
+					"collapsed": false
+				},
+				"source": [
+					"df_bronze = spark.read.table(\"aemo_bronze.nem12_bronze\")\n",
+					""
+				],
+				"execution_count": 97
+			},
+			{
+				"cell_type": "code",
+				"metadata": {
+					"jupyter": {
+						"source_hidden": false,
+						"outputs_hidden": false
+					},
+					"nteract": {
+						"transient": {
+							"deleting": false
+						}
+					}
+				},
+				"source": [
+					"from pyspark.sql.functions import udf\n",
+					"from pyspark.sql.types import StringType\n",
+					"\n",
+					"@udf(StringType())\n",
+					"def lookup_creation_date(val):\n",
+					"    return lookup.get(val,\"None\")\n",
+					"\n",
+					"df_bronze = df_bronze.withColumn(\"CreationDate\", lookup_creation_date(df_bronze[\"FileName\"]))"
+				],
+				"execution_count": 98
+			},
+			{
+				"cell_type": "code",
+				"metadata": {
+					"jupyter": {
+						"source_hidden": false,
+						"outputs_hidden": false
+					},
+					"nteract": {
+						"transient": {
+							"deleting": false
+						}
+					},
+					"collapsed": false
+				},
+				"source": [
+					"display(df_bronze.select(\"FileName\"))"
+				],
+				"execution_count": 100
+			},
+			{
+				"cell_type": "code",
+				"metadata": {
+					"jupyter": {
+						"source_hidden": false,
+						"outputs_hidden": false
+					},
+					"nteract": {
+						"transient": {
+							"deleting": false
+						}
+					}
+				},
+				"source": [
+					""
+				],
+				"execution_count": null
+			},
+			{
+				"cell_type": "code",
+				"metadata": {
+					"jupyter": {
+						"source_hidden": false,
+						"outputs_hidden": false
+					},
+					"nteract": {
+						"transient": {
+							"deleting": false
+						}
+					}
+				},
+				"source": [
+					""
+				],
+				"execution_count": null
+			}
+		]
+	}
+}

@@ -1,0 +1,305 @@
+{
+	"name": "Create_Directory",
+	"properties": {
+		"folder": {
+			"name": "DataHubBatchScripts/Utils"
+		},
+		"nbformat": 4,
+		"nbformat_minor": 2,
+		"bigDataPool": {
+			"referenceName": "Sparkpool01",
+			"type": "BigDataPoolReference"
+		},
+		"sessionProperties": {
+			"driverMemory": "56g",
+			"driverCores": 8,
+			"executorMemory": "56g",
+			"executorCores": 8,
+			"numExecutors": 2,
+			"conf": {
+				"spark.dynamicAllocation.enabled": "false",
+				"spark.dynamicAllocation.minExecutors": "2",
+				"spark.dynamicAllocation.maxExecutors": "2",
+				"spark.autotune.trackingId": "8494221d-0be4-48a7-bdf2-7debf56dd292"
+			}
+		},
+		"metadata": {
+			"saveOutput": true,
+			"enableDebugMode": false,
+			"kernelspec": {
+				"name": "synapse_pyspark",
+				"display_name": "Synapse PySpark"
+			},
+			"language_info": {
+				"name": "python"
+			},
+			"a365ComputeOptions": {
+				"id": "/subscriptions/2e9f823e-dc76-4e8e-b815-c8a4f22d05ff/resourceGroups/CQL-AZUR1-DEVDATAHUB01-RG/providers/Microsoft.Synapse/workspaces/cql-dev-datahub-synapse01/bigDataPools/Sparkpool01",
+				"name": "Sparkpool01",
+				"type": "Spark",
+				"endpoint": "https://cql-dev-datahub-synapse01.dev.azuresynapse.net/livyApi/versions/2019-11-01-preview/sparkPools/Sparkpool01",
+				"auth": {
+					"type": "AAD",
+					"authResource": "https://dev.azuresynapse.net"
+				},
+				"sparkVersion": "3.3",
+				"nodeCount": 10,
+				"cores": 8,
+				"memory": 56,
+				"automaticScaleJobs": false
+			},
+			"sessionKeepAliveTimeout": 30
+		},
+		"cells": [
+			{
+				"cell_type": "code",
+				"source": [
+					"destination_storage = \"cqldevdatahubdata\"\r\n",
+					"destination_container = \"drop-zone\"\r\n",
+					"destination_path = \"AEMO_zip\""
+				],
+				"execution_count": 2
+			},
+			{
+				"cell_type": "code",
+				"metadata": {
+					"jupyter": {
+						"source_hidden": false,
+						"outputs_hidden": false
+					},
+					"nteract": {
+						"transient": {
+							"deleting": false
+						}
+					}
+				},
+				"source": [
+					"# Cleanup Raw Files \r\n",
+					"raw_output_path = f\"abfss://drop-zone@{destination_storage}.dfs.core.windows.net/AEMO_zip/2024/09-sep/10/10/\"\r\n",
+					"mssparkutils.fs.rm(raw_output_path,recurse=True)"
+				],
+				"execution_count": 37
+			},
+			{
+				"cell_type": "code",
+				"metadata": {
+					"jupyter": {
+						"source_hidden": false,
+						"outputs_hidden": false
+					},
+					"nteract": {
+						"transient": {
+							"deleting": false
+						}
+					}
+				},
+				"source": [
+					"from_output_path = f\"abfss://raw@cqldevdatahubsynapse.dfs.core.windows.net/AEMO/NEM12_temp/\"\r\n",
+					"to_output_path = f\"abfss://landing@{destination_storage}.dfs.core.windows.net/AEMO/NEM12_temp/\"\r\n",
+					"mssparkutils.fs.mv(from_output_path,to_output_path)"
+				],
+				"execution_count": 33
+			},
+			{
+				"cell_type": "code",
+				"metadata": {
+					"jupyter": {
+						"source_hidden": false,
+						"outputs_hidden": false
+					},
+					"nteract": {
+						"transient": {
+							"deleting": false
+						}
+					}
+				},
+				"source": [
+					"#Create directory mkdirs(dir: String): Boolean -> Creates the given directory if it does not exist, also creating any necessary parent directories\r\n",
+					"raw_output_path = f\"abfss://{destination_container}@{destination_storage}.dfs.core.windows.net/{destination_path}\"\r\n",
+					"mssparkutils.fs.mkdirs(raw_output_path)"
+				],
+				"execution_count": 24
+			},
+			{
+				"cell_type": "markdown",
+				"metadata": {
+					"nteract": {
+						"transient": {
+							"deleting": false
+						}
+					}
+				},
+				"source": [
+					"#move a file or directory mv(from: String, to: String, recurse: Boolean = false, overwrite: Boolean = false): Boolean -> Moves a file or directory, possibly across FileSystems\r\n",
+					"from_output_path = f\"abfss://{destination_container}@{destination_storage}.dfs.core.windows.net/AEMO_zip_temp/\"\r\n",
+					"to_output_path = f\"abfss://{destination_container}@{destination_storage}.dfs.core.windows.net/AEMO_zip_Prdtemp/\"\r\n",
+					"mssparkutils.fs.mv(from_output_path, to_output_path)\r\n",
+					"#mssparkutils.fs.mv(to_output_path,from_output_path)"
+				]
+			},
+			{
+				"cell_type": "code",
+				"metadata": {
+					"jupyter": {
+						"source_hidden": false,
+						"outputs_hidden": false
+					},
+					"nteract": {
+						"transient": {
+							"deleting": false
+						}
+					}
+				},
+				"source": [
+					"datacollection = [  '21',\r\n",
+					"                    '22',\r\n",
+					"                    '23',\r\n",
+					"                    '24',\r\n",
+					"                    '25',\r\n",
+					"                    '26',\r\n",
+					"                    '27',\r\n",
+					"                    '28',\r\n",
+					"                    '29',\r\n",
+					"                    '30'\r\n",
+					"                ]\r\n",
+					"for m in datacollection:\r\n",
+					"    print(m)\r\n",
+					"    from_output_path = f\"abfss://{destination_container}@{destination_storage}.dfs.core.windows.net/AEMO_zip_Prdtemp/2024/09-sep/{m}/\"\r\n",
+					"    to_output_path = f\"abfss://{destination_container}@{destination_storage}.dfs.core.windows.net/{destination_path}/2024/09-sep/{m}/\"\r\n",
+					"    mssparkutils.fs.cp(from_output_path, to_output_path,recurse=True)\r\n",
+					""
+				],
+				"execution_count": 3
+			},
+			{
+				"cell_type": "code",
+				"metadata": {
+					"jupyter": {
+						"source_hidden": false,
+						"outputs_hidden": false
+					},
+					"nteract": {
+						"transient": {
+							"deleting": false
+						}
+					}
+				},
+				"source": [
+					"#move a file or directory mv(from: String, to: String, recurse: Boolean = false, overwrite: Boolean = false): Boolean -> Moves a file or directory, possibly across FileSystems\r\n",
+					"from_output_path = f\"abfss://{destination_container}@{destination_storage}.dfs.core.windows.net/AEMO_zip_Prdtemp/2024/09-sep/05/\"\r\n",
+					"to_output_path = f\"abfss://{destination_container}@{destination_storage}.dfs.core.windows.net/{destination_path}/2024/09-sep/05/\"\r\n",
+					"mssparkutils.fs.cp(from_output_path, to_output_path,recurse=True)"
+				],
+				"execution_count": 9
+			},
+			{
+				"cell_type": "code",
+				"metadata": {
+					"jupyter": {
+						"source_hidden": false,
+						"outputs_hidden": false
+					},
+					"nteract": {
+						"transient": {
+							"deleting": false
+						}
+					}
+				},
+				"source": [
+					"#move a file or directory mv(from: String, to: String, recurse: Boolean = false, overwrite: Boolean = false): Boolean -> Moves a file or directory, possibly across FileSystems\r\n",
+					"from_output_path = f\"abfss://{destination_container}@{destination_storage}.dfs.core.windows.net/AEMO_zip_temp/2024/09-sep/04/02.34.27/mtrdl_activmdp_cleancor_n40674361.zip\"\r\n",
+					"to_output_path = f\"abfss://{destination_container}@{destination_storage}.dfs.core.windows.net/{destination_path}/2024/09-sep/04/02.34.27/mtrdl_activmdp_cleancor_n40674361.zip\"\r\n",
+					"mssparkutils.fs.cp(from_output_path, to_output_path,recurse=True)\r\n",
+					"\r\n",
+					"#move a file or directory mv(from: String, to: String, recurse: Boolean = false, overwrite: Boolean = false): Boolean -> Moves a file or directory, possibly across FileSystems\r\n",
+					"from_output_path = f\"abfss://{destination_container}@{destination_storage}.dfs.core.windows.net/AEMO_zip_temp/2024/09-sep/04/02.34.27/mtrdl_activmdp_cleancor_n40675208.zip\"\r\n",
+					"to_output_path = f\"abfss://{destination_container}@{destination_storage}.dfs.core.windows.net/{destination_path}/2024/09-sep/04/02.34.27/mtrdl_activmdp_cleancor_n40675208.zip\"\r\n",
+					"mssparkutils.fs.cp(from_output_path, to_output_path,recurse=True)\r\n",
+					"\r\n",
+					"#move a file or directory mv(from: String, to: String, recurse: Boolean = false, overwrite: Boolean = false): Boolean -> Moves a file or directory, possibly across FileSystems\r\n",
+					"from_output_path = f\"abfss://{destination_container}@{destination_storage}.dfs.core.windows.net/AEMO_zip_temp/2024/09-sep/04/02.34.27/mtrdl_activmdp_cleancor_n40678966.zip\"\r\n",
+					"to_output_path = f\"abfss://{destination_container}@{destination_storage}.dfs.core.windows.net/{destination_path}/2024/09-sep/04/02.34.27/mtrdl_activmdp_cleancor_n40678966.zip\"\r\n",
+					"mssparkutils.fs.cp(from_output_path, to_output_path,recurse=True)\r\n",
+					"\r\n",
+					"#move a file or directory mv(from: String, to: String, recurse: Boolean = false, overwrite: Boolean = false): Boolean -> Moves a file or directory, possibly across FileSystems\r\n",
+					"from_output_path = f\"abfss://{destination_container}@{destination_storage}.dfs.core.windows.net/AEMO_zip_temp/2024/09-sep/04/02.34.27/mtrdl_acumemdp_105281773.zip\"\r\n",
+					"to_output_path = f\"abfss://{destination_container}@{destination_storage}.dfs.core.windows.net/{destination_path}/2024/09-sep/04/02.34.27/mtrdl_acumemdp_105281773.zip\"\r\n",
+					"mssparkutils.fs.cp(from_output_path, to_output_path,recurse=True)\r\n",
+					"\r\n",
+					"#move a file or directory mv(from: String, to: String, recurse: Boolean = false, overwrite: Boolean = false): Boolean -> Moves a file or directory, possibly across FileSystems\r\n",
+					"from_output_path = f\"abfss://{destination_container}@{destination_storage}.dfs.core.windows.net/AEMO_zip_temp/2024/09-sep/04/02.34.27/mtrdl_acumemdp_105281922.zip\"\r\n",
+					"to_output_path = f\"abfss://{destination_container}@{destination_storage}.dfs.core.windows.net/{destination_path}/2024/09-sep/04/02.34.27/mtrdl_acumemdp_105281922.zip\"\r\n",
+					"mssparkutils.fs.cp(from_output_path, to_output_path,recurse=True)\r\n",
+					"\r\n",
+					"#move a file or directory mv(from: String, to: String, recurse: Boolean = false, overwrite: Boolean = false): Boolean -> Moves a file or directory, possibly across FileSystems\r\n",
+					"from_output_path = f\"abfss://{destination_container}@{destination_storage}.dfs.core.windows.net/AEMO_zip_temp/2024/09-sep/04/02.34.27/mtrdl_acumemdp_105282046.zip\"\r\n",
+					"to_output_path = f\"abfss://{destination_container}@{destination_storage}.dfs.core.windows.net/{destination_path}/2024/09-sep/04/02.34.27/mtrdl_acumemdp_105282046.zip\"\r\n",
+					"mssparkutils.fs.cp(from_output_path, to_output_path,recurse=True)\r\n",
+					"\r\n",
+					"#move a file or directory mv(from: String, to: String, recurse: Boolean = false, overwrite: Boolean = false): Boolean -> Moves a file or directory, possibly across FileSystems\r\n",
+					"from_output_path = f\"abfss://{destination_container}@{destination_storage}.dfs.core.windows.net/AEMO_zip_temp/2024/09-sep/04/02.34.27/mtrdl_acumemdp_105285864.zip\"\r\n",
+					"to_output_path = f\"abfss://{destination_container}@{destination_storage}.dfs.core.windows.net/{destination_path}/2024/09-sep/04/02.34.27/mtrdl_acumemdp_105285864.zip\"\r\n",
+					"mssparkutils.fs.cp(from_output_path, to_output_path,recurse=True)\r\n",
+					"\r\n",
+					"#move a file or directory mv(from: String, to: String, recurse: Boolean = false, overwrite: Boolean = false): Boolean -> Moves a file or directory, possibly across FileSystems\r\n",
+					"from_output_path = f\"abfss://{destination_container}@{destination_storage}.dfs.core.windows.net/AEMO_zip_temp/2024/09-sep/04/02.34.27/mtrdl_acumemdp_105286446.zip\"\r\n",
+					"to_output_path = f\"abfss://{destination_container}@{destination_storage}.dfs.core.windows.net/{destination_path}/2024/09-sep/04/02.34.27/mtrdl_acumemdp_105286446.zip\"\r\n",
+					"mssparkutils.fs.cp(from_output_path, to_output_path,recurse=True)\r\n",
+					"\r\n",
+					"#move a file or directory mv(from: String, to: String, recurse: Boolean = false, overwrite: Boolean = false): Boolean -> Moves a file or directory, possibly across FileSystems\r\n",
+					"from_output_path = f\"abfss://{destination_container}@{destination_storage}.dfs.core.windows.net/AEMO_zip_temp/2024/09-sep/04/02.34.27/mtrdl_acumemdp_105288550.zip\"\r\n",
+					"to_output_path = f\"abfss://{destination_container}@{destination_storage}.dfs.core.windows.net/{destination_path}/2024/09-sep/04/02.34.27/mtrdl_acumemdp_105288550.zip\"\r\n",
+					"mssparkutils.fs.cp(from_output_path, to_output_path,recurse=True)\r\n",
+					"\r\n",
+					"#move a file or directory mv(from: String, to: String, recurse: Boolean = false, overwrite: Boolean = false): Boolean -> Moves a file or directory, possibly across FileSystems\r\n",
+					"from_output_path = f\"abfss://{destination_container}@{destination_storage}.dfs.core.windows.net/AEMO_zip_temp/2024/09-sep/04/02.34.27/mtrdl_acumemdp_105288900.zip\"\r\n",
+					"to_output_path = f\"abfss://{destination_container}@{destination_storage}.dfs.core.windows.net/{destination_path}/2024/09-sep/04/02.34.27/mtrdl_acumemdp_105288900.zip\"\r\n",
+					"mssparkutils.fs.cp(from_output_path, to_output_path,recurse=True)\r\n",
+					"\r\n",
+					"#move a file or directory mv(from: String, to: String, recurse: Boolean = false, overwrite: Boolean = false): Boolean -> Moves a file or directory, possibly across FileSystems\r\n",
+					"from_output_path = f\"abfss://{destination_container}@{destination_storage}.dfs.core.windows.net/AEMO_zip_temp/2024/09-sep/04/02.34.27/mtrdl_acumemdp_105290407.zip\"\r\n",
+					"to_output_path = f\"abfss://{destination_container}@{destination_storage}.dfs.core.windows.net/{destination_path}/2024/09-sep/04/02.34.27/mtrdl_acumemdp_105290407.zip\"\r\n",
+					"mssparkutils.fs.cp(from_output_path, to_output_path,recurse=True)"
+				],
+				"execution_count": 3
+			},
+			{
+				"cell_type": "code",
+				"metadata": {
+					"jupyter": {
+						"source_hidden": false,
+						"outputs_hidden": false
+					},
+					"nteract": {
+						"transient": {
+							"deleting": false
+						}
+					}
+				},
+				"source": [
+					"raw_output_path = f\"abfss://{destination_container}@{destination_storage}.dfs.core.windows.net/{destination_path}/2024/09-sep/\"\r\n",
+					"mssparkutils.fs.rm(raw_output_path,recurse=True)"
+				],
+				"execution_count": 7
+			},
+			{
+				"cell_type": "code",
+				"metadata": {
+					"jupyter": {
+						"source_hidden": false,
+						"outputs_hidden": false
+					},
+					"nteract": {
+						"transient": {
+							"deleting": false
+						}
+					}
+				},
+				"source": [
+					"mssparkutils.fs.help()"
+				],
+				"execution_count": 1
+			}
+		]
+	}
+}

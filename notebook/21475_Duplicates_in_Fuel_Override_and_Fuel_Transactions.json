@@ -1,0 +1,680 @@
+{
+	"name": "21475_Duplicates_in_Fuel_Override_and_Fuel_Transactions",
+	"properties": {
+		"folder": {
+			"name": "DataHubBatchScripts/ESG_SHAREPOINT/ESG_SHAREPOINT_Hotfix"
+		},
+		"nbformat": 4,
+		"nbformat_minor": 2,
+		"bigDataPool": {
+			"referenceName": "Sparkpool01",
+			"type": "BigDataPoolReference"
+		},
+		"sessionProperties": {
+			"driverMemory": "56g",
+			"driverCores": 8,
+			"executorMemory": "56g",
+			"executorCores": 8,
+			"numExecutors": 2,
+			"conf": {
+				"spark.dynamicAllocation.enabled": "false",
+				"spark.dynamicAllocation.minExecutors": "2",
+				"spark.dynamicAllocation.maxExecutors": "2",
+				"spark.autotune.trackingId": "4924eaa8-d33b-477b-878f-0f77721b970b"
+			}
+		},
+		"metadata": {
+			"saveOutput": true,
+			"enableDebugMode": false,
+			"kernelspec": {
+				"name": "synapse_pyspark",
+				"display_name": "Synapse PySpark"
+			},
+			"language_info": {
+				"name": "python"
+			},
+			"a365ComputeOptions": {
+				"id": "/subscriptions/2e9f823e-dc76-4e8e-b815-c8a4f22d05ff/resourceGroups/CQL-AZUR1-DEVDATAHUB01-RG/providers/Microsoft.Synapse/workspaces/cql-dev-datahub-synapse01/bigDataPools/Sparkpool01",
+				"name": "Sparkpool01",
+				"type": "Spark",
+				"endpoint": "https://cql-dev-datahub-synapse01.dev.azuresynapse.net/livyApi/versions/2019-11-01-preview/sparkPools/Sparkpool01",
+				"auth": {
+					"type": "AAD",
+					"authResource": "https://dev.azuresynapse.net"
+				},
+				"sparkVersion": "3.4",
+				"nodeCount": 10,
+				"cores": 8,
+				"memory": 56,
+				"automaticScaleJobs": false
+			},
+			"sessionKeepAliveTimeout": 30
+		},
+		"cells": [
+			{
+				"cell_type": "markdown",
+				"metadata": {
+					"nteract": {
+						"transient": {
+							"deleting": false
+						}
+					}
+				},
+				"source": [
+					"#### Setup Config Parameters"
+				]
+			},
+			{
+				"cell_type": "code",
+				"metadata": {
+					"editable": true,
+					"run_control": {
+						"frozen": false
+					}
+				},
+				"source": [
+					"from pyspark.sql import Window\n",
+					"from pyspark.sql.functions import col, row_number, when, sha2, concat_ws\n",
+					"\n",
+					"# Environment Parameter\n",
+					"env = 'prod'\n",
+					"\n",
+					"# Config for updating keys in Bronze\n",
+					"fuel_override_config = [\n",
+					"    {   \n",
+					"        \"table_detail\": \"override_bronze.fuel_override\",\n",
+					"        \"table_detail_bkup\": \"override_bronze.fuel_override_bkup\",\n",
+					"        \"table_name\": \"fuel_override\",\n",
+					"        \"path\": f\"abfss://bronze@cql{env}datahubsynapse.dfs.core.windows.net/override_bronze/fuel_override\",\n",
+					"        \"bkup_path\": f\"abfss://bronze@cql{env}datahubsynapse.dfs.core.windows.net/override_bronze/fuel_override_bkp\",\n",
+					"        \"format\": \"delta\"\n",
+					"    }\n",
+					"]\n",
+					"\n",
+					"electricity_override_config = [\n",
+					"    {   \n",
+					"        \"table_detail\": \"override_bronze.electricity_override\",\n",
+					"        \"table_detail_bkup\": \"override_bronze.electricity_override_bkup\",\n",
+					"        \"table_name\": \"electricity_override\",\n",
+					"        \"path\": f\"abfss://bronze@cql{env}datahubsynapse.dfs.core.windows.net/override_bronze/electricity_override\",\n",
+					"        \"bkup_path\": f\"abfss://bronze@cql{env}datahubsynapse.dfs.core.windows.net/override_bronze/electricity_override_bkp\",\n",
+					"        \"format\": \"delta\"\n",
+					"    }\n",
+					"]\n",
+					"\n",
+					"# Config for Silver Backup\n",
+					"silver_tables_config = [\n",
+					"    {\n",
+					"        \"table_detail\": \"silver.fuel_transactions\",\n",
+					"        \"table_detail_bkup\": \"silver.fuel_transactions_bkup\",\n",
+					"        \"table_name\": \"fuel_transactions\",\n",
+					"        \"path\": f\"abfss://silver@cql{env}datahubsynapse.dfs.core.windows.net/fuel_transactions/fuel_transactions\",\n",
+					"        \"bkup_path\": f\"abfss://silver@cql{env}datahubsynapse.dfs.core.windows.net/fuel_transactions_bkup/fuel_transactions_bkup\",\n",
+					"        \"format\": \"delta\"\n",
+					"    },\n",
+					"    {\n",
+					"        \"table_detail\": \"silver.retail_electricity_charge_details\",\n",
+					"        \"table_detail_bkup\": \"silver.retail_electricity_charge_details_bkup\",\n",
+					"        \"table_name\": \"retail_electricity_charge_details\",\n",
+					"        \"path\": f\"abfss://silver@cql{env}datahubsynapse.dfs.core.windows.net/retail_electricity_charge_details/retail_electricity_charge_details\",\n",
+					"        \"bkup_path\": f\"abfss://silver@cql{env}datahubsynapse.dfs.core.windows.net/retail_electricity_charge_details_bkup/retail_electricity_charge_details_bkup\",\n",
+					"        \"format\": \"delta\"\n",
+					"    }\n",
+					"]"
+				],
+				"execution_count": 67
+			},
+			{
+				"cell_type": "markdown",
+				"metadata": {
+					"nteract": {
+						"transient": {
+							"deleting": false
+						}
+					}
+				},
+				"source": [
+					"#### Create Backup Tables (Frozen Cells)"
+				]
+			},
+			{
+				"cell_type": "code",
+				"metadata": {
+					"editable": false,
+					"run_control": {
+						"frozen": true
+					}
+				},
+				"source": [
+					"#Create backups (fuel_override)\n",
+					"for config in fuel_override_config:\n",
+					"    df = spark.read.table(config[\"table_detail\"])\n",
+					"    df.write.format(config[\"format\"]).mode(\"overwrite\").saveAsTable(config[\"table_detail_bkup\"])\n",
+					"    print(f\"Backup created for: {config['table_name']}\")"
+				],
+				"execution_count": null
+			},
+			{
+				"cell_type": "code",
+				"metadata": {
+					"editable": false,
+					"run_control": {
+						"frozen": true
+					}
+				},
+				"source": [
+					"#Create backups (electricity_override)\n",
+					"for config in electricity_override_config:\n",
+					"    df = spark.read.table(config[\"table_detail\"])\n",
+					"    df.write.format(config[\"format\"]).mode(\"overwrite\").saveAsTable(config[\"table_detail_bkup\"])\n",
+					"    print(f\"Backup created for: {config['table_name']}\")"
+				],
+				"execution_count": null
+			},
+			{
+				"cell_type": "code",
+				"metadata": {
+					"editable": false,
+					"run_control": {
+						"frozen": true
+					}
+				},
+				"source": [
+					"#Create backups (silver)\n",
+					"for config in silver_tables_config:\n",
+					"    df = spark.read.table(config[\"table_detail\"])\n",
+					"    df.write.format(config[\"format\"]).mode(\"overwrite\").saveAsTable(config[\"table_detail_bkup\"])\n",
+					"    print(f\"Backup created for: {config['table_name']}\")"
+				],
+				"execution_count": 31
+			},
+			{
+				"cell_type": "markdown",
+				"metadata": {
+					"nteract": {
+						"transient": {
+							"deleting": false
+						}
+					}
+				},
+				"source": [
+					"#### Restore From Backup Tables (Frozen Cells)"
+				]
+			},
+			{
+				"cell_type": "code",
+				"metadata": {
+					"editable": false,
+					"run_control": {
+						"frozen": true
+					}
+				},
+				"source": [
+					"#Restore backups (fuel_override)\n",
+					"for config in fuel_override_config:\n",
+					"    df = spark.read.table(config[\"table_detail_bkup\"])\n",
+					"    df.write.format(config[\"format\"]).mode(\"overwrite\").saveAsTable(config[\"table_detail\"])\n",
+					"    print(f\"Backup restored for: {config['table_name']}\")"
+				],
+				"execution_count": 17
+			},
+			{
+				"cell_type": "code",
+				"metadata": {
+					"editable": false,
+					"run_control": {
+						"frozen": true
+					}
+				},
+				"source": [
+					"#Restore backups (electricity_override)\n",
+					"for config in electricity_override_config:\n",
+					"    df = spark.read.table(config[\"table_detail_bkup\"])\n",
+					"    df.write.format(config[\"format\"]).mode(\"overwrite\").saveAsTable(config[\"table_detail\"])\n",
+					"    print(f\"Backup restored for: {config['table_name']}\")"
+				],
+				"execution_count": null
+			},
+			{
+				"cell_type": "code",
+				"metadata": {
+					"editable": false,
+					"run_control": {
+						"frozen": true
+					}
+				},
+				"source": [
+					"#Restore backups (silver)\n",
+					"for config in silver_tables_config:\n",
+					"    df = spark.read.table(config[\"table_detail_bkup\"])\n",
+					"    df.write.format(config[\"format\"]).mode(\"overwrite\").saveAsTable(config[\"table_detail\"])\n",
+					"    print(f\"Backup restored for: {config['table_name']}\")"
+				],
+				"execution_count": 3
+			},
+			{
+				"cell_type": "markdown",
+				"metadata": {
+					"nteract": {
+						"transient": {
+							"deleting": false
+						}
+					}
+				},
+				"source": [
+					"#### Validation Queries - Before Updates\n",
+					""
+				]
+			},
+			{
+				"cell_type": "code",
+				"metadata": {
+					"collapsed": false
+				},
+				"source": [
+					"# electricity_override Validation\n",
+					"validation_query_detail = \"\"\"\n",
+					"SELECT count(1) FROM override_bronze.electricity_override\n",
+					"\"\"\"\n",
+					"validation_df_detail = spark.sql(validation_query_detail)\n",
+					"display(validation_df_detail)"
+				],
+				"execution_count": 28
+			},
+			{
+				"cell_type": "code",
+				"metadata": {
+					"editable": true,
+					"run_control": {
+						"frozen": false
+					},
+					"collapsed": false
+				},
+				"source": [
+					"# electricity_override Validation\n",
+					"validation_query_detail = \"\"\"\n",
+					"SELECT \n",
+					"    Id,\n",
+					"    InvoiceNumber, \n",
+					"    PreviousReadDate, \n",
+					"    CurrentReadDate,  \n",
+					"    QuantityKWH,\n",
+					"    CleanEnergySubscription,\n",
+					"    Supplier,\n",
+					"    CDCLoadDate,\n",
+					"    CDCOps,\n",
+					"    CDCCurrentFlag\n",
+					"FROM \n",
+					"    override_bronze.electricity_override\n",
+					"where \n",
+					"    invoicenumber = '88168405'\n",
+					"\"\"\"\n",
+					"validation_df_detail = spark.sql(validation_query_detail)\n",
+					"display(validation_df_detail)"
+				],
+				"execution_count": 29
+			},
+			{
+				"cell_type": "code",
+				"metadata": {
+					"collapsed": false
+				},
+				"source": [
+					"#Silver Validation retail_electricity_charge_details\n",
+					"validation_query_detail = \"\"\"\n",
+					"SELECT\n",
+					"    InvoiceNumber,\n",
+					"    InvoiceDate,\n",
+					"    BillingPeriodStartDate,\n",
+					"    BillingPeriodEndDate,\n",
+					"    BillingPeriodDays,\n",
+					"    BillingPeriodQuantityKwh,\n",
+					"    MonthlyBillingPeriod,\n",
+					"    MonthlyBillingDays,\n",
+					"    MonthlyBillingQuantityKwh,\n",
+					"    CleanEnergySubscription,\n",
+					"    FileRowIndex,\n",
+					"    RecordSourceTableName,\n",
+					"    CDCLoadDate,\n",
+					"    CDCOps,\n",
+					"    CDCCurrentFlag\n",
+					"FROM \n",
+					"    silver.retail_electricity_charge_details\n",
+					"where \n",
+					"    invoicenumber = '88168405'\n",
+					"\"\"\"\n",
+					"validation_df_detail = spark.sql(validation_query_detail)\n",
+					"display(validation_df_detail)"
+				],
+				"execution_count": 23
+			},
+			{
+				"cell_type": "code",
+				"metadata": {
+					"collapsed": false
+				},
+				"source": [
+					"# fuel_override Validation\n",
+					"validation_query_detail = \"\"\"\n",
+					"SELECT count(1) FROM override_bronze.fuel_override\n",
+					"\"\"\"\n",
+					"validation_df_detail = spark.sql(validation_query_detail)\n",
+					"display(validation_df_detail)"
+				],
+				"execution_count": 9
+			},
+			{
+				"cell_type": "code",
+				"metadata": {
+					"collapsed": false
+				},
+				"source": [
+					"# fuel_override Validation\n",
+					"validation_query_detail = \"\"\"\n",
+					"SELECT * FROM override_bronze.fuel_override\n",
+					"WHERE TransactionNumber in\n",
+					"(SELECT distinct TransactionNumber FROM override_bronze.fuel_override\n",
+					"group by TransactionNumber, transactiondate\n",
+					"having count(1) > 1\n",
+					")\n",
+					"order by TransactionNumber, transactiondate\n",
+					"\"\"\"\n",
+					"validation_df_detail = spark.sql(validation_query_detail)\n",
+					"display(validation_df_detail)"
+				],
+				"execution_count": 10
+			},
+			{
+				"cell_type": "markdown",
+				"metadata": {
+					"nteract": {
+						"transient": {
+							"deleting": false
+						}
+					}
+				},
+				"source": [
+					"#### Perform Table Updates - electricity_override"
+				]
+			},
+			{
+				"cell_type": "code",
+				"metadata": {
+					"collapsed": false
+				},
+				"source": [
+					"# Update electricity_override\n",
+					"# START\n",
+					"for config in electricity_override_config:\n",
+					"\n",
+					"    df = spark.read.format(config[\"format\"]).load(config[\"path\"])\n",
+					"    filtered_df = df.filter((df[\"Id\"].isin(\"18\",\"19\")) & (df[\"InvoiceNumber\"]==\"88168405\"))\n",
+					"    result_df = df.exceptAll(filtered_df)\n",
+					"    #display(result_df)\n",
+					"\n",
+					"    \n",
+					"    result_df.write.format(config[\"format\"]).mode(\"overwrite\").option(\"overwriteSchema\", \"true\").save(config[\"path\"])\n",
+					"    print(f\"Overwrite complete\")\n",
+					"\n",
+					"# END\n",
+					"\n",
+					"\n",
+					""
+				],
+				"execution_count": 66
+			},
+			{
+				"cell_type": "markdown",
+				"metadata": {
+					"nteract": {
+						"transient": {
+							"deleting": false
+						}
+					}
+				},
+				"source": [
+					"#### Perform Table Updates - fuel_override"
+				]
+			},
+			{
+				"cell_type": "code",
+				"metadata": {
+					"collapsed": false
+				},
+				"source": [
+					"# Update fuel_override\n",
+					"# START\n",
+					"for config in fuel_override_config:\n",
+					"\n",
+					"    df = spark.read.format(config[\"format\"]).load(config[\"path\"])\n",
+					"\n",
+					"    filtered_df_01349024 = df.filter((df[\"TransactionDate\"]==(\"3/06/2025\")) & (df[\"TransactionNumber\"]==\"01349024\"))\n",
+					"    result_df = df.exceptAll(filtered_df_01349024) \n",
+					"    \n",
+					"    filtered_df_01349680 = df.filter((df[\"TransactionDate\"]==(\"3/06/2025\")) & (df[\"TransactionNumber\"]==\"01349680\"))\n",
+					"    result_df = result_df.exceptAll(filtered_df_01349680)\n",
+					"\n",
+					"    filtered_df_01349684 = df.filter((df[\"TransactionDate\"]==(\"3/06/2025\")) & (df[\"TransactionNumber\"]==\"01349684\"))\n",
+					"    result_df = result_df.exceptAll(filtered_df_01349684)\n",
+					"\n",
+					"    filtered_df_01349965 = df.filter((df[\"TransactionDate\"]==(\"4/06/2025\")) & (df[\"TransactionNumber\"]==\"01349965\"))\n",
+					"    result_df = result_df.exceptAll(filtered_df_01349965)\n",
+					"    \n",
+					"    filtered_df_01350227 = df.filter((df[\"TransactionDate\"]==(\"4/06/2025\")) & (df[\"TransactionNumber\"]==\"01350227\"))\n",
+					"    result_df = result_df.exceptAll(filtered_df_01350227)\n",
+					"    \n",
+					"    filtered_df_01350293 = df.filter((df[\"TransactionDate\"]==(\"5/06/2025\")) & (df[\"TransactionNumber\"]==\"01350293\"))\n",
+					"    result_df = result_df.exceptAll(filtered_df_01350293)\n",
+					"\n",
+					"    filtered_df_01350298 = df.filter((df[\"TransactionDate\"]==(\"5/06/2025\")) & (df[\"TransactionNumber\"]==\"01350298\"))\n",
+					"    result_df = result_df.exceptAll(filtered_df_01350298)\n",
+					"        \n",
+					"    filtered_df_01351086 = df.filter((df[\"TransactionDate\"]==(\"6/06/2025\")) & (df[\"TransactionNumber\"]==\"01351086\"))\n",
+					"    result_df = result_df.exceptAll(filtered_df_01351086)\n",
+					"\n",
+					"    filtered_df_01351416 = df.filter((df[\"TransactionDate\"]==(\"6/06/2025\")) & (df[\"TransactionNumber\"]==\"01351416\"))\n",
+					"    result_df = result_df.exceptAll(filtered_df_01351416)\n",
+					"    \n",
+					"    filtered_df_01351417 = df.filter((df[\"TransactionDate\"]==(\"6/06/2025\")) & (df[\"TransactionNumber\"]==\"01351417\"))\n",
+					"    result_df = result_df.exceptAll(filtered_df_01351417)\n",
+					"\n",
+					"    #result_df = result_df.dropna()\n",
+					"    #display(result_df)\n",
+					"    \n",
+					"    result_df.write.format(config[\"format\"]).mode(\"overwrite\").option(\"overwriteSchema\", \"true\").save(config[\"path\"])\n",
+					"    print(f\"Overwrite complete\")\n",
+					"\n",
+					"# END\n",
+					""
+				],
+				"execution_count": 74
+			},
+			{
+				"cell_type": "markdown",
+				"metadata": {
+					"nteract": {
+						"transient": {
+							"deleting": false
+						}
+					}
+				},
+				"source": [
+					"#### Drop Silver Tables"
+				]
+			},
+			{
+				"cell_type": "code",
+				"metadata": {
+					"editable": false,
+					"run_control": {
+						"frozen": true
+					}
+				},
+				"source": [
+					"file_path = f'abfss://silver@cql{env}datahubsynapse.dfs.core.windows.net/fuel_transactions/fuel_transactions'\n",
+					"mssparkutils.fs.rm(file_path, recurse=True) \n",
+					"mssparkutils.fs.mkdirs(file_path)\n",
+					"spark.sql(f\"\"\"DROP TABLE silver.fuel_transactions;\"\"\")\n",
+					"\n",
+					"file_path = f'abfss://silver@cql{env}datahubsynapse.dfs.core.windows.net/retail_electricity_charge_details/retail_electricity_charge_details'\n",
+					"mssparkutils.fs.rm(file_path, recurse=True)\n",
+					"mssparkutils.fs.mkdirs(file_path)\n",
+					"spark.sql(f\"\"\"DROP TABLE silver.retail_electricity_charge_details;\"\"\")"
+				],
+				"execution_count": null
+			},
+			{
+				"cell_type": "markdown",
+				"metadata": {
+					"nteract": {
+						"transient": {
+							"deleting": false
+						}
+					}
+				},
+				"source": [
+					"#### Drop Gold Tables"
+				]
+			},
+			{
+				"cell_type": "code",
+				"metadata": {
+					"editable": true,
+					"run_control": {
+						"frozen": false
+					}
+				},
+				"source": [
+					"#file_path = f'abfss://gold@cql{env}datahubsynapse.dfs.core.windows.net/fact_fuel_consumption/fact_fuel_consumption'\n",
+					"#mssparkutils.fs.rm(file_path, recurse=True)\n",
+					"#mssparkutils.fs.mkdirs(file_path)\n",
+					"#spark.sql(f\"\"\"DROP TABLE gold.fact_fuel_consumption;\"\"\")\n",
+					"\n",
+					"#file_path = f'abfss://gold@cql{env}datahubsynapse.dfs.core.windows.net/fact_retail_electricity_consumption/fact_retail_electricity_consumption'\n",
+					"#mssparkutils.fs.rm(file_path, recurse=True)\n",
+					"#mssparkutils.fs.mkdirs(file_path)\n",
+					"#spark.sql(f\"\"\"DROP TABLE gold.fact_retail_electricity_consumption;\"\"\")"
+				],
+				"execution_count": 1
+			},
+			{
+				"cell_type": "markdown",
+				"metadata": {
+					"nteract": {
+						"transient": {
+							"deleting": false
+						}
+					}
+				},
+				"source": [
+					"#### Validation Queries - After Updates\n",
+					""
+				]
+			},
+			{
+				"cell_type": "code",
+				"source": [
+					"# electricity_override Validation\n",
+					"validation_query_detail = \"\"\"\n",
+					"SELECT count(1) FROM override_bronze.electricity_override\n",
+					"\"\"\"\n",
+					"validation_df_detail = spark.sql(validation_query_detail)\n",
+					"display(validation_df_detail)"
+				],
+				"execution_count": null
+			},
+			{
+				"cell_type": "code",
+				"source": [
+					"# electricity_override Validation\n",
+					"validation_query_detail = \"\"\"\n",
+					"SELECT \n",
+					"    InvoiceNumber, \n",
+					"    PreviousReadDate, \n",
+					"    CurrentReadDate,  \n",
+					"    QuantityKWH,\n",
+					"    CleanEnergySubscription,\n",
+					"    Supplier,\n",
+					"    CDCLoadDate,\n",
+					"    CDCOps,\n",
+					"    CDCCurrentFlag\n",
+					"FROM \n",
+					"    override_bronze.electricity_override\n",
+					"where \n",
+					"    invoicenumber = '88168405'\n",
+					"\"\"\"\n",
+					"validation_df_detail = spark.sql(validation_query_detail)\n",
+					"display(validation_df_detail)"
+				],
+				"execution_count": null
+			},
+			{
+				"cell_type": "code",
+				"source": [
+					"#Silver Validation retail_electricity_charge_details \n",
+					"validation_query_detail = \"\"\"\n",
+					"SELECT\n",
+					"    InvoiceNumber,\n",
+					"    InvoiceDate,\n",
+					"    BillingPeriodStartDate,\n",
+					"    BillingPeriodEndDate,\n",
+					"    BillingPeriodDays,\n",
+					"    BillingPeriodQuantityKwh,\n",
+					"    MonthlyBillingPeriod,\n",
+					"    MonthlyBillingDays,\n",
+					"    MonthlyBillingQuantityKwh,\n",
+					"    CleanEnergySubscription,\n",
+					"    FileRowIndex,\n",
+					"    RecordSourceTableName,\n",
+					"    CDCLoadDate,\n",
+					"    CDCOps,\n",
+					"    CDCCurrentFlag\n",
+					"FROM \n",
+					"    silver.retail_electricity_charge_details\n",
+					"where \n",
+					"    invoicenumber = '88168405'\n",
+					"\"\"\"\n",
+					"validation_df_detail = spark.sql(validation_query_detail)\n",
+					"display(validation_df_detail)"
+				],
+				"execution_count": null
+			},
+			{
+				"cell_type": "code",
+				"metadata": {
+					"collapsed": false
+				},
+				"source": [
+					"# fuel_override Validation\n",
+					"validation_query_detail = \"\"\"\n",
+					"SELECT count(1) FROM override_bronze.fuel_override\n",
+					"\"\"\"\n",
+					"validation_df_detail = spark.sql(validation_query_detail)\n",
+					"display(validation_df_detail)"
+				],
+				"execution_count": 64
+			},
+			{
+				"cell_type": "code",
+				"metadata": {
+					"collapsed": false
+				},
+				"source": [
+					"# fuel_override Validation\n",
+					"validation_query_detail = \"\"\"\n",
+					"SELECT * FROM override_bronze.fuel_override\n",
+					"WHERE TransactionNumber in\n",
+					"(SELECT distinct TransactionNumber FROM override_bronze.fuel_override\n",
+					"group by TransactionNumber, transactiondate\n",
+					"having count(1) > 1\n",
+					")\n",
+					"order by TransactionNumber, transactiondate\n",
+					"\"\"\"\n",
+					"validation_df_detail = spark.sql(validation_query_detail)\n",
+					"display(validation_df_detail)"
+				],
+				"execution_count": 65
+			}
+		]
+	}
+}

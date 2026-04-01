@@ -1,0 +1,637 @@
+{
+	"name": "fuel_transactions_silver",
+	"properties": {
+		"folder": {
+			"name": "DataHubBatchScripts/SILVER/SustainabilityUseCase"
+		},
+		"nbformat": 4,
+		"nbformat_minor": 2,
+		"bigDataPool": {
+			"referenceName": "Sparkpool01",
+			"type": "BigDataPoolReference"
+		},
+		"sessionProperties": {
+			"driverMemory": "56g",
+			"driverCores": 8,
+			"executorMemory": "56g",
+			"executorCores": 8,
+			"numExecutors": 2,
+			"conf": {
+				"spark.dynamicAllocation.enabled": "false",
+				"spark.dynamicAllocation.minExecutors": "2",
+				"spark.dynamicAllocation.maxExecutors": "2",
+				"spark.autotune.trackingId": "d5a7683f-98d4-4b18-8cd5-618be7daf03e"
+			}
+		},
+		"metadata": {
+			"saveOutput": true,
+			"enableDebugMode": false,
+			"kernelspec": {
+				"name": "synapse_pyspark",
+				"display_name": "Synapse PySpark"
+			},
+			"language_info": {
+				"name": "python"
+			},
+			"a365ComputeOptions": {
+				"id": "/subscriptions/2e9f823e-dc76-4e8e-b815-c8a4f22d05ff/resourceGroups/CQL-AZUR1-DEVDATAHUB01-RG/providers/Microsoft.Synapse/workspaces/cql-dev-datahub-synapse01/bigDataPools/Sparkpool01",
+				"name": "Sparkpool01",
+				"type": "Spark",
+				"endpoint": "https://cql-dev-datahub-synapse01.dev.azuresynapse.net/livyApi/versions/2019-11-01-preview/sparkPools/Sparkpool01",
+				"auth": {
+					"type": "AAD",
+					"authResource": "https://dev.azuresynapse.net"
+				},
+				"sparkVersion": "3.4",
+				"nodeCount": 10,
+				"cores": 8,
+				"memory": 56,
+				"automaticScaleJobs": false
+			},
+			"sessionKeepAliveTimeout": 30
+		},
+		"cells": [
+			{
+				"cell_type": "code",
+				"source": [
+					"#Imports\r\n",
+					"import json\r\n",
+					"from pyspark.sql.functions import col, concat, lit, to_timestamp, to_date, when, substring\r\n",
+					"from pyspark.sql.functions import sha2, concat_ws, regexp_replace\r\n",
+					"from pyspark.sql.types import StructType, StructField, StringType, IntegerType, BooleanType,DateType, DoubleType,TimestampType, DecimalType\r\n",
+					"spark.conf.set(\"spark.sql.legacy.timeParserPolicy\", \"LEGACY\")"
+				],
+				"execution_count": 1
+			},
+			{
+				"cell_type": "code",
+				"metadata": {
+					"jupyter": {
+						"source_hidden": false,
+						"outputs_hidden": false
+					},
+					"nteract": {
+						"transient": {
+							"deleting": false
+						}
+					},
+					"collapsed": false
+				},
+				"source": [
+					"#Get Parameter from controldb\r\n",
+					"db_port = 1433\r\n",
+					"linked_service_name = \"LS_SQL_ELTFrameworkDB\"\r\n",
+					"db_notebookname= \"fuel_transactions_silver\"\r\n",
+					"lake_db_name = \"silver\"\r\n",
+					"linkedServiceProperties = json.loads(mssparkutils.credentials.getPropertiesAll(linked_service_name))\r\n",
+					"sql_server_name = linkedServiceProperties.get('Endpoint')\r\n",
+					"db_name = linkedServiceProperties.get('Database')\r\n",
+					"#print(linkedServiceProperties)\r\n",
+					"access_token = mssparkutils.credentials.getConnectionStringOrCreds(linked_service_name)\r\n",
+					"\r\n",
+					"db_query =\"SELECT A.*,B.NotebookParameterId,B.ParameterType,B.Value  FROM [CTL].[CFG_NOTEBOOK] A LEFT JOIN [CTL].[CFG_NOTEBOOK_PARAMETER] B ON A.NotebookId = B.NotebookId\"\r\n",
+					"\r\n",
+					"df = spark.read.format(\"jdbc\") \\\r\n",
+					"    .option(\"url\", \"jdbc:sqlserver://%s:%s\" % (sql_server_name, db_port)) \\\r\n",
+					"    .option(\"query\", db_query) \\\r\n",
+					"    .option(\"accessToken\", access_token) \\\r\n",
+					"    .option(\"encrypt\", \"true\") \\\r\n",
+					"    .option(\"databaseName\", db_name) \\\r\n",
+					"    .option(\"hostNameInCertificate\", \"*.database.windows.net\") \\\r\n",
+					"    .load()\r\n",
+					"\r\n",
+					"df2 = df.where(df.NotebookPath==db_notebookname) \r\n",
+					"\r\n",
+					"#display(df2)"
+				],
+				"execution_count": 2
+			},
+			{
+				"cell_type": "code",
+				"metadata": {
+					"collapsed": false
+				},
+				"source": [
+					"#Destination DataLake storage details\r\n",
+					"destination_storage = df2.where(df2.ParameterType=='destination_storage').collect()[0][\"Value\"] #Storage name\r\n",
+					"destination_container = df2.where(df2.ParameterType=='destination_container').collect()[0][\"Value\"] #raw storage container details\r\n",
+					"destination_path = df2.where(df2.ParameterType=='destination_path').collect()[0][\"Value\"] #raw delta file patch"
+				],
+				"execution_count": 3
+			},
+			{
+				"cell_type": "code",
+				"source": [
+					"#Get Current Date\r\n",
+					"Date_Collection = spark.sql(\"select current_timestamp() AS Current,(current_timestamp() + interval '-1' second) AS EndDate\").collect()\r\n",
+					"Silver_LoadDate = Date_Collection[0]['Current']\r\n",
+					"Silver_UpdateEndDate = Date_Collection[0]['EndDate']"
+				],
+				"execution_count": 4
+			},
+			{
+				"cell_type": "markdown",
+				"metadata": {
+					"nteract": {
+						"transient": {
+							"deleting": false
+						}
+					}
+				},
+				"source": [
+					"# Table: **fuel_transactions**: START"
+				]
+			},
+			{
+				"cell_type": "code",
+				"metadata": {
+					"editable": true,
+					"run_control": {
+						"frozen": false
+					}
+				},
+				"source": [
+					"#UTILS: Set table name\r\n",
+					"\r\n",
+					"#tablename=\"fuel_transactions\"\r\n",
+					"\r\n",
+					"#UTILS: Drop table\r\n",
+					"\r\n",
+					"#spark.sql(f\"\"\"DROP TABLE IF EXISTS {lake_db_name}.{tablename}\"\"\")\r\n",
+					"#raw_output_path = f\"abfss://{destination_container}@{destination_storage}.dfs.core.windows.net/{destination_path}/{tablename}\"\r\n",
+					"#mssparkutils.fs.rm(raw_output_path,recurse=True)"
+				],
+				"execution_count": 5
+			},
+			{
+				"cell_type": "code",
+				"metadata": {
+					"jupyter": {
+						"source_hidden": false,
+						"outputs_hidden": false
+					},
+					"nteract": {
+						"transient": {
+							"deleting": false
+						}
+					}
+				},
+				"source": [
+					"#Set table name\r\n",
+					"db_tablename=\"fuel_transactions\""
+				],
+				"execution_count": 6
+			},
+			{
+				"cell_type": "code",
+				"metadata": {
+					"jupyter": {
+						"source_hidden": false,
+						"outputs_hidden": false
+					},
+					"nteract": {
+						"transient": {
+							"deleting": false
+						}
+					}
+				},
+				"source": [
+					"#Create Table\r\n",
+					"\r\n",
+					"spark.sql(f\"\"\"CREATE DATABASE IF NOT EXISTS {lake_db_name};\"\"\")\r\n",
+					"spark.sql(f\"\"\"\r\n",
+					"CREATE TABLE IF NOT EXISTS {lake_db_name}.{db_tablename}\r\n",
+					"(\r\n",
+					"    TransactionId STRING,\r\n",
+					"    TransactionEffectiveDate DATE,\r\n",
+					"    SiteCode STRING,\r\n",
+					"    Product STRING,\r\n",
+					"    StandardisedProduct STRING,\r\n",
+					"    Quantity DECIMAL(20,5),\r\n",
+					"    UsageCategory STRING,\r\n",
+					"    RecordSourceTableName STRING,\r\n",
+					"    RecordSourceHashKey STRING,\r\n",
+					"    CDCLoadDate TIMESTAMP,\r\n",
+					"    CDCStartDate TIMESTAMP,\r\n",
+					"    CDCEndDate TIMESTAMP,\r\n",
+					"    CDCOps INT,\r\n",
+					"    CDCCurrentFlag BOOLEAN,\r\n",
+					"    HashKey STRING,\r\n",
+					"    HashDiff STRING  \r\n",
+					")\r\n",
+					"USING delta\r\n",
+					"LOCATION 'abfss://{destination_container}@{destination_storage}.dfs.core.windows.net/{destination_path}/{db_tablename}'\r\n",
+					"\"\"\")"
+				],
+				"execution_count": 7
+			},
+			{
+				"cell_type": "code",
+				"metadata": {
+					"collapsed": false
+				},
+				"source": [
+					"# Condition 1: UsageCategory threshold determination\r\n",
+					"\r\n",
+					"df_UsageCategoryThreshold = spark.sql(f\"\"\"\r\n",
+					"                        SELECT  \r\n",
+					"                            ref.NumericValue AS NumericValue\r\n",
+					"                        FROM esg_sharepoint_bronze.reference_data ref\r\n",
+					"                        WHERE ref.CDCCurrentFlag = 1 AND Code = 'M18'\r\n",
+					"                    \"\"\")\r\n",
+					"\r\n",
+					"Threshold_Value = df_UsageCategoryThreshold.collect()[0][\"NumericValue\"]\r\n",
+					"#display(Threshold_Value)"
+				],
+				"execution_count": 8
+			},
+			{
+				"cell_type": "code",
+				"metadata": {
+					"collapsed": false
+				},
+				"source": [
+					"# Condition 2: UsageCategory determination (stationary cards)\r\n",
+					"\r\n",
+					"df_stationarycard1 = spark.sql(f\"\"\"\r\n",
+					"                        SELECT  \r\n",
+					"                            ref.Description AS CardNumber,\r\n",
+					"                            ref.NumericValue AS UC\r\n",
+					"                        FROM esg_sharepoint_bronze.reference_data ref\r\n",
+					"                        WHERE ref.CDCCurrentFlag = 1 AND Code IN ('FC1','FC2')\r\n",
+					"                    \"\"\")\r\n",
+					"df_stationarycard1 = df_stationarycard1.withColumn(\"StationaryCardNumber\", substring(\"CardNumber\", -5, 5))\r\n",
+					"df_stationarycard1 = df_stationarycard1.withColumn(\"UsageCategory\", when(col(\"UC\") == 2, \"Stationary\").otherwise(\"Transport\"))\r\n",
+					"\r\n",
+					"#display(df_stationarycard1)\r\n",
+					"\r\n",
+					"df_stationarycard1.createOrReplaceTempView(\"TempStationaryCard\")"
+				],
+				"execution_count": 9
+			},
+			{
+				"cell_type": "code",
+				"metadata": {
+					"collapsed": false
+				},
+				"source": [
+					"# Standardising Product names \r\n",
+					"df_product = spark.sql(f\"\"\"\r\n",
+					"                        SELECT \r\n",
+					"                            ref.Description AS Product, \r\n",
+					"                            ref.NumericValue AS FuelType\r\n",
+					"                        FROM esg_sharepoint_bronze.reference_data ref\r\n",
+					"                        WHERE ref.CDCCurrentFlag = 1 AND Dataset = 'ProductType'\r\n",
+					"                    \"\"\")\r\n",
+					"#display(df_product)\r\n",
+					"df_product.createOrReplaceTempView(\"TempProduct\")"
+				],
+				"execution_count": 10
+			},
+			{
+				"cell_type": "code",
+				"metadata": {
+					"jupyter": {
+						"source_hidden": false,
+						"outputs_hidden": false
+					},
+					"nteract": {
+						"transient": {
+							"deleting": false
+						}
+					},
+					"editable": true,
+					"run_control": {
+						"frozen": false
+					},
+					"collapsed": false
+				},
+				"source": [
+					"# Get records\r\n",
+					"df_silver = spark.sql(f\"\"\" \r\n",
+					"                        SELECT \r\n",
+					"                            TransactionId, \r\n",
+					"                            TransactionEffectiveDate,\r\n",
+					"                            SiteCode,\r\n",
+					"                            Product,\r\n",
+					"                            StandardisedProduct, \r\n",
+					"                            Quantity,\r\n",
+					"                            RecordSourceTableName, \r\n",
+					"                            RecordSourceHashKey,\r\n",
+					"                            FileOverrideFlag, \r\n",
+					"                            Stationary_category\r\n",
+					"                        FROM\r\n",
+					"                        (SELECT distinct\r\n",
+					"                            bp.TransactionReceiptNumber AS TransactionId, \r\n",
+					"                            bp.TransactionEffectiveDate AS TransactionEffectiveDate,\r\n",
+					"                            f.Facility AS SiteCode,\r\n",
+					"                            bp.Product AS Product,\r\n",
+					"                            CASE WHEN t.FuelType = '1' THEN \"Unleaded Petrol\" ELSE \"Diesel\" END AS StandardisedProduct, \r\n",
+					"                            bp.Litres AS Quantity,\r\n",
+					"                            'bp_fuel_transactions' AS RecordSourceTableName, \r\n",
+					"                            bp.HashKey as RecordSourceHashKey,\r\n",
+					"                            false as FileOverrideFlag,\r\n",
+					"                            sc.UC AS Stationary_category\r\n",
+					"                        FROM bp_bronze.bp_fuel_transactions bp\r\n",
+					"                        LEFT JOIN esg_sharepoint_bronze.fuelcard_facility_map f ON f.FuelCardNumber = bp.CardNumber AND f.CDCCurrentFlag = 1 \r\n",
+					"                        LEFT JOIN TempProduct t ON t.Product = bp.Product\r\n",
+					"                        LEFT JOIN TempStationaryCard sc ON sc.StationaryCardNumber = bp.CardNumber\r\n",
+					"                        WHERE bp.Product IN (t.Product) AND bp.CDCCurrentFlag = 1 \r\n",
+					"                        and (to_date(bp.TransactionEffectiveDate,'dd/MM/yyyy') BETWEEN to_date(f.ValidFromDate,'yyyy-MM-dd') AND to_date(f.ValidToDate,'yyyy-MM-dd'))\r\n",
+					"\r\n",
+					"                        UNION ALL\r\n",
+					"\r\n",
+					"                        SELECT  \r\n",
+					"                            a.TransactionNumber AS TransactionId, \r\n",
+					"                            a.TransactionDate AS TransactionEffectiveDate,\r\n",
+					"                            'SBK' AS SiteCode,\r\n",
+					"                            a.Product AS Product,\r\n",
+					"                            CASE WHEN t.FuelType = '1' THEN \"Unleaded Petrol\" ELSE \"Diesel\" END AS StandardisedProduct, \r\n",
+					"                            a.QuantityPerLitres AS Quantity,\r\n",
+					"                            'ampol_fuel_transactions' AS RecordSourceTableName, \r\n",
+					"                            a.HashKey as RecordSourceHashKey,\r\n",
+					"                            false as FileOverrideFlag,\r\n",
+					"                            f.UC AS Stationary_category\r\n",
+					"                        FROM ampol_bronze.ampol_fuel_transactions a\r\n",
+					"                        LEFT JOIN TempProduct t ON t.Product = a.Product\r\n",
+					"                        LEFT JOIN TempStationaryCard f ON f.StationaryCardNumber = a.CardNumber\r\n",
+					"                        WHERE a.Product IN (t.Product) AND a.CDCCurrentFlag = 1 \r\n",
+					"\r\n",
+					"                        UNION ALL\r\n",
+					"\r\n",
+					"                        SELECT  \r\n",
+					"                            CONCAT(m.InvoiceNumber, m.FileRowIndex) AS TransactionId, \r\n",
+					"                            m.TransactionDate AS TransactionEffectiveDate,\r\n",
+					"                            m.SiteCode AS SiteCode,\r\n",
+					"                            m.Product AS Product, \r\n",
+					"                            CASE WHEN t.FuelType = '1' THEN \"Unleaded Petrol\" ELSE \"Diesel\" END AS StandardisedProduct, \r\n",
+					"                            m.Quantity AS Quantity,\r\n",
+					"                            'marano_fuel_transactions' AS RecordSourceTableName, \r\n",
+					"                            m.HashKey AS RecordSourceHashKey,\r\n",
+					"                            FileOverrideFlag,\r\n",
+					"                            '' as Stationary_category\r\n",
+					"                        FROM marano_bronze.marano_fuel_transactions m\r\n",
+					"                        LEFT JOIN TempProduct t ON t.Product = m.Product\r\n",
+					"                        WHERE m.Product IN (t.Product) AND m.CDCCurrentFlag = 1 --and m.FileOverrideFlag = 0\r\n",
+					"                        AND (m.InvoiceNumber IS NOT NULL and m.TransactionDate is not null and m.CardNumber is not null and m.SupplyPoint is not null)\r\n",
+					"\r\n",
+					"                        UNION ALL\r\n",
+					"\r\n",
+					"                        SELECT  \r\n",
+					"                            CONCAT(mb.InvoiceNumber, mb.FileRowIndex) AS TransactionId, \r\n",
+					"                            mb.InvoiceDate AS TransactionEffectiveDate,\r\n",
+					"                            mb.SiteCode AS SiteCode,\r\n",
+					"                            mb.Product AS Product, \r\n",
+					"                            CASE WHEN t.FuelType = '1' THEN \"Unleaded Petrol\" ELSE \"Diesel\" END AS StandardisedProduct, \r\n",
+					"                            mb.Quantity AS Quantity,\r\n",
+					"                            'marano_bulk_fuel_transactions' AS RecordSourceTableName, \r\n",
+					"                            mb.HashKey AS RecordSourceHashKey,\r\n",
+					"                            FileOverrideFlag,\r\n",
+					"                            '' as Stationary_category\r\n",
+					"                        FROM marano_bronze.marano_bulk_fuel_transactions mb \r\n",
+					"                        LEFT JOIN TempProduct t ON t.Product = mb.Product                                                \r\n",
+					"                        WHERE mb.Product IN (t.Product) AND mb.CDCCurrentFlag = 1 AND mb.InvoiceNumber IS NOT NULL --and mb.FileOverrideFlag = 0\r\n",
+					"\r\n",
+					"                        UNION ALL\r\n",
+					"\r\n",
+					"                        SELECT  \r\n",
+					"                            CONCAT(fo.ID, fo.TransactionNumber) AS TransactionId, \r\n",
+					"                            fo.TransactionDate AS TransactionEffectiveDate,\r\n",
+					"                            fo.SiteCode AS SiteCode,\r\n",
+					"                            fo.Product AS Product,\r\n",
+					"                            CASE WHEN t.FuelType = '1' THEN \"Unleaded Petrol\" ELSE \"Diesel\" END AS StandardisedProduct, \r\n",
+					"                            fo.Quantity AS Quantity,\r\n",
+					"                            'fuel_override' AS RecordSourceTableName, \r\n",
+					"                            fo.HashKey AS RecordSourceHashKey,\r\n",
+					"                            false as FileOverrideFlag,\r\n",
+					"                            CASE WHEN fo.UsageCategory = 'Stationary' THEN 2 ELSE '' END as Stationary_category\r\n",
+					"                        FROM override_bronze.fuel_override fo\r\n",
+					"                        LEFT JOIN TempProduct t ON t.Product = fo.Product                                                \r\n",
+					"                        WHERE fo.Product IN (t.Product) AND fo.CDCCurrentFlag = 1\r\n",
+					"                        )\r\n",
+					"                    \"\"\")\r\n",
+					"#display(df_silver)"
+				],
+				"execution_count": 12
+			},
+			{
+				"cell_type": "code",
+				"metadata": {
+					"jupyter": {
+						"source_hidden": false,
+						"outputs_hidden": false
+					},
+					"nteract": {
+						"transient": {
+							"deleting": false
+						}
+					},
+					"collapsed": false
+				},
+				"source": [
+					"# Convert STRING to DECIMAL\r\n",
+					"df_silver = df_silver.withColumn(\"CleanQuantity\", regexp_replace(col(\"Quantity\"), \",\", \"\").cast(DecimalType(20,5)))\r\n",
+					"\r\n",
+					"# Convert STRING to DATE\r\n",
+					"df_silver = df_silver.withColumn(\"CleanTransactionEffectiveDate\", to_date(col(\"TransactionEffectiveDate\"), \"d/M/yyyy\"))\r\n",
+					"\r\n",
+					"# Define UsageCategory value based on threshold\r\n",
+					"df_silver = df_silver.withColumn(\"UsageCategory\", when(df_silver[\"Stationary_category\"] == 2, \"Stationary\").when(df_silver[\"CleanQuantity\"] < Threshold_Value, \"Transportation\").otherwise(\"Stationary\"))\r\n",
+					"\r\n",
+					"# Add CDC columns\r\n",
+					"df_silver = df_silver.withColumn(\"CDCLoadDate\", to_timestamp(lit(Silver_LoadDate),'yyyy-MM-dd HH:mm:ss'))\r\n",
+					"df_silver = df_silver.withColumn(\"CDCStartDate\", to_timestamp(lit(Silver_LoadDate), 'yyyy-MM-dd HH:mm:ss'))\r\n",
+					"df_silver = df_silver.withColumn(\"CDCEndDate\", to_timestamp(lit(\"9999-12-31 23:59:59\"), 'yyyy-MM-dd HH:mm:ss'))\r\n",
+					"df_silver = df_silver.withColumn(\"CDCCurrentFlag\", lit(1))\r\n",
+					"df_silver = df_silver.withColumn(\"CDCOps\", lit(1))\r\n",
+					"\r\n",
+					"# New HashKey for current load\r\n",
+					"df_silver = df_silver.withColumn(\"HashKey\", sha2(concat_ws(\"||\", \"TransactionId\", regexp_replace(\"TransactionEffectiveDate\", \"-|[/.:]\", \"\"), \"SiteCode\", \"Product\", \"RecordSourceHashKey\"), 256))\r\n",
+					"df_silver = df_silver.withColumn(\"HashDiff\", sha2(concat_ws(\"||\", \"StandardisedProduct\", \"Quantity\", \"UsageCategory\", \"RecordSourceTableName\"), 256))\r\n",
+					"\r\n",
+					"df_silver = df_silver.orderBy(\"TransactionEffectiveDate\")\r\n",
+					"\r\n",
+					"#display(df_silver)"
+				],
+				"execution_count": 13
+			},
+			{
+				"cell_type": "code",
+				"source": [
+					"#Row count parameters\r\n",
+					"Silver_Insert_Pre=spark.sql(f\"\"\" SELECT COUNT(*) FROM {lake_db_name}.{db_tablename} WHERE CDCOps = 1 \"\"\").collect()[0][0]\r\n",
+					"Silver_Update_Pre=spark.sql(f\"\"\" SELECT COUNT(*) FROM {lake_db_name}.{db_tablename} WHERE CDCOps = 2 \"\"\").collect()[0][0]\r\n",
+					"Silver_Delete_Pre=spark.sql(f\"\"\" SELECT COUNT(*) FROM {lake_db_name}.{db_tablename} WHERE CDCOps = 0 \"\"\").collect()[0][0]"
+				],
+				"execution_count": 14
+			},
+			{
+				"cell_type": "code",
+				"source": [
+					"# Create a temporary view of the dataframe\r\n",
+					"df_silver.createOrReplaceTempView(\"temp_table\")"
+				],
+				"execution_count": 15
+			},
+			{
+				"cell_type": "code",
+				"source": [
+					"# SCD2 logic\r\n",
+					"\r\n",
+					"# Use the merge operation to update the target table\r\n",
+					"spark.sql(f\"\"\"\r\n",
+					"    MERGE INTO {lake_db_name}.{db_tablename} t\r\n",
+					"    USING temp_table s\r\n",
+					"    ON t.HashKey = s.HashKey AND t.CDCCurrentFlag = true\r\n",
+					"    WHEN MATCHED AND t.HashDiff <> s.HashDiff THEN\r\n",
+					"      UPDATE SET t.CDCEndDate = '{Silver_UpdateEndDate}',\r\n",
+					"                 t.CDCCurrentFlag = false,\r\n",
+					"                 t.CDCOps = s.CDCOps + 1\r\n",
+					"    WHEN NOT MATCHED AND s.FileOverrideFlag = 0 THEN\r\n",
+					"      INSERT ( TransactionId, TransactionEffectiveDate, SiteCode, Product, StandardisedProduct, Quantity, UsageCategory, RecordSourceTableName, RecordSourceHashKey, CDCLoadDate, CDCStartDate, CDCEndDate, CDCOps, CDCCurrentFlag, HashKey, HashDiff)\r\n",
+					"      VALUES (s.TransactionId, s.CleanTransactionEffectiveDate, s.SiteCode, s.Product, s.StandardisedProduct, s.CleanQuantity, s.UsageCategory, s.RecordSourceTableName,s.RecordSourceHashKey, s.CDCLoadDate, s.CDCStartDate, s.CDCEndDate, 1, s.CDCCurrentFlag, s.HashKey, s.HashDiff)\r\n",
+					"\"\"\")\r\n",
+					"\r\n",
+					"# Use the merge operation to Insert updated record \r\n",
+					"spark.sql(f\"\"\"\r\n",
+					"    MERGE INTO {lake_db_name}.{db_tablename} t\r\n",
+					"    USING temp_table s\r\n",
+					"    ON t.HashKey = s.HashKey AND t.CDCCurrentFlag = true\r\n",
+					"    WHEN MATCHED AND t.HashDiff <> s.HashDiff THEN\r\n",
+					"      UPDATE SET t.CDCEndDate = '{Silver_UpdateEndDate}',\r\n",
+					"                 t.CDCCurrentFlag = false,\r\n",
+					"                 t.CDCOps = s.CDCOps + 1\r\n",
+					"    WHEN NOT MATCHED AND s.FileOverrideFlag = 0 THEN\r\n",
+					"      INSERT ( TransactionId, TransactionEffectiveDate, SiteCode, Product, StandardisedProduct, Quantity, UsageCategory, RecordSourceTableName, RecordSourceHashKey, CDCLoadDate, CDCStartDate, CDCEndDate, CDCOps, CDCCurrentFlag, HashKey, HashDiff)\r\n",
+					"      VALUES (s.TransactionId, s.CleanTransactionEffectiveDate, s.SiteCode, s.Product, s.StandardisedProduct, s.CleanQuantity, s.UsageCategory, s.RecordSourceTableName,s.RecordSourceHashKey, s.CDCLoadDate, s.CDCStartDate, s.CDCEndDate, 1, s.CDCCurrentFlag, s.HashKey, s.HashDiff)\r\n",
+					"\"\"\")\r\n",
+					"\r\n",
+					"# Use the merge operation to updated override records to CDCCurrentFlag = false\r\n",
+					"spark.sql(f\"\"\"\r\n",
+					"    MERGE INTO {lake_db_name}.{db_tablename} t\r\n",
+					"    USING temp_table s\r\n",
+					"    ON t.HashKey = s.HashKey AND t.CDCCurrentFlag = true and s.FileOverrideFlag = true\r\n",
+					"    WHEN MATCHED THEN\r\n",
+					"      UPDATE SET t.CDCEndDate = '{Silver_UpdateEndDate}',\r\n",
+					"                t.CDCCurrentFlag = false,\r\n",
+					"                t.CDCOps = 0\r\n",
+					"\"\"\")"
+				],
+				"execution_count": 16
+			},
+			{
+				"cell_type": "code",
+				"metadata": {
+					"jupyter": {
+						"source_hidden": false,
+						"outputs_hidden": false
+					},
+					"nteract": {
+						"transient": {
+							"deleting": false
+						}
+					}
+				},
+				"source": [
+					"#Row count parameters\r\n",
+					"Silver_Insert_Post=spark.sql(f\"\"\" SELECT COUNT(*) FROM {lake_db_name}.{db_tablename} WHERE CDCOps = 1 \"\"\").collect()[0][0]\r\n",
+					"Silver_Update_Post=spark.sql(f\"\"\" SELECT COUNT(*) FROM {lake_db_name}.{db_tablename} WHERE CDCOps = 2 \"\"\").collect()[0][0]\r\n",
+					"Silver_Delete_Post=spark.sql(f\"\"\" SELECT COUNT(*) FROM {lake_db_name}.{db_tablename} WHERE CDCOps = 0 \"\"\").collect()[0][0]\r\n",
+					"Silver_TotalRowCount_Post=spark.sql(f\"\"\" SELECT COUNT(*) FROM {lake_db_name}.{db_tablename}\"\"\").collect()[0][0]\r\n",
+					"Silver_ActiveRecord_Post=spark.sql(f\"\"\" SELECT COUNT(*) FROM {lake_db_name}.{db_tablename} WHERE CDCCurrentFlag = true \"\"\").collect()[0][0]"
+				],
+				"execution_count": 17
+			},
+			{
+				"cell_type": "code",
+				"source": [
+					"#Row calculation\r\n",
+					"Silver_Update = Silver_Update_Post - Silver_Update_Pre\r\n",
+					"Silver_Insert = (Silver_Insert_Post - Silver_Insert_Pre) + Silver_Update\r\n",
+					"Silver_Delete = Silver_Delete_Post - Silver_Delete_Pre\r\n",
+					"Silver_ActiveRows = Silver_ActiveRecord_Post \r\n",
+					"Silver_TotalRows = Silver_TotalRowCount_Post"
+				],
+				"execution_count": 18
+			},
+			{
+				"cell_type": "code",
+				"metadata": {
+					"jupyter": {
+						"source_hidden": false,
+						"outputs_hidden": false
+					},
+					"nteract": {
+						"transient": {
+							"deleting": false
+						}
+					},
+					"collapsed": false
+				},
+				"source": [
+					"#Create df_log dataframe to insert into controldb logging tables\r\n",
+					"\r\n",
+					"log_data = [(db_notebookname,db_tablename,Silver_LoadDate,Silver_Insert,Silver_Update,Silver_Delete,Silver_ActiveRows,Silver_TotalRows)]\r\n",
+					"#print(log_data)\r\n",
+					"log_columns = ['PIPELINE_NAME', 'TABLE_NAME', 'INGEST_DATETIME', 'INSERT','UPDATE','DELETE','ACTIVE_ROWS','TOTAL_ROWS']\r\n",
+					"df_log = spark.createDataFrame(log_data, log_columns)"
+				],
+				"execution_count": 19
+			},
+			{
+				"cell_type": "code",
+				"metadata": {
+					"jupyter": {
+						"source_hidden": false,
+						"outputs_hidden": false
+					},
+					"nteract": {
+						"transient": {
+							"deleting": false
+						}
+					},
+					"collapsed": false
+				},
+				"source": [
+					"#Write to controldb\r\n",
+					"db_port = 1433\r\n",
+					"linked_service_name = \"LS_SQL_ELTFrameworkDB\"\r\n",
+					"linkedServiceProperties = json.loads(mssparkutils.credentials.getPropertiesAll(linked_service_name))\r\n",
+					"sql_server_name = linkedServiceProperties.get('Endpoint')\r\n",
+					"db_name = linkedServiceProperties.get('Database')\r\n",
+					"access_token = mssparkutils.credentials.getConnectionStringOrCreds(linked_service_name)\r\n",
+					"write_table_name = \"[CTL].[CFG_INGESTION_LOGS]\"\r\n",
+					"\r\n",
+					"try:\r\n",
+					"    df_log.write.format(\"jdbc\") \\\r\n",
+					"        .option(\"url\", \"jdbc:sqlserver://%s:%s\" % (sql_server_name, db_port)) \\\r\n",
+					"        .option(\"dbtable\", write_table_name) \\\r\n",
+					"        .option(\"accessToken\", access_token) \\\r\n",
+					"        .option(\"encrypt\", \"true\") \\\r\n",
+					"        .option(\"databaseName\", db_name) \\\r\n",
+					"        .option(\"hostNameInCertificate\", \"*.database.windows.net\") \\\r\n",
+					"        .mode(\"append\") \\\r\n",
+					"        .save()\r\n",
+					"except ValueError as error :\r\n",
+					"    print(\"MSSQL Connector write failed\", error)\r\n",
+					"\r\n",
+					"print(\"MSSQL Connector write(append) succeeded  \")"
+				],
+				"execution_count": 20
+			},
+			{
+				"cell_type": "markdown",
+				"metadata": {
+					"nteract": {
+						"transient": {
+							"deleting": false
+						}
+					}
+				},
+				"source": [
+					"# Table **fuel_transactions**: END"
+				]
+			}
+		]
+	}
+}

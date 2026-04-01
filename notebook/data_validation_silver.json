@@ -1,0 +1,312 @@
+{
+	"name": "data_validation_silver",
+	"properties": {
+		"folder": {
+			"name": "DataHubBatchScripts/SILVER/SustainabilityUseCase"
+		},
+		"nbformat": 4,
+		"nbformat_minor": 2,
+		"bigDataPool": {
+			"referenceName": "JobSparkpool02",
+			"type": "BigDataPoolReference"
+		},
+		"sessionProperties": {
+			"driverMemory": "56g",
+			"driverCores": 8,
+			"executorMemory": "56g",
+			"executorCores": 8,
+			"numExecutors": 2,
+			"conf": {
+				"spark.dynamicAllocation.enabled": "false",
+				"spark.dynamicAllocation.minExecutors": "2",
+				"spark.dynamicAllocation.maxExecutors": "2",
+				"spark.autotune.trackingId": "983d2b7d-b28e-440d-8c13-b26d98f98198"
+			}
+		},
+		"metadata": {
+			"saveOutput": true,
+			"enableDebugMode": false,
+			"kernelspec": {
+				"name": "synapse_pyspark",
+				"display_name": "Synapse PySpark"
+			},
+			"language_info": {
+				"name": "python"
+			},
+			"a365ComputeOptions": {
+				"id": "/subscriptions/2e9f823e-dc76-4e8e-b815-c8a4f22d05ff/resourceGroups/CQL-AZUR1-DEVDATAHUB01-RG/providers/Microsoft.Synapse/workspaces/cql-dev-datahub-synapse01/bigDataPools/JobSparkpool02",
+				"name": "JobSparkpool02",
+				"type": "Spark",
+				"endpoint": "https://cql-dev-datahub-synapse01.dev.azuresynapse.net/livyApi/versions/2019-11-01-preview/sparkPools/JobSparkpool02",
+				"auth": {
+					"type": "AAD",
+					"authResource": "https://dev.azuresynapse.net"
+				},
+				"sparkVersion": "3.4",
+				"nodeCount": 10,
+				"cores": 8,
+				"memory": 56,
+				"automaticScaleJobs": false
+			},
+			"sessionKeepAliveTimeout": 30
+		},
+		"cells": [
+			{
+				"cell_type": "code",
+				"source": [
+					"#Imports\n",
+					"import json\n",
+					"\n",
+					"from pyspark.sql.functions import hash\n",
+					"from pyspark.sql import functions as fn\n",
+					"from pyspark.sql.functions import col, concat, lit, to_timestamp,current_timestamp,date_format\n",
+					"from pyspark.sql.functions import sha2, concat_ws\n",
+					"from pyspark.sql.functions import lit, to_json, struct\n",
+					"\n",
+					"\n",
+					"from pyspark.sql.types import StructType, StructField, StringType, IntegerType, BooleanType,DateType, DoubleType,TimestampType\n",
+					"\n",
+					"from datetime import datetime\n",
+					"import com.microsoft.spark.sqlanalytics\n",
+					"from com.microsoft.spark.sqlanalytics.Constants import Constants"
+				],
+				"execution_count": 122
+			},
+			{
+				"cell_type": "code",
+				"source": [
+					"#Get Parameter from controldb\n",
+					"db_port = 1433\n",
+					"linked_service_name = \"LS_SQL_ELTFrameworkDB\"\n",
+					"lake_db_name = \"silver\"\n",
+					"db_notebookname= \"data_validation_silver\"\n",
+					"tablename = 'DataValidationResults'\n",
+					"linkedServiceProperties = json.loads(mssparkutils.credentials.getPropertiesAll(linked_service_name))\n",
+					"sql_server_name = linkedServiceProperties.get('Endpoint')\n",
+					"db_name = linkedServiceProperties.get('Database')\n",
+					"pipeline_name='Sustainability_Bronze_To_Silver'\n",
+					"#print(linkedServiceProperties)\n",
+					"access_token = mssparkutils.credentials.getConnectionStringOrCreds(linked_service_name)\n",
+					"\n",
+					"db_query =\"SELECT A.*,B.NotebookParameterId,B.ParameterType,B.Value  FROM [CTL].[CFG_NOTEBOOK] A LEFT JOIN [CTL].[CFG_NOTEBOOK_PARAMETER] B ON A.NotebookId = B.NotebookId\"\n",
+					"\n",
+					"df = spark.read.format(\"jdbc\") \\\n",
+					"    .option(\"url\", \"jdbc:sqlserver://%s:%s\" % (sql_server_name, db_port)) \\\n",
+					"    .option(\"query\", db_query) \\\n",
+					"    .option(\"accessToken\", access_token) \\\n",
+					"    .option(\"encrypt\", \"true\") \\\n",
+					"    .option(\"databaseName\", db_name) \\\n",
+					"    .option(\"hostNameInCertificate\", \"*.database.windows.net\") \\\n",
+					"    .load()\n",
+					"\n",
+					"df2 = df.where(df.NotebookPath==db_notebookname) "
+				],
+				"execution_count": 123
+			},
+			{
+				"cell_type": "code",
+				"source": [
+					"#Destination DataLake storage details\n",
+					"destination_storage = df2.where(df2.ParameterType=='destination_storage').collect()[0][\"Value\"]\n",
+					"destination_container = df2.where(df2.ParameterType=='destination_container').collect()[0][\"Value\"]\n",
+					"destination_path = df2.where(df2.ParameterType=='destination_path').collect()[0][\"Value\"]\n",
+					"\n",
+					"#Get Current Date\n",
+					"Date_Collection = spark.sql(\"select current_timestamp() AS Current,(current_timestamp() + interval '-1' second) AS EndDate\").collect()\n",
+					"Silver_LoadDate = Date_Collection[0]['Current']\n",
+					"Silver_UpdateEndDate = Date_Collection[0]['EndDate']\n",
+					"\n",
+					"#Synapse Dedicated Server detials\n",
+					"SynapseDedicatedServer = df2.where(df2.ParameterType=='destination_storage').collect()[0]['SynapseDedicatedServer'] \n",
+					"TempFolder = df2.where(df2.ParameterType=='destination_storage').collect()[0]['TempFolder']\n",
+					"SynapseDedicatedDatabase = df2.where(df2.ParameterType=='destination_storage').collect()[0]['SynapseDedicatedDatabase']"
+				],
+				"execution_count": 124
+			},
+			{
+				"cell_type": "code",
+				"source": [
+					"#Create unique batchid\n",
+					"timestamp = datetime.now().strftime('%Y%m%d_%H%M%S')\n",
+					"batch_id = f\"{pipeline_name}_{timestamp}\""
+				],
+				"execution_count": 125
+			},
+			{
+				"cell_type": "code",
+				"source": [
+					"#Define the schema for validation results table\n",
+					"target_schema = StructType([\n",
+					"    StructField(\"BatchId\", StringType(), True),       \n",
+					"    StructField(\"CheckName\", StringType(), True),\n",
+					"    StructField(\"Timestamp\", TimestampType(), True),\n",
+					"    StructField(\"BusinessArea\", StringType(), True),\n",
+					"    StructField(\"DataLayer\", StringType(), True),\n",
+					"    StructField(\"TableName\", StringType(), True),\n",
+					"    StructField(\"ErrorMessage\", StringType(), True),\n",
+					"    StructField(\"CheckType\", StringType(), True),\n",
+					"    StructField(\"Severity\", StringType(), True),\n",
+					"    StructField(\"RowIdentifier\", StringType(), True),\n",
+					"    StructField(\"ErrorDetails\", StringType(), True)\n",
+					"])\n",
+					""
+				],
+				"execution_count": 126
+			},
+			{
+				"cell_type": "code",
+				"source": [
+					"# Validation 1\n",
+					"validated_df1 = None\n",
+					"try:\n",
+					"    validation_query_1 = \"\"\"\n",
+					"        WITH grouped_periods AS (\n",
+					"            SELECT SiteCode, LocationIdentifier, MonthlyBillingPeriod, BillingPeriodStartDate, BillingPeriodEndDate,\n",
+					"                   COUNT(DISTINCT FileRowIndex) AS distinct_rows,\n",
+					"                   MAX(MonthlyBillingDays) AS MaxBillingDaysPerGroup\n",
+					"            FROM silver.retail_electricity_charge_details\n",
+					"            WHERE CDCCurrentflag = 1 \n",
+					"            GROUP BY SiteCode, LocationIdentifier, MonthlyBillingPeriod, BillingPeriodStartDate, BillingPeriodEndDate\n",
+					"        ),\n",
+					"        summed_days AS (\n",
+					"            SELECT SiteCode, LocationIdentifier, MonthlyBillingPeriod,\n",
+					"                   SUM(MaxBillingDaysPerGroup) AS TotalBillingDays\n",
+					"            FROM grouped_periods\n",
+					"            GROUP BY SiteCode, LocationIdentifier, MonthlyBillingPeriod\n",
+					"        ),\n",
+					"        final_check AS (\n",
+					"            SELECT *, DAY(last_day(CAST(MonthlyBillingPeriod AS DATE))) AS DaysInMonth\n",
+					"            FROM summed_days\n",
+					"        )\n",
+					"        SELECT * FROM final_check WHERE TotalBillingDays > DaysInMonth\n",
+					"    \"\"\"\n",
+					"    validation_df_1 = spark.sql(validation_query_1)\n",
+					"    if validation_df_1.count() > 0:\n",
+					"        validated_df1 = validation_df_1.withColumn(\"BatchId\", lit(batch_id)) \\\n",
+					"            .withColumn(\"CheckName\", lit(\"MonthlyBillingDaysValidation\")) \\\n",
+					"            .withColumn(\"Timestamp\", lit(Silver_LoadDate)) \\\n",
+					"            .withColumn(\"BusinessArea\", lit(\"ESG - Retail Electricity\")) \\\n",
+					"            .withColumn(\"DataLayer\", lit(lake_db_name)) \\\n",
+					"            .withColumn(\"TableName\", lit(\"retail_electricity_charge_details\")) \\\n",
+					"            .withColumn(\"ErrorMessage\", lit(\"Billing days exceed days in month\")) \\\n",
+					"            .withColumn(\"CheckType\", lit(\"CustomRule\")) \\\n",
+					"            .withColumn(\"Severity\", lit(\"High\")) \\\n",
+					"            .withColumn(\"RowIdentifier\", to_json(struct(col(\"SiteCode\"), col(\"LocationIdentifier\"), col(\"MonthlyBillingPeriod\")))) \\\n",
+					"            .withColumn(\"ErrorDetails\", to_json(struct(col(\"TotalBillingDays\"), col(\"DaysInMonth\")))) \\\n",
+					"            .select([f.name for f in target_schema.fields])\n",
+					"        validated_df1 = spark.createDataFrame(validated_df1.rdd, target_schema)\n",
+					"except Exception as e:\n",
+					"    print(f\"Validation 1 failed: {e}\")\n",
+					"    raise"
+				],
+				"execution_count": 127
+			},
+			{
+				"cell_type": "code",
+				"metadata": {
+					"collapsed": false
+				},
+				"source": [
+					"# Validation 2\n",
+					"validated_df2 = None\n",
+					"try:\n",
+					"    validation_query_2 = \"\"\"\n",
+					"        WITH filtered_data AS (\n",
+					"            SELECT DISTINCT SiteCode, LocationIdentifier, BillingPeriodStartDate, BillingPeriodEndDate\n",
+					"            FROM silver.retail_electricity_charge_details\n",
+					"            WHERE CDCCurrentflag = 1\n",
+					"        ),\n",
+					"        with_gaps AS (\n",
+					"            SELECT SiteCode, LocationIdentifier, BillingPeriodStartDate, BillingPeriodEndDate,\n",
+					"                   LAG(BillingPeriodEndDate) OVER (\n",
+					"                       PARTITION BY SiteCode, LocationIdentifier\n",
+					"                       ORDER BY BillingPeriodStartDate\n",
+					"                   ) AS PrevEndDate\n",
+					"            FROM filtered_data\n",
+					"        ),\n",
+					"        gap_check AS (\n",
+					"            SELECT *, DATEDIFF(DAY, PrevEndDate, BillingPeriodStartDate) AS GapDays\n",
+					"            FROM with_gaps\n",
+					"            WHERE PrevEndDate IS NOT NULL\n",
+					"        )\n",
+					"        SELECT * FROM gap_check WHERE GapDays NOT IN (0, 1)\n",
+					"    \"\"\"\n",
+					"    validation_df_2 = spark.sql(validation_query_2)\n",
+					"    if validation_df_2.count() > 0:\n",
+					"        validated_df2 = validation_df_2.withColumn(\"BatchId\", lit(batch_id)) \\\n",
+					"            .withColumn(\"CheckName\", lit(\"BillingPeriodContinuityValidation\")) \\\n",
+					"            .withColumn(\"Timestamp\", lit(Silver_LoadDate)) \\\n",
+					"            .withColumn(\"BusinessArea\", lit(\"ESG - Retail Electricity\")) \\\n",
+					"            .withColumn(\"DataLayer\", lit(lake_db_name)) \\\n",
+					"            .withColumn(\"TableName\", lit(\"retail_electricity_charge_details\")) \\\n",
+					"            .withColumn(\"ErrorMessage\", lit(\"There is a gap in billing periods\")) \\\n",
+					"            .withColumn(\"CheckType\", lit(\"CustomRule\")) \\\n",
+					"            .withColumn(\"Severity\", lit(\"Medium\")) \\\n",
+					"            .withColumn(\"RowIdentifier\", to_json(struct(col(\"SiteCode\"), col(\"LocationIdentifier\")))) \\\n",
+					"            .withColumn(\"ErrorDetails\", to_json(struct(\n",
+					"                col(\"BillingPeriodStartDate\"),\n",
+					"                col(\"BillingPeriodEndDate\"),\n",
+					"                col(\"PrevEndDate\"),\n",
+					"                col(\"GapDays\")\n",
+					"            ))) \\\n",
+					"            .select([f.name for f in target_schema.fields])\n",
+					"        validated_df2 = spark.createDataFrame(validated_df2.rdd, target_schema)\n",
+					"except Exception as e:\n",
+					"    print(f\"Validation 2 failed: {e}\")\n",
+					"    raise"
+				],
+				"execution_count": 128
+			},
+			{
+				"cell_type": "code",
+				"metadata": {
+					"collapsed": false
+				},
+				"source": [
+					"# Combine and Write\n",
+					"try:\n",
+					"    if validated_df1 and validated_df2:\n",
+					"        combined_df = validated_df1.union(validated_df2)\n",
+					"    elif validated_df1:\n",
+					"        combined_df = validated_df1\n",
+					"    elif validated_df2:\n",
+					"        combined_df = validated_df2\n",
+					"    else:\n",
+					"        print(\"No validation issues found.\")\n",
+					"        combined_df = None\n",
+					"\n",
+					"    if combined_df:\n",
+					"        combined_df.createOrReplaceTempView(\"temp_view\")\n",
+					"        gold_df = spark.sql(\"SELECT * FROM temp_view\")\n",
+					"\n",
+					"        (gold_df.write\n",
+					"         .option(Constants.SERVER, SynapseDedicatedServer)\n",
+					"         .option(Constants.TEMP_FOLDER, f\"abfss://temp@{TempFolder}/{tablename}_staging\")\n",
+					"         .mode(\"append\")\n",
+					"         .synapsesql(f\"{SynapseDedicatedDatabase}.dbo.{tablename}\"))\n",
+					"\n",
+					"        print(\"Data validation results successfully written to Synapse.\")\n",
+					"except Exception as e:\n",
+					"    print(f\"Failed to write to Synapse: {e}\")\n",
+					"    raise"
+				],
+				"execution_count": 129
+			},
+			{
+				"cell_type": "code",
+				"source": [
+					"row_count_1 = validated_df1.count() if validated_df1 else 0\n",
+					"row_count_2 = validated_df2.count() if validated_df2 else 0\n",
+					"\n",
+					"total_errors = row_count_1 + row_count_2\n",
+					"\n",
+					"print(f\"Total validation errors: {total_errors}\")\n",
+					"\n",
+					"# Pass the value back to ADF\n",
+					"mssparkutils.notebook.exit(json.dumps({\"totalValidationErrors\": total_errors}))"
+				],
+				"execution_count": 130
+			}
+		]
+	}
+}

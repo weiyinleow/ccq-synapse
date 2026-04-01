@@ -1,0 +1,5144 @@
+{
+	"name": "AEMO_Gold",
+	"properties": {
+		"folder": {
+			"name": "DataHubBatchScripts/AEMO/AEMO_14419"
+		},
+		"nbformat": 4,
+		"nbformat_minor": 2,
+		"bigDataPool": {
+			"referenceName": "Sparkpool01",
+			"type": "BigDataPoolReference"
+		},
+		"sessionProperties": {
+			"driverMemory": "28g",
+			"driverCores": 4,
+			"executorMemory": "28g",
+			"executorCores": 4,
+			"numExecutors": 2,
+			"runAsWorkspaceSystemIdentity": false,
+			"conf": {
+				"spark.dynamicAllocation.enabled": "false",
+				"spark.dynamicAllocation.minExecutors": "2",
+				"spark.dynamicAllocation.maxExecutors": "2",
+				"spark.autotune.trackingId": "cc69818f-1562-4a6a-8576-28d8de26e4a3"
+			}
+		},
+		"metadata": {
+			"saveOutput": true,
+			"enableDebugMode": false,
+			"kernelspec": {
+				"name": "synapse_pyspark",
+				"display_name": "Synapse PySpark"
+			},
+			"language_info": {
+				"name": "python"
+			},
+			"a365ComputeOptions": {
+				"id": "/subscriptions/2e9f823e-dc76-4e8e-b815-c8a4f22d05ff/resourceGroups/CQL-AZUR1-DEVDATAHUB01-RG/providers/Microsoft.Synapse/workspaces/cql-dev-datahub-synapse01/bigDataPools/Sparkpool01",
+				"name": "Sparkpool01",
+				"type": "Spark",
+				"endpoint": "https://cql-dev-datahub-synapse01.dev.azuresynapse.net/livyApi/versions/2019-11-01-preview/sparkPools/Sparkpool01",
+				"auth": {
+					"type": "AAD",
+					"authResource": "https://dev.azuresynapse.net"
+				},
+				"sparkVersion": "3.3",
+				"nodeCount": 10,
+				"cores": 8,
+				"memory": 56
+			},
+			"sessionKeepAliveTimeout": 30
+		},
+		"cells": [
+			{
+				"cell_type": "code",
+				"metadata": {
+					"jupyter": {
+						"source_hidden": false,
+						"outputs_hidden": false
+					},
+					"nteract": {
+						"transient": {
+							"deleting": false
+						}
+					}
+				},
+				"source": [
+					"#Get Parameter from controldb\n",
+					"import json\n",
+					"db_port = 1433\n",
+					"linked_service_name = \"LS_SQL_ELTFrameworkDB\"\n",
+					"db_notebookname= \"AEMO_Gold\"\n",
+					"linkedServiceProperties = json.loads(mssparkutils.credentials.getPropertiesAll(linked_service_name))\n",
+					"sql_server_name = linkedServiceProperties.get('Endpoint')\n",
+					"db_name = linkedServiceProperties.get('Database')\n",
+					"#print(linkedServiceProperties)\n",
+					"access_token = mssparkutils.credentials.getConnectionStringOrCreds(linked_service_name)\n",
+					"\n",
+					"db_query =\"SELECT A.*,B.NotebookParameterId,B.ParameterType,B.Value  FROM [CTL].[CFG_NOTEBOOK] A LEFT JOIN [CTL].[CFG_NOTEBOOK_PARAMETER] B ON A.NotebookId = B.NotebookId\"\n",
+					"\n",
+					"df = spark.read.format(\"jdbc\") \\\n",
+					"    .option(\"url\", \"jdbc:sqlserver://%s:%s\" % (sql_server_name, db_port)) \\\n",
+					"    .option(\"query\", db_query) \\\n",
+					"    .option(\"accessToken\", access_token) \\\n",
+					"    .option(\"encrypt\", \"true\") \\\n",
+					"    .option(\"databaseName\", db_name) \\\n",
+					"    .option(\"hostNameInCertificate\", \"*.database.windows.net\") \\\n",
+					"    .load()\n",
+					"\n",
+					"df2 = df.where(df.NotebookPath==db_notebookname) "
+				],
+				"execution_count": 1
+			},
+			{
+				"cell_type": "code",
+				"metadata": {
+					"jupyter": {
+						"source_hidden": false,
+						"outputs_hidden": false
+					},
+					"nteract": {
+						"transient": {
+							"deleting": false
+						}
+					},
+					"tags": [
+						"parameters"
+					]
+				},
+				"source": [
+					"#Source DataLake storage details\n",
+					"source_storage = df2.where(df2.ParameterType=='source_storage').collect()[0][\"Value\"] #Storage name\n",
+					"source_container = df2.where(df2.ParameterType=='source_container').collect()[0][\"Value\"] #Storage container detail\n",
+					"source_path = df2.where(df2.ParameterType=='source_path').collect()[0][\"Value\"] #internal folder location in container \"demodata/demo_aemo\"\n",
+					"#source_file = '' #CUSTOMER__full_32a72bd2-bd94-467f-9030-6b9f20dad676_20240204_100201\n",
+					"\n",
+					"#Destination DataLake storage details\n",
+					"destination_storage = df2.where(df2.ParameterType=='destination_storage').collect()[0][\"Value\"] #Storage name\n",
+					"destination_container = df2.where(df2.ParameterType=='destination_container').collect()[0][\"Value\"] #raw storage container details\n",
+					"destination_path = df2.where(df2.ParameterType=='destination_path').collect()[0][\"Value\"] #raw delta file patch\n",
+					"\n",
+					"#Get Current Date\n",
+					"Gold_LoadDate=spark.sql(\"select current_timestamp()\").collect()[0][0]\n",
+					"\n",
+					"#Synapse Dedicated Server detials\n",
+					"SynapseDedicatedServer = df2.where(df2.ParameterType=='destination_storage').collect()[0]['SynapseDedicatedServer'] \n",
+					"TempFolder = df2.where(df2.ParameterType=='destination_storage').collect()[0]['TempFolder']\n",
+					"SynapseDedicatedDatabase = df2.where(df2.ParameterType=='destination_storage').collect()[0]['SynapseDedicatedDatabase']"
+				],
+				"execution_count": 2
+			},
+			{
+				"cell_type": "code",
+				"metadata": {
+					"jupyter": {
+						"source_hidden": false,
+						"outputs_hidden": false
+					},
+					"nteract": {
+						"transient": {
+							"deleting": false
+						}
+					}
+				},
+				"source": [
+					"# Display values\n",
+					"print(source_storage)\n",
+					"print(source_container)\n",
+					"print(source_path)\n",
+					"print(destination_storage)\n",
+					"print(destination_container)\n",
+					"print(destination_path)\n",
+					"print(SynapseDedicatedServer)\n",
+					"print(TempFolder)\n",
+					"print(SynapseDedicatedDatabase)"
+				],
+				"execution_count": 3
+			},
+			{
+				"cell_type": "code",
+				"metadata": {
+					"jupyter": {
+						"source_hidden": false,
+						"outputs_hidden": false
+					},
+					"nteract": {
+						"transient": {
+							"deleting": false
+						}
+					}
+				},
+				"source": [
+					"# Create AEMO Dir if it does not exist\r\n",
+					"dirs_in_gold =  [f.name for f in mssparkutils.fs.ls(f\"abfss://{destination_container}@{destination_storage}.dfs.core.windows.net/\")]\r\n",
+					"if \"AEMO\" not in dirs_in_gold:\r\n",
+					"    mssparkutils.fs.mkdirs(f\"abfss://{destination_container}@{destination_storage}.dfs.core.windows.net/AEMO\")"
+				],
+				"execution_count": 4
+			},
+			{
+				"cell_type": "code",
+				"metadata": {
+					"jupyter": {
+						"source_hidden": false,
+						"outputs_hidden": false
+					},
+					"nteract": {
+						"transient": {
+							"deleting": false
+						}
+					}
+				},
+				"source": [
+					"# Create NEM12 Dir if it does not exist \r\n",
+					"dirs_in_aemo =  [f.name for f in mssparkutils.fs.ls(f\"abfss://{destination_container}@{destination_storage}.dfs.core.windows.net/AEMO\")]\r\n",
+					"\r\n",
+					"if \"NEM12\" not in dirs_in_aemo:\r\n",
+					"    mssparkutils.fs.mkdirs(f\"abfss://{destination_container}@{destination_storage}.dfs.core.windows.net/AEMO/NEM12\")"
+				],
+				"execution_count": 5
+			},
+			{
+				"cell_type": "markdown",
+				"metadata": {
+					"nteract": {
+						"transient": {
+							"deleting": false
+						}
+					}
+				},
+				"source": [
+					"# Table DimReasoncode: START"
+				]
+			},
+			{
+				"cell_type": "code",
+				"metadata": {
+					"jupyter": {
+						"source_hidden": false,
+						"outputs_hidden": false
+					},
+					"nteract": {
+						"transient": {
+							"deleting": false
+						}
+					}
+				},
+				"source": [
+					"#Set table name\n",
+					"db_tablename=\"DimReasoncode\""
+				],
+				"execution_count": 6
+			},
+			{
+				"cell_type": "code",
+				"metadata": {
+					"jupyter": {
+						"source_hidden": false,
+						"outputs_hidden": false
+					},
+					"nteract": {
+						"transient": {
+							"deleting": false
+						}
+					}
+				},
+				"source": [
+					"# Drop table and storage folder if exists\n",
+					"from py4j.protocol import Py4JJavaError\n",
+					"\n",
+					"spark.sql(f\"\"\"DROP TABLE IF EXISTS {db_notebookname}.{db_tablename}\"\"\")\n",
+					"\n",
+					"try:\n",
+					"    raw_output_path = f\"abfss://{destination_container}@{destination_storage}.dfs.core.windows.net/{destination_path}/{db_tablename}\"\n",
+					"    mssparkutils.fs.rm(raw_output_path,recurse=True)\n",
+					"\n",
+					"    print(\"Delete successful\")\n",
+					"\n",
+					"except Py4JJavaError as error :\n",
+					"    if 'org.apache.hadoop.fs.PathNotFoundException' in str (error.java_exception):\n",
+					"        print(\"No such file or directory\")"
+				],
+				"execution_count": 7
+			},
+			{
+				"cell_type": "code",
+				"metadata": {
+					"jupyter": {
+						"source_hidden": false,
+						"outputs_hidden": false
+					},
+					"nteract": {
+						"transient": {
+							"deleting": false
+						}
+					}
+				},
+				"source": [
+					"#Create Gold Table\n",
+					"spark.sql(f\"\"\"CREATE DATABASE IF NOT EXISTS {db_notebookname};\"\"\")\n",
+					"spark.sql(f\"\"\"\n",
+					"CREATE TABLE IF NOT EXISTS {db_notebookname}.{db_tablename}\n",
+					"(\n",
+					"    ReasonCodeId INT,\n",
+					"    ReasonCodeHashId STRING,\n",
+					"    Description STRING,\n",
+					"    DetailedDescription STRING\n",
+					")\n",
+					"USING delta\n",
+					"LOCATION 'abfss://{destination_container}@{destination_storage}.dfs.core.windows.net/{destination_path}/{db_tablename}'\n",
+					"\"\"\")"
+				],
+				"execution_count": 8
+			},
+			{
+				"cell_type": "code",
+				"metadata": {
+					"jupyter": {
+						"source_hidden": false,
+						"outputs_hidden": false
+					},
+					"nteract": {
+						"transient": {
+							"deleting": false
+						}
+					}
+				},
+				"source": [
+					"# Row count parameters\n",
+					"Gold_Insert_Pre=spark.sql(f\"\"\" SELECT COUNT(*) FROM {db_notebookname}.{db_tablename} \"\"\").collect()[0][0]"
+				],
+				"execution_count": 9
+			},
+			{
+				"cell_type": "code",
+				"metadata": {
+					"jupyter": {
+						"source_hidden": false,
+						"outputs_hidden": false
+					},
+					"nteract": {
+						"transient": {
+							"deleting": false
+						}
+					}
+				},
+				"source": [
+					"# Display\n",
+					"print(Gold_Insert_Pre)"
+				],
+				"execution_count": 10
+			},
+			{
+				"cell_type": "code",
+				"metadata": {
+					"jupyter": {
+						"source_hidden": false,
+						"outputs_hidden": false
+					},
+					"nteract": {
+						"transient": {
+							"deleting": false
+						}
+					}
+				},
+				"source": [
+					"#Create Data frame\n",
+					"from pyspark.sql.types import StructField, StructType, StringType, IntegerType\n",
+					"\n",
+					"# refrence\n",
+					"# Url: https://aemo.com.au/-/media/files/stakeholder_consultation/consultations/nem-consultations/2023/july-2023-retail-electricity-market-procedures-consultation/final/mdff-specification-nem12-nem13-v26-clean-final.pdf?la=en\n",
+					"# Section: Appendix E\n",
+					"reason_codes = [\n",
+					"        (0,\"Free text description\",\"For use in the case that other reason code descriptions cannot be reasonly utilised.\"),\n",
+					"        (1,\"Meter/equipment changed\",\"Where metering installation has changed.\"),\n",
+					"        (2,\"Extreme weather conditions\",\"Extreme weather conditions have prevented data collection.\"),\n",
+					"        (3,\"Quarantined weather conditions\",\"Premises under quarantine preventing access to metering installation.\"),\n",
+					"        (4,\"Dangerous dog\",\"Dog has been identified as posing an immediate hazard to metering installation process.\"),\n",
+					"        (5,\"Blank screen\",\"Electronic meter has blank display, could be powered off or faulty display but unable to determine.\"),\n",
+					"        (6,\"De-energised premises\",\"Blank screen on an electronic meter where the reader is able to determine that the site is de-en or an interval metered site where the MDP is providing substituted data for a site that is de-en but data streams are left active.\"),\n",
+					"        (7,\"Unable to locate meter\",\"The customer premises were found, but unable to locate the metering installation.\"),\n",
+					"        (8,\"Vacant premises\",\"Data collector believes the property is vacant.\"),\n",
+					"        (9,\"Under investiation\",\"An issue with the metering installation has been identified and is under investigation.\"),\n",
+					"        (10,\"Lock damaged unable to open\",\"Unable to open lock due to damage and the lock is preventing acces to the metering installation.\"),\n",
+					"        (11,\"In wrong route\",\"Unable to obtain access to metering installation being in the wrong route.\"),\n",
+					"        (12,\"Locked Premises\",\"Unable to obtain access to metering installation due to premises being locked.\"),\n",
+					"        (13,\"Locked gate\",\"Locked gate at premises is preventing access to metering installation.\"),\n",
+					"        (14,\"Locked meter box\",\"Locked meter box is preventing access to metering installation.\"),\n",
+					"        (15,\"Overgrown vegetation\",\"Overgrown vegetation at premises is preventing access to metering installation.\"),\n",
+					"        (16,\"Noxious weeds\",\"Noxious weeds at premises are preventing access to metering installation.\"),\n",
+					"        (17,\"Unsafe equipment/location\",\"The equipment or the location of the metering installation has been identified has been identified as unsafe (other than meter being high).\"),\n",
+					"        (18,\"Read less than previous\",\"Current read obtained is less than the previous read, no evidence of tampering and no reverse energy is observed.\"),\n",
+					"        (20,\"Damaged equipment/panel\",\"The equipment or the panel of the metering installation has been damaged but has not been identified as unsafe.\"),\n",
+					"        (21,\"Main switch off\",\"Blank screen on an electronic meter where the reader is able to determine that the main switch has been turned off or interval metered site where the MDP is providing substituted data for a site that the main switch is off but data streams are left active.\"),\n",
+					"        (22,\"Meter/equipment seals missing\",\"One or more seals are missing from the metering installation, no tampering has been identified.\"),\n",
+					"        (23,\"Reader error\",\"MDP identified that reading provided by the meter reader was incorrect.\"),\n",
+					"        (24,\"Substituted/replace data (data correction)\",\"Interval reading - MDP replaced erroneous data for specific intervals.\"),\n",
+					"        (25,\"Unable to locate premises\",\"Unable to locate premises.\"),\n",
+					"        (26,\"Negative consumption (generation)\",\"Basic meter where the previous reading is higher than the current reading, generally site will have generation.\"),\n",
+					"        (27,\"RoLR\",\"To be used when transferring customers as a result of a aemo_golder of Last Resort event.\"),\n",
+					"        (28,\"CT/VT fault\",\"MDP has corrected data due to a known instrument transformer (CT/VT) fault.\"),\n",
+					"        (29,\"Relay faulty/damaged\",\"Data collector has identified the relay device within the metering installation as faulty.\"),\n",
+					"        (31,\"Not all meteres read\",\"Readings for all meters linked to the premises have not been received by the MDP (typically as a result of a non-scheduled reading).\"),\n",
+					"        (32,\"Re-energised without readings\",\"Unable to obtain readings due to exceptional circumstances when the site is re-energsied outside of standard practise\"),\n",
+					"        (33,\"De-energised without readings\",\"Unable to obtain readings at the time of de-energisation including disconnection for non payment.\"),\n",
+					"        (34,\"Meter not in handheld\",\"Unexpected meter found on premises (new meter on premises or additional meter on premises).\"),\n",
+					"        (35,\"Timeswitch faulty/reset required\",\"Data collector has identified the time switching device within the metering installation is faulty and required resetting.\"),\n",
+					"        (36,\"Meter high/ladder required\",\"Meter in a high position requiring a ladder to obtain reading\"),\n",
+					"        (37,\"Meter under chum\",\"MDP has substituted data based on metering data not being received from relevant MDP.\"),\n",
+					"        (38,\"Unmarried lock\",\"Premises have two or more locks, one of which is a power industry lock and they have not been interlocked together correctly to allow access to premises.\"),\n",
+					"        (39,\"Reverse energy observed\",\"Reverse energy observed where site isn't expected to have the reverse energy.\"),\n",
+					"        (40,\"Unrestrained livestock\",\"Data collector observed that livestock is roaming free on the premises and could potentially be hazardous, or access wasn't obtained due to potential for livestock to escape.\"),\n",
+					"        (41,\"Faulty Meter display/dials\",\"Displays or dials on the meter are faulty and site is not de-energised nor is the display blank on an electronic meter.\"),\n",
+					"        (42,\"Channel added/removed\",\"MDP obtained metering data for a channel that has been added or substituted metering data where a channel has been removed but the data stream is still active is still active in MSATS.\"),\n",
+					"        (43,\"Power Outage\",\"Interval meter - intervals have been substituted due to power not being available at the metering installation.\"),\n",
+					"        (44,\"Meter testing\",\"MDP identifies meter has been under testing regime and has susbtituted data to reflect energy consumption values during testing period.\"),\n",
+					"        (45,\"Readings failed to validate\",\"Readings have been loaded into MDP's system, have failed validation and have been substituted.\"),\n",
+					"        (47,\"Refused access\",\"Customer refused to provide access when requested\"),\n",
+					"        (48,\"Dog on premises\",\"Data collector has identified that there is a dog on the premises but has been unable to determine if the dog is dangerous.\"),\n",
+					"        (51,\"Installation demolished\",\"Metering installation no longer exists at the premises.\"),\n",
+					"        (52,\"Access - blocked\",\"Used when there are items blocking safe access to the meter or premises.\"),\n",
+					"        (53,\"Pests in meter box\",\"Pests have been identified within the meter box that poses a risk to the meter data accuracy, safety of the installation or a hazard to the meter reader. \"),\n",
+					"        (54,\"Meter box damaged/faulty\",\"Data collector identifies that the meter box is damaged or faulty and the mechanical protection or weather proofing of the metering installation is compromised as a result.\"),\n",
+					"        (55,\"Dials obscured\",\"Data collector unable to obtain reading due to meter dials being obscured, meter face painted over, viewing panel in locked meter box with pvc panel misted over/fade/mouldy etc. No evidence of tampering.\"),\n",
+					"        (60,\"Illegal connection\",\"Data collector has identified that the premises has been illegally connected.\"),\n",
+					"        (61,\"Equipment tampered\",\"Data collector identified that the metering installation has been tampered with and the recording of energy consumption may have been affected as a result.\"),\n",
+					"        (62,\"NSRD window expired\",\"Where the NSRD window has expired and the data collector has been unable to deliver actual readings.\"),\n",
+					"        (64,\"Key required\",\"Data collector typically has access to the key but was unable to obtain/locate at the time of the reading.\"),\n",
+					"        (65,\"Wrong key provided\",\"Data collector has been provided with a key but the key no longer opens the lock.\"),\n",
+					"        (68,\"Zero consumption\",\"Where a site has known zero consumption and the site is not de-energised in MSATS but no energy is flowing to the meter.\"),\n",
+					"        (69,\"Reading exceeds substitute\",\"Re-substituted data that has been modified to improve the smoothing of energy to align with the next actual reading.\"),\n",
+					"        (71,\"Probe read error\",\"Data collector unable to read the meter due to the meter probe being unable to extract the metering data.\"),\n",
+					"        (72,\"Re-calculated based on actual reads\",\"MDP received actual reads and prior substitutes have been amended.\"),\n",
+					"        (74,\"High Consumption\",\"Reading failed validation as being too high based on historical consumption and has been either left as an actual or replaced by a substitute.\"),\n",
+					"        (75,\"Customer read\",\"Read provided to the MDP by the customer. (only applicable in jurisdictions where customer reads are allowed.).\"),\n",
+					"        (76,\"Communications fault\",\"Data collector attempted to read the meter but was unable due to not being able to remotely communicate with the meter.\"),\n",
+					"        (77,\"Estimation Forecast\",\"Optional reason code that can be applied to forward estimations.\"),\n",
+					"        (78,\"Null Data\",\"For interval meters where no data was received.\"),\n",
+					"        (79,\"Power outage Alarm\",\"For interval meters where a power outage has been detected by the meter.\"),\n",
+					"        (80,\"Short Interval Alarm\",\"For interval meters where the time in the meter is slow and has now been corrected, resulting in the interval consumption not being a full 15 or 30 minutes in length.\"),\n",
+					"        (81,\"Long Interval Alarm\",\"For interval meters where the time in the meter is fast and has now been corrected, resulting in the interval consumption not being a full 15 or 30 minutes in length.\"),\n",
+					"        (87,\"Reset occurred\",\"Resetting of the meter due to re-programming,change of tariff or firmware upgrade etc.\"),\n",
+					"        (89,\"Time reset occurred\",\"Where a time reset has occurred within the metering installation.\"),\n",
+					"        (19,\"Consumer wanted\",\"\"),\n",
+					"        (30,\"Meter stop switch on\",\"\"),\n",
+					"        (46,\"Extreme weather/hot\",\"\"),\n",
+					"        (49,\"Wet paint\",\"\"),\n",
+					"        (50,\"Wrong tariff\",\"\"),\n",
+					"        (58,\"Meter ok - supply failure\",\"\"),\n",
+					"        (70,\"Probe reports tampering\",\"\"),\n",
+					"        (82,\"CRC error\",\"\"),\n",
+					"        (83,\"RAM checksum error\",\"\"),\n",
+					"        (84,\"ROM checksum error\",\"\"),\n",
+					"        (85,\"Data missing alarm\",\"\"),\n",
+					"        (86,\"Clock error alarm\",\"\"),\n",
+					"        (88,\"Watchdog timeout alarm\",\"\"),\n",
+					"        (90,\"Test mode\",\"\"),\n",
+					"        (91,\"Load control\",\"\"),\n",
+					"        (92,\"Added interval (data correction)\",\"\"),\n",
+					"        (93,\"Replaced interval (data correction)\",\"\"),\n",
+					"        (94,\"Estimated interval (data correction)\",\"\"),\n",
+					"        (95,\"Pulse overflow alarm\",\"\"),\n",
+					"        (96,\"Data out of limits\",\"\"),\n",
+					"        (97,\"Excluded data\",\"\"),\n",
+					"        (98,\"Parity error\",\"\"),\n",
+					"        (99,\"Energy type (register changed)\",\"\"),\n",
+					"        (100, \"Incorrect Meter Multiplier\", \"For use when correcting data when the incorrect meter multiplier was originally applied\"),\n",
+					"        (101, \"Temporarily Connection Point unmetered\", \"For use when a connection point has been temporarily unmetered (eg mains by-pass)\"),\n",
+					"        (102, \"Customer By-Pass\", \"For use when the customer has by-passed the meter\"),\n",
+					"        (103, \"Network By-Pass\", \"For use when the Network by passed the meter to get supply to he customer because they believe the meter is faulty\"),\n",
+					"        (104, \"Transposed Channel\", \"For use when meter data streams have been transposed (eg ToU with controlled load)\"),\n",
+					"        (105, \"Transposed Channel - UoM Correction\", \"For use when data channels have been transposed (eg KWH with KVARH)\"),\n",
+					"        (106, \"Transposed Channel - Reverse Polarity\", \"For use when meter has been wired in reverse from install or where reverse polarity alarm occurs effectively swapping registration between export and import registers\"),\n",
+					"        (107, \"Transposed Meter\", \"For use when correcting data as a result of crossed meters\"),\n",
+					"        (108, \"Network by-pass extreme weather\", \"For use when the network by passed the meter to get supply to the customer because an extreme weather event has affected the meter\"),\n",
+					"        (109, \"Defined load method\", \"For use where Retailer/LNSP provide profile data based on off-market meter or other measured data that best represents the connection point load.\"),\n",
+					"        (None,\"No description\",\"No description\")\n",
+					"        ]\n",
+					"\n",
+					"schema_reason_code = StructType([\n",
+					"    StructField(\"ReasonCodeId\",IntegerType(),True),\n",
+					"    StructField(\"Description\",StringType(),True),\n",
+					"     StructField(\"DetailedDescription\",StringType(),True)\n",
+					"    ])\n",
+					"\n",
+					"df_gold = spark.createDataFrame(reason_codes, schema=schema_reason_code)\n",
+					"#df_reason_code.write.format(\"delta\").mode(\"overwrite\").option(\"mergeSchema\",\"true\").saveAsTable(\"DimReasonCode\")"
+				],
+				"execution_count": 11
+			},
+			{
+				"cell_type": "code",
+				"metadata": {
+					"jupyter": {
+						"source_hidden": false,
+						"outputs_hidden": false
+					},
+					"nteract": {
+						"transient": {
+							"deleting": false
+						}
+					}
+				},
+				"source": [
+					"# Add Hash columns\n",
+					"from pyspark.sql.functions import col, concat, lit, to_timestamp, to_date, when\n",
+					"from pyspark.sql.functions import sha2, concat_ws, regexp_replace\n",
+					"\n",
+					"df_gold = df_gold.withColumn(\"ReasonCodeHashId\", sha2(concat_ws(\"||\", \"ReasonCodeId\"), 256))"
+				],
+				"execution_count": 12
+			},
+			{
+				"cell_type": "code",
+				"metadata": {
+					"jupyter": {
+						"source_hidden": false,
+						"outputs_hidden": false
+					},
+					"nteract": {
+						"transient": {
+							"deleting": false
+						}
+					}
+				},
+				"source": [
+					"# Create a temporary view of the dataframe\n",
+					"df_gold.createOrReplaceTempView(f\"\"\"Gold_temp_{db_tablename}\"\"\")\n",
+					"\n",
+					"# Use insert operation to update the target table\n",
+					"spark.sql(f\"\"\"\n",
+					"            INSERT INTO {db_notebookname}.{db_tablename}\n",
+					"            SELECT      ReasonCodeId,\n",
+					"                        ReasonCodeHashId,\n",
+					"                        Description,\n",
+					"                        DetailedDescription\n",
+					"            FROM Gold_temp_{db_tablename}\n",
+					"        \"\"\")\n",
+					"\n",
+					"spark.sql(f\"\"\"\n",
+					"            DROP VIEW IF EXISTS Gold_temp_{db_tablename}\n",
+					"        \"\"\")"
+				],
+				"execution_count": 13
+			},
+			{
+				"cell_type": "code",
+				"metadata": {
+					"jupyter": {
+						"source_hidden": false,
+						"outputs_hidden": false
+					},
+					"nteract": {
+						"transient": {
+							"deleting": false
+						}
+					}
+				},
+				"source": [
+					"# Duplication count\n",
+					"Gold_duplicate_count= spark.sql(f\"\"\"\n",
+					"                                        SELECT sum(dCount)\n",
+					"                                        FROM (\n",
+					"                                                SELECT COUNT(ReasonCodeHashId) AS dCount FROM {db_notebookname}.{db_tablename}\n",
+					"                                                GROUP by ReasonCodeHashId\n",
+					"                                                HAVING COUNT(ReasonCodeHashId)>1 ) as subtb\n",
+					"                                    \n",
+					"                            \"\"\").collect()[0][0]\n",
+					"assert Gold_duplicate_count == None\n",
+					"print(Gold_duplicate_count)"
+				],
+				"execution_count": 14
+			},
+			{
+				"cell_type": "code",
+				"metadata": {
+					"jupyter": {
+						"source_hidden": false,
+						"outputs_hidden": false
+					},
+					"nteract": {
+						"transient": {
+							"deleting": false
+						}
+					}
+				},
+				"source": [
+					"# Write using AAD Auth to internal table\n",
+					"# Add required imports\n",
+					"import com.microsoft.spark.sqlanalytics\n",
+					"from com.microsoft.spark.sqlanalytics.Constants import Constants\n",
+					"\n",
+					"\n",
+					"#order columns for Azure Synapse insert should match synapse table creation order.\n",
+					"df_gold=df_gold.select(\"ReasonCodeId\", \"ReasonCodeHashId\", \"Description\", \"DetailedDescription\")\n",
+					"\n",
+					"# Configure and submit the request to write to Synapse Dedicated SQL Pool\n",
+					"# Sample below is using AAD-based authentication approach; See further examples to leverage SQL Basic auth.\n",
+					"(df_gold.write\n",
+					" # If `Constants.SERVER` is not provided, the `<database_name>` from the three-part table name argument\n",
+					" # to `synapsesql` method is used to infer the Synapse Dedicated SQL End Point.\n",
+					" .option(Constants.SERVER, f\"\"\"{SynapseDedicatedServer}\"\"\")\n",
+					" # Like-wise, if `Constants.TEMP_FOLDER` is not provided, the connector will use the runtime staging directory config (see section on Configuration Options for details).\n",
+					" .option(Constants.TEMP_FOLDER, (f\"\"\"abfss://temp@{TempFolder}/{db_tablename}\"\"\"))\n",
+					" # Choose a save mode that is apt for your use case.\n",
+					" # Options for save modes are \"error\" or \"errorifexists\" (default), \"overwrite\", \"append\", \"ignore\".\n",
+					" # refer to https://spark.apache.org/docs/latest/sql-data-sources-load-save-functions.html#save-modes\n",
+					" .mode(\"overwrite\")\n",
+					" # Required parameter - Three-part table name to which data will be written\n",
+					" .synapsesql(f\"\"\"{SynapseDedicatedDatabase}.dbo.{db_tablename}\"\"\"))"
+				],
+				"execution_count": 15
+			},
+			{
+				"cell_type": "code",
+				"metadata": {
+					"jupyter": {
+						"source_hidden": false,
+						"outputs_hidden": false
+					},
+					"nteract": {
+						"transient": {
+							"deleting": false
+						}
+					}
+				},
+				"source": [
+					"#Row count parameters\n",
+					"Gold_TotalRowCount_Post=spark.sql(f\"\"\" SELECT COUNT(*) FROM {db_notebookname}.{db_tablename}\"\"\").collect()[0][0]"
+				],
+				"execution_count": 16
+			},
+			{
+				"cell_type": "code",
+				"metadata": {
+					"jupyter": {
+						"source_hidden": false,
+						"outputs_hidden": false
+					},
+					"nteract": {
+						"transient": {
+							"deleting": false
+						}
+					}
+				},
+				"source": [
+					"#Row calculation\n",
+					"Gold_TotalRows = Gold_TotalRowCount_Post"
+				],
+				"execution_count": 17
+			},
+			{
+				"cell_type": "code",
+				"metadata": {
+					"jupyter": {
+						"source_hidden": false,
+						"outputs_hidden": false
+					},
+					"nteract": {
+						"transient": {
+							"deleting": false
+						}
+					}
+				},
+				"source": [
+					"# Display\n",
+					"print(Gold_TotalRows)"
+				],
+				"execution_count": 18
+			},
+			{
+				"cell_type": "code",
+				"metadata": {
+					"jupyter": {
+						"source_hidden": false,
+						"outputs_hidden": false
+					},
+					"nteract": {
+						"transient": {
+							"deleting": false
+						}
+					}
+				},
+				"source": [
+					"from pyspark.sql.types import StructType, StructField, StringType, IntegerType, BooleanType,DateType, DoubleType,TimestampType\n",
+					"\n",
+					"log_data = [(db_notebookname,db_tablename,Gold_LoadDate,Gold_TotalRows,0,0,Gold_TotalRows,Gold_TotalRows)]\n",
+					"print(log_data)\n",
+					"log_columns = ['PIPELINE_NAME', 'TABLE_NAME', 'INGEST_DATETIME', 'INSERT','UPDATE','DELETE','ACTIVE_ROWS','TOTAL_ROWS']\n",
+					"df_log = spark.createDataFrame(log_data, log_columns)\n",
+					"#display(df_test)"
+				],
+				"execution_count": 19
+			},
+			{
+				"cell_type": "code",
+				"metadata": {
+					"jupyter": {
+						"source_hidden": false,
+						"outputs_hidden": false
+					},
+					"nteract": {
+						"transient": {
+							"deleting": false
+						}
+					}
+				},
+				"source": [
+					"#Write to controldb\n",
+					"import json\n",
+					"db_port = 1433\n",
+					"linked_service_name = \"LS_SQL_ELTFrameworkDB\"\n",
+					"linkedServiceProperties = json.loads(mssparkutils.credentials.getPropertiesAll(linked_service_name))\n",
+					"sql_server_name = linkedServiceProperties.get('Endpoint')\n",
+					"db_name = linkedServiceProperties.get('Database')\n",
+					"access_token = mssparkutils.credentials.getConnectionStringOrCreds(linked_service_name)\n",
+					"write_table_name = \"[CTL].[CFG_INGESTION_LOGS]\"\n",
+					"\n",
+					"try:\n",
+					"    df_log.write.format(\"jdbc\") \\\n",
+					"        .option(\"url\", \"jdbc:sqlserver://%s:%s\" % (sql_server_name, db_port)) \\\n",
+					"        .option(\"dbtable\", write_table_name) \\\n",
+					"        .option(\"accessToken\", access_token) \\\n",
+					"        .option(\"encrypt\", \"true\") \\\n",
+					"        .option(\"databaseName\", db_name) \\\n",
+					"        .option(\"hostNameInCertificate\", \"*.database.windows.net\") \\\n",
+					"        .mode(\"append\") \\\n",
+					"        .save()\n",
+					"except ValueError as error :\n",
+					"    print(\"MSSQL Connector write failed\", error)\n",
+					"\n",
+					"print(\"MSSQL Connector write(append) succeeded  \")"
+				],
+				"execution_count": 20
+			},
+			{
+				"cell_type": "markdown",
+				"metadata": {
+					"nteract": {
+						"transient": {
+							"deleting": false
+						}
+					}
+				},
+				"source": [
+					"# Table DimReasoncode: END"
+				]
+			},
+			{
+				"cell_type": "markdown",
+				"metadata": {
+					"nteract": {
+						"transient": {
+							"deleting": false
+						}
+					}
+				},
+				"source": [
+					"# Table DimFinalReasoncode: START"
+				]
+			},
+			{
+				"cell_type": "code",
+				"metadata": {
+					"jupyter": {
+						"source_hidden": false,
+						"outputs_hidden": false
+					},
+					"nteract": {
+						"transient": {
+							"deleting": false
+						}
+					}
+				},
+				"source": [
+					"#Set table name\n",
+					"db_tablename=\"DimFinalReasoncode\""
+				],
+				"execution_count": 21
+			},
+			{
+				"cell_type": "code",
+				"metadata": {
+					"jupyter": {
+						"source_hidden": false,
+						"outputs_hidden": false
+					},
+					"nteract": {
+						"transient": {
+							"deleting": false
+						}
+					}
+				},
+				"source": [
+					"# Drop table and storage folder if exists\n",
+					"from py4j.protocol import Py4JJavaError\n",
+					"\n",
+					"spark.sql(f\"\"\"DROP TABLE IF EXISTS {db_notebookname}.{db_tablename}\"\"\")\n",
+					"\n",
+					"try:\n",
+					"    raw_output_path = f\"abfss://{destination_container}@{destination_storage}.dfs.core.windows.net/{destination_path}/{db_tablename}\"\n",
+					"    mssparkutils.fs.rm(raw_output_path,recurse=True)\n",
+					"\n",
+					"    print(\"Delete successful\")\n",
+					"\n",
+					"except Py4JJavaError as error :\n",
+					"    if 'org.apache.hadoop.fs.PathNotFoundException' in str (error.java_exception):\n",
+					"        print(\"No such file or directory\")"
+				],
+				"execution_count": 22
+			},
+			{
+				"cell_type": "code",
+				"metadata": {
+					"jupyter": {
+						"source_hidden": false,
+						"outputs_hidden": false
+					},
+					"nteract": {
+						"transient": {
+							"deleting": false
+						}
+					}
+				},
+				"source": [
+					"#Create Gold Table\n",
+					"spark.sql(f\"\"\"CREATE DATABASE IF NOT EXISTS {db_notebookname};\"\"\")\n",
+					"spark.sql(f\"\"\"\n",
+					"CREATE TABLE IF NOT EXISTS {db_notebookname}.{db_tablename}\n",
+					"(\n",
+					"    ReasoncodeId INT,\n",
+					"    FinalReasoncodeHashId STRING,\n",
+					"    Description STRING,\n",
+					"    DetailedDescription STRING\n",
+					")\n",
+					"USING delta\n",
+					"LOCATION 'abfss://{destination_container}@{destination_storage}.dfs.core.windows.net/{destination_path}/{db_tablename}'\n",
+					"\"\"\")"
+				],
+				"execution_count": 23
+			},
+			{
+				"cell_type": "code",
+				"metadata": {
+					"jupyter": {
+						"source_hidden": false,
+						"outputs_hidden": false
+					},
+					"nteract": {
+						"transient": {
+							"deleting": false
+						}
+					}
+				},
+				"source": [
+					"# Row count parameters\n",
+					"Gold_Insert_Pre=spark.sql(f\"\"\" SELECT COUNT(*) FROM {db_notebookname}.{db_tablename} \"\"\").collect()[0][0]"
+				],
+				"execution_count": 24
+			},
+			{
+				"cell_type": "code",
+				"metadata": {
+					"jupyter": {
+						"source_hidden": false,
+						"outputs_hidden": false
+					},
+					"nteract": {
+						"transient": {
+							"deleting": false
+						}
+					}
+				},
+				"source": [
+					"# Display\n",
+					"print(Gold_Insert_Pre)"
+				],
+				"execution_count": 25
+			},
+			{
+				"cell_type": "code",
+				"metadata": {
+					"jupyter": {
+						"source_hidden": false,
+						"outputs_hidden": false
+					},
+					"nteract": {
+						"transient": {
+							"deleting": false
+						}
+					}
+				},
+				"source": [
+					"#Create Data frame\n",
+					"# reason_codes data comming from ReasonCode\n",
+					"from pyspark.sql.types import StructField, StructType, StringType, IntegerType\n",
+					"\n",
+					"schema_reason_code = StructType([\n",
+					"    StructField(\"ReasonCodeId\",IntegerType(),True),\n",
+					"    StructField(\"Description\",StringType(),True),\n",
+					"     StructField(\"DetailedDescription\",StringType(),True)\n",
+					"    ])\n",
+					"\n",
+					"df_gold = spark.createDataFrame(reason_codes, schema=schema_reason_code)\n",
+					"#df_reason_code.write.format(\"delta\").mode(\"overwrite\").option(\"mergeSchema\",\"true\").saveAsTable(\"DimReasonCode\")"
+				],
+				"execution_count": 26
+			},
+			{
+				"cell_type": "code",
+				"metadata": {
+					"jupyter": {
+						"source_hidden": false,
+						"outputs_hidden": false
+					},
+					"nteract": {
+						"transient": {
+							"deleting": false
+						}
+					}
+				},
+				"source": [
+					"# Add Hash columns\n",
+					"from pyspark.sql.functions import col, concat, lit, to_timestamp, to_date, when\n",
+					"from pyspark.sql.functions import sha2, concat_ws, regexp_replace\n",
+					"\n",
+					"df_gold = df_gold.withColumn(\"FinalReasoncodeHashId\", sha2(concat_ws(\"||\", \"ReasonCodeId\"), 256))"
+				],
+				"execution_count": 27
+			},
+			{
+				"cell_type": "code",
+				"metadata": {
+					"jupyter": {
+						"source_hidden": false,
+						"outputs_hidden": false
+					},
+					"nteract": {
+						"transient": {
+							"deleting": false
+						}
+					}
+				},
+				"source": [
+					"# Create a temporary view of the dataframe\n",
+					"# df_gold which is created in previous for ReasonCode table\n",
+					"df_gold.createOrReplaceTempView(f\"\"\"Gold_temp_{db_tablename}\"\"\")\n",
+					"\n",
+					"# Use insert operation to update the target table\n",
+					"spark.sql(f\"\"\"\n",
+					"    INSERT INTO {db_notebookname}.{db_tablename}\n",
+					"    SELECT      ReasonCodeId,\n",
+					"                FinalReasoncodeHashId,\n",
+					"                Description,\n",
+					"                DetailedDescription\n",
+					"    FROM Gold_temp_{db_tablename}\n",
+					"\"\"\")\n",
+					"\n",
+					"spark.sql(f\"\"\"\n",
+					"            DROP VIEW IF EXISTS Gold_temp_{db_tablename}\n",
+					"        \"\"\")"
+				],
+				"execution_count": 28
+			},
+			{
+				"cell_type": "code",
+				"metadata": {
+					"jupyter": {
+						"source_hidden": false,
+						"outputs_hidden": false
+					},
+					"nteract": {
+						"transient": {
+							"deleting": false
+						}
+					}
+				},
+				"source": [
+					"# Duplication count\n",
+					"Gold_duplicate_count= spark.sql(f\"\"\"\n",
+					"                                        SELECT sum(dCount)\n",
+					"                                        FROM (\n",
+					"                                                SELECT COUNT(FinalReasoncodeHashId) AS dCount FROM {db_notebookname}.{db_tablename}\n",
+					"                                                GROUP by FinalReasoncodeHashId\n",
+					"                                                HAVING COUNT(FinalReasoncodeHashId)>1 ) as subtb\n",
+					"                                    \n",
+					"                            \"\"\").collect()[0][0]\n",
+					"\n",
+					"assert Gold_duplicate_count == None\n",
+					"print(Gold_duplicate_count)"
+				],
+				"execution_count": 29
+			},
+			{
+				"cell_type": "code",
+				"metadata": {
+					"jupyter": {
+						"source_hidden": false,
+						"outputs_hidden": false
+					},
+					"nteract": {
+						"transient": {
+							"deleting": false
+						}
+					}
+				},
+				"source": [
+					"# Write using AAD Auth to internal table\n",
+					"# Add required imports\n",
+					"import com.microsoft.spark.sqlanalytics\n",
+					"from com.microsoft.spark.sqlanalytics.Constants import Constants\n",
+					"\n",
+					"\n",
+					"#order columns for Azure Synapse insert should match synapse table creation order.\n",
+					"df_gold=df_gold.select(\"ReasonCodeId\", \"FinalReasoncodeHashId\", \"Description\", \"DetailedDescription\")\n",
+					"\n",
+					"# Configure and submit the request to write to Synapse Dedicated SQL Pool\n",
+					"# Sample below is using AAD-based authentication approach; See further examples to leverage SQL Basic auth.\n",
+					"(df_gold.write\n",
+					" # If `Constants.SERVER` is not provided, the `<database_name>` from the three-part table name argument\n",
+					" # to `synapsesql` method is used to infer the Synapse Dedicated SQL End Point.\n",
+					" .option(Constants.SERVER, f\"\"\"{SynapseDedicatedServer}\"\"\")\n",
+					" # Like-wise, if `Constants.TEMP_FOLDER` is not provided, the connector will use the runtime staging directory config (see section on Configuration Options for details).\n",
+					" .option(Constants.TEMP_FOLDER, (f\"\"\"abfss://temp@{TempFolder}/{db_tablename}\"\"\"))\n",
+					" # Choose a save mode that is apt for your use case.\n",
+					" # Options for save modes are \"error\" or \"errorifexists\" (default), \"overwrite\", \"append\", \"ignore\".\n",
+					" # refer to https://spark.apache.org/docs/latest/sql-data-sources-load-save-functions.html#save-modes\n",
+					" .mode(\"overwrite\")\n",
+					" # Required parameter - Three-part table name to which data will be written\n",
+					" .synapsesql(f\"\"\"{SynapseDedicatedDatabase}.dbo.{db_tablename}\"\"\"))"
+				],
+				"execution_count": 30
+			},
+			{
+				"cell_type": "code",
+				"metadata": {
+					"jupyter": {
+						"source_hidden": false,
+						"outputs_hidden": false
+					},
+					"nteract": {
+						"transient": {
+							"deleting": false
+						}
+					}
+				},
+				"source": [
+					"#Row count parameters\n",
+					"Gold_TotalRowCount_Post=spark.sql(f\"\"\" SELECT COUNT(*) FROM {db_notebookname}.{db_tablename}\"\"\").collect()[0][0]"
+				],
+				"execution_count": 31
+			},
+			{
+				"cell_type": "code",
+				"metadata": {
+					"jupyter": {
+						"source_hidden": false,
+						"outputs_hidden": false
+					},
+					"nteract": {
+						"transient": {
+							"deleting": false
+						}
+					}
+				},
+				"source": [
+					"#Row calculation\n",
+					"Gold_TotalRows = Gold_TotalRowCount_Post"
+				],
+				"execution_count": 32
+			},
+			{
+				"cell_type": "code",
+				"metadata": {
+					"jupyter": {
+						"source_hidden": false,
+						"outputs_hidden": false
+					},
+					"nteract": {
+						"transient": {
+							"deleting": false
+						}
+					}
+				},
+				"source": [
+					"# Display\n",
+					"print(Gold_TotalRows)"
+				],
+				"execution_count": 33
+			},
+			{
+				"cell_type": "code",
+				"metadata": {
+					"jupyter": {
+						"source_hidden": false,
+						"outputs_hidden": false
+					},
+					"nteract": {
+						"transient": {
+							"deleting": false
+						}
+					}
+				},
+				"source": [
+					"from pyspark.sql.types import StructType, StructField, StringType, IntegerType, BooleanType,DateType, DoubleType,TimestampType\n",
+					"\n",
+					"log_data = [(db_notebookname,db_tablename,Gold_LoadDate,Gold_TotalRows,0,0,Gold_TotalRows,Gold_TotalRows)]\n",
+					"print(log_data)\n",
+					"log_columns = ['PIPELINE_NAME', 'TABLE_NAME', 'INGEST_DATETIME', 'INSERT','UPDATE','DELETE','ACTIVE_ROWS','TOTAL_ROWS']\n",
+					"df_log = spark.createDataFrame(log_data, log_columns)\n",
+					"#display(df_test)"
+				],
+				"execution_count": 34
+			},
+			{
+				"cell_type": "code",
+				"metadata": {
+					"jupyter": {
+						"source_hidden": false,
+						"outputs_hidden": false
+					},
+					"nteract": {
+						"transient": {
+							"deleting": false
+						}
+					}
+				},
+				"source": [
+					"#Write to controldb\n",
+					"import json\n",
+					"db_port = 1433\n",
+					"linked_service_name = \"LS_SQL_ELTFrameworkDB\"\n",
+					"linkedServiceProperties = json.loads(mssparkutils.credentials.getPropertiesAll(linked_service_name))\n",
+					"sql_server_name = linkedServiceProperties.get('Endpoint')\n",
+					"db_name = linkedServiceProperties.get('Database')\n",
+					"access_token = mssparkutils.credentials.getConnectionStringOrCreds(linked_service_name)\n",
+					"write_table_name = \"[CTL].[CFG_INGESTION_LOGS]\"\n",
+					"\n",
+					"try:\n",
+					"    df_log.write.format(\"jdbc\") \\\n",
+					"        .option(\"url\", \"jdbc:sqlserver://%s:%s\" % (sql_server_name, db_port)) \\\n",
+					"        .option(\"dbtable\", write_table_name) \\\n",
+					"        .option(\"accessToken\", access_token) \\\n",
+					"        .option(\"encrypt\", \"true\") \\\n",
+					"        .option(\"databaseName\", db_name) \\\n",
+					"        .option(\"hostNameInCertificate\", \"*.database.windows.net\") \\\n",
+					"        .mode(\"append\") \\\n",
+					"        .save()\n",
+					"except ValueError as error :\n",
+					"    print(\"MSSQL Connector write failed\", error)\n",
+					"\n",
+					"print(\"MSSQL Connector write(append) succeeded  \")"
+				],
+				"execution_count": 35
+			},
+			{
+				"cell_type": "markdown",
+				"metadata": {
+					"nteract": {
+						"transient": {
+							"deleting": false
+						}
+					}
+				},
+				"source": [
+					"# Table DimFinalReasoncode: END"
+				]
+			},
+			{
+				"cell_type": "markdown",
+				"metadata": {
+					"nteract": {
+						"transient": {
+							"deleting": false
+						}
+					}
+				},
+				"source": [
+					"# Table DimQualityFlag: START"
+				]
+			},
+			{
+				"cell_type": "code",
+				"metadata": {
+					"jupyter": {
+						"source_hidden": false,
+						"outputs_hidden": false
+					},
+					"nteract": {
+						"transient": {
+							"deleting": false
+						}
+					}
+				},
+				"source": [
+					"#Set table name\n",
+					"db_tablename=\"DimQualityFlag\""
+				],
+				"execution_count": 36
+			},
+			{
+				"cell_type": "code",
+				"metadata": {
+					"jupyter": {
+						"source_hidden": false,
+						"outputs_hidden": false
+					},
+					"nteract": {
+						"transient": {
+							"deleting": false
+						}
+					}
+				},
+				"source": [
+					"# Drop table and storage folder if exists\n",
+					"from py4j.protocol import Py4JJavaError\n",
+					"\n",
+					"spark.sql(f\"\"\"DROP TABLE IF EXISTS {db_notebookname}.{db_tablename}\"\"\")\n",
+					"\n",
+					"try:\n",
+					"    raw_output_path = f\"abfss://{destination_container}@{destination_storage}.dfs.core.windows.net/{destination_path}/{db_tablename}\"\n",
+					"    mssparkutils.fs.rm(raw_output_path,recurse=True)\n",
+					"\n",
+					"    print(\"Delete successful\")\n",
+					"\n",
+					"except Py4JJavaError as error :\n",
+					"    if 'org.apache.hadoop.fs.PathNotFoundException' in str (error.java_exception):\n",
+					"        print(\"No such file or directory\")"
+				],
+				"execution_count": 37
+			},
+			{
+				"cell_type": "code",
+				"metadata": {
+					"jupyter": {
+						"source_hidden": false,
+						"outputs_hidden": false
+					},
+					"nteract": {
+						"transient": {
+							"deleting": false
+						}
+					}
+				},
+				"source": [
+					"#Create Gold Table\n",
+					"spark.sql(f\"\"\"CREATE DATABASE IF NOT EXISTS {db_notebookname};\"\"\")\n",
+					"spark.sql(f\"\"\"\n",
+					"CREATE TABLE IF NOT EXISTS {db_notebookname}.{db_tablename}\n",
+					"(\n",
+					"    QualityFlagId STRING,\n",
+					"    QualityFlagHashId STRING,\n",
+					"    Description STRING\n",
+					")\n",
+					"USING delta\n",
+					"LOCATION 'abfss://{destination_container}@{destination_storage}.dfs.core.windows.net/{destination_path}/{db_tablename}'\n",
+					"\"\"\")"
+				],
+				"execution_count": 38
+			},
+			{
+				"cell_type": "code",
+				"metadata": {
+					"jupyter": {
+						"source_hidden": false,
+						"outputs_hidden": false
+					},
+					"nteract": {
+						"transient": {
+							"deleting": false
+						}
+					}
+				},
+				"source": [
+					"# Row count parameters\n",
+					"Gold_Insert_Pre=spark.sql(f\"\"\" SELECT COUNT(*) FROM {db_notebookname}.{db_tablename} \"\"\").collect()[0][0]"
+				],
+				"execution_count": 39
+			},
+			{
+				"cell_type": "code",
+				"metadata": {
+					"jupyter": {
+						"source_hidden": false,
+						"outputs_hidden": false
+					},
+					"nteract": {
+						"transient": {
+							"deleting": false
+						}
+					}
+				},
+				"source": [
+					"# Display\n",
+					"print(Gold_Insert_Pre)"
+				],
+				"execution_count": 40
+			},
+			{
+				"cell_type": "code",
+				"metadata": {
+					"jupyter": {
+						"source_hidden": false,
+						"outputs_hidden": false
+					},
+					"nteract": {
+						"transient": {
+							"deleting": false
+						}
+					}
+				},
+				"source": [
+					"#Create Data frame\n",
+					"from pyspark.sql.types import StructField, StructType, StringType, IntegerType\n",
+					"\n",
+					"# refrence\n",
+					"# Url: https://aemo.com.au/-/media/files/electricity/nem/retail_and_metering/metering-procedures/2017/mdff_specification_nem12_nem13_final_v102.pdf\n",
+					"# Section: Appendix c\n",
+					"quality_flag = [\n",
+					"        (\"A\",\"Actual data\"),\n",
+					"        (\"E\",\"Forward estimated data\"),\n",
+					"        (\"F\",\"Final substituted data\"),\n",
+					"        (\"N\",\"Null data\"),\n",
+					"        (\"S\",\"Substituted data\"),\n",
+					"        (\"V\",\"Variable data\"),\n",
+					"        (None, \"No description\")\n",
+					"        ]\n",
+					"\n",
+					"schema_quality_methods = StructType([\n",
+					"    StructField(\"QualityFlagId\",StringType(),True),\n",
+					"    StructField(\"Description\",StringType(),True),\n",
+					"])\n",
+					"\n",
+					"df_gold = spark.createDataFrame(quality_flag, schema=schema_quality_methods)"
+				],
+				"execution_count": 41
+			},
+			{
+				"cell_type": "code",
+				"metadata": {
+					"jupyter": {
+						"source_hidden": false,
+						"outputs_hidden": false
+					},
+					"nteract": {
+						"transient": {
+							"deleting": false
+						}
+					},
+					"collapsed": false
+				},
+				"source": [
+					"# Add Hash columns\n",
+					"from pyspark.sql.functions import col, concat, lit, to_timestamp, to_date, when\n",
+					"from pyspark.sql.functions import sha2, concat_ws, regexp_replace\n",
+					"\n",
+					"df_gold = df_gold.withColumn(\"QualityFlagHashId\", sha2(concat_ws(\"||\", \"QualityFlagId\"), 256))"
+				],
+				"execution_count": 42
+			},
+			{
+				"cell_type": "code",
+				"metadata": {
+					"jupyter": {
+						"source_hidden": false,
+						"outputs_hidden": false
+					},
+					"nteract": {
+						"transient": {
+							"deleting": false
+						}
+					}
+				},
+				"source": [
+					"# Create a temporary view of the dataframe\n",
+					"# df_gold which is created in previous for ReasonCode table\n",
+					"df_gold.createOrReplaceTempView(f\"\"\"Gold_temp_{db_tablename}\"\"\")\n",
+					"\n",
+					"# Use insert operation to update the target table\n",
+					"spark.sql(f\"\"\"\n",
+					"    INSERT INTO {db_notebookname}.{db_tablename}\n",
+					"    SELECT      QualityFlagId,\n",
+					"                QualityFlagHashId,\n",
+					"                Description\n",
+					"    FROM Gold_temp_{db_tablename}\n",
+					"\"\"\")\n",
+					"\n",
+					"spark.sql(f\"\"\"\n",
+					"            DROP VIEW IF EXISTS Gold_temp_{db_tablename}\n",
+					"        \"\"\")"
+				],
+				"execution_count": 43
+			},
+			{
+				"cell_type": "code",
+				"metadata": {
+					"jupyter": {
+						"source_hidden": false,
+						"outputs_hidden": false
+					},
+					"nteract": {
+						"transient": {
+							"deleting": false
+						}
+					}
+				},
+				"source": [
+					"# Duplication count\n",
+					"Gold_duplicate_count= spark.sql(f\"\"\"\n",
+					"                                        SELECT sum(dCount)\n",
+					"                                        FROM (\n",
+					"                                                SELECT COUNT(QualityFlagHashId) AS dCount FROM {db_notebookname}.{db_tablename}\n",
+					"                                                GROUP by QualityFlagHashId\n",
+					"                                                HAVING COUNT(QualityFlagHashId)>1 ) as subtb\n",
+					"                                    \n",
+					"                            \"\"\").collect()[0][0]\n",
+					"\n",
+					"assert Gold_duplicate_count == None\n",
+					"print(Gold_duplicate_count)"
+				],
+				"execution_count": 44
+			},
+			{
+				"cell_type": "code",
+				"metadata": {
+					"jupyter": {
+						"source_hidden": false,
+						"outputs_hidden": false
+					},
+					"nteract": {
+						"transient": {
+							"deleting": false
+						}
+					}
+				},
+				"source": [
+					"# Write using AAD Auth to internal table\n",
+					"# Add required imports\n",
+					"import com.microsoft.spark.sqlanalytics\n",
+					"from com.microsoft.spark.sqlanalytics.Constants import Constants\n",
+					"\n",
+					"\n",
+					"#order columns for Azure Synapse insert should match synapse table creation order.\n",
+					"df_gold=df_gold.select(\"QualityFlagId\", \"QualityFlagHashId\", \"Description\")\n",
+					"\n",
+					"# Configure and submit the request to write to Synapse Dedicated SQL Pool\n",
+					"# Sample below is using AAD-based authentication approach; See further examples to leverage SQL Basic auth.\n",
+					"(df_gold.write\n",
+					" # If `Constants.SERVER` is not provided, the `<database_name>` from the three-part table name argument\n",
+					" # to `synapsesql` method is used to infer the Synapse Dedicated SQL End Point.\n",
+					" .option(Constants.SERVER, f\"\"\"{SynapseDedicatedServer}\"\"\")\n",
+					" # Like-wise, if `Constants.TEMP_FOLDER` is not provided, the connector will use the runtime staging directory config (see section on Configuration Options for details).\n",
+					" .option(Constants.TEMP_FOLDER, (f\"\"\"abfss://temp@{TempFolder}/{db_tablename}\"\"\"))\n",
+					" # Choose a save mode that is apt for your use case.\n",
+					" # Options for save modes are \"error\" or \"errorifexists\" (default), \"overwrite\", \"append\", \"ignore\".\n",
+					" # refer to https://spark.apache.org/docs/latest/sql-data-sources-load-save-functions.html#save-modes\n",
+					" .mode(\"overwrite\")\n",
+					" # Required parameter - Three-part table name to which data will be written\n",
+					" .synapsesql(f\"\"\"{SynapseDedicatedDatabase}.dbo.{db_tablename}\"\"\"))"
+				],
+				"execution_count": 45
+			},
+			{
+				"cell_type": "code",
+				"metadata": {
+					"jupyter": {
+						"source_hidden": false,
+						"outputs_hidden": false
+					},
+					"nteract": {
+						"transient": {
+							"deleting": false
+						}
+					}
+				},
+				"source": [
+					"#Row count parameters\n",
+					"Gold_TotalRowCount_Post=spark.sql(f\"\"\" SELECT COUNT(*) FROM {db_notebookname}.{db_tablename}\"\"\").collect()[0][0]"
+				],
+				"execution_count": 46
+			},
+			{
+				"cell_type": "code",
+				"metadata": {
+					"jupyter": {
+						"source_hidden": false,
+						"outputs_hidden": false
+					},
+					"nteract": {
+						"transient": {
+							"deleting": false
+						}
+					}
+				},
+				"source": [
+					"#Row calculation\n",
+					"Gold_TotalRows = Gold_TotalRowCount_Post"
+				],
+				"execution_count": 47
+			},
+			{
+				"cell_type": "code",
+				"metadata": {
+					"jupyter": {
+						"source_hidden": false,
+						"outputs_hidden": false
+					},
+					"nteract": {
+						"transient": {
+							"deleting": false
+						}
+					}
+				},
+				"source": [
+					"# Display\n",
+					"print(Gold_TotalRows)"
+				],
+				"execution_count": 48
+			},
+			{
+				"cell_type": "code",
+				"metadata": {
+					"jupyter": {
+						"source_hidden": false,
+						"outputs_hidden": false
+					},
+					"nteract": {
+						"transient": {
+							"deleting": false
+						}
+					}
+				},
+				"source": [
+					"from pyspark.sql.types import StructType, StructField, StringType, IntegerType, BooleanType,DateType, DoubleType,TimestampType\n",
+					"\n",
+					"log_data = [(db_notebookname,db_tablename,Gold_LoadDate,Gold_TotalRows,0,0,Gold_TotalRows,Gold_TotalRows)]\n",
+					"print(log_data)\n",
+					"log_columns = ['PIPELINE_NAME', 'TABLE_NAME', 'INGEST_DATETIME', 'INSERT','UPDATE','DELETE','ACTIVE_ROWS','TOTAL_ROWS']\n",
+					"df_log = spark.createDataFrame(log_data, log_columns)\n",
+					"#display(df_test)"
+				],
+				"execution_count": 49
+			},
+			{
+				"cell_type": "code",
+				"metadata": {
+					"jupyter": {
+						"source_hidden": false,
+						"outputs_hidden": false
+					},
+					"nteract": {
+						"transient": {
+							"deleting": false
+						}
+					}
+				},
+				"source": [
+					"#Write to controldb\n",
+					"import json\n",
+					"db_port = 1433\n",
+					"linked_service_name = \"LS_SQL_ELTFrameworkDB\"\n",
+					"linkedServiceProperties = json.loads(mssparkutils.credentials.getPropertiesAll(linked_service_name))\n",
+					"sql_server_name = linkedServiceProperties.get('Endpoint')\n",
+					"db_name = linkedServiceProperties.get('Database')\n",
+					"access_token = mssparkutils.credentials.getConnectionStringOrCreds(linked_service_name)\n",
+					"write_table_name = \"[CTL].[CFG_INGESTION_LOGS]\"\n",
+					"\n",
+					"try:\n",
+					"    df_log.write.format(\"jdbc\") \\\n",
+					"        .option(\"url\", \"jdbc:sqlserver://%s:%s\" % (sql_server_name, db_port)) \\\n",
+					"        .option(\"dbtable\", write_table_name) \\\n",
+					"        .option(\"accessToken\", access_token) \\\n",
+					"        .option(\"encrypt\", \"true\") \\\n",
+					"        .option(\"databaseName\", db_name) \\\n",
+					"        .option(\"hostNameInCertificate\", \"*.database.windows.net\") \\\n",
+					"        .mode(\"append\") \\\n",
+					"        .save()\n",
+					"except ValueError as error :\n",
+					"    print(\"MSSQL Connector write failed\", error)\n",
+					"\n",
+					"print(\"MSSQL Connector write(append) succeeded  \")"
+				],
+				"execution_count": 50
+			},
+			{
+				"cell_type": "markdown",
+				"metadata": {
+					"nteract": {
+						"transient": {
+							"deleting": false
+						}
+					}
+				},
+				"source": [
+					"# Table DimQualityFlag: END"
+				]
+			},
+			{
+				"cell_type": "markdown",
+				"metadata": {
+					"nteract": {
+						"transient": {
+							"deleting": false
+						}
+					}
+				},
+				"source": [
+					"# Table DimFinalQualityFlag: START"
+				]
+			},
+			{
+				"cell_type": "code",
+				"metadata": {
+					"jupyter": {
+						"source_hidden": false,
+						"outputs_hidden": false
+					},
+					"nteract": {
+						"transient": {
+							"deleting": false
+						}
+					}
+				},
+				"source": [
+					"#Set table name\n",
+					"db_tablename=\"DimFinalQualityFlag\""
+				],
+				"execution_count": 51
+			},
+			{
+				"cell_type": "code",
+				"metadata": {
+					"jupyter": {
+						"source_hidden": false,
+						"outputs_hidden": false
+					},
+					"nteract": {
+						"transient": {
+							"deleting": false
+						}
+					}
+				},
+				"source": [
+					"# Drop table and storage folder if exists\n",
+					"from py4j.protocol import Py4JJavaError\n",
+					"\n",
+					"spark.sql(f\"\"\"DROP TABLE IF EXISTS {db_notebookname}.{db_tablename}\"\"\")\n",
+					"\n",
+					"try:\n",
+					"    raw_output_path = f\"abfss://{destination_container}@{destination_storage}.dfs.core.windows.net/{destination_path}/{db_tablename}\"\n",
+					"    mssparkutils.fs.rm(raw_output_path,recurse=True)\n",
+					"\n",
+					"    print(\"Delete successful\")\n",
+					"\n",
+					"except Py4JJavaError as error :\n",
+					"    if 'org.apache.hadoop.fs.PathNotFoundException' in str (error.java_exception):\n",
+					"        print(\"No such file or directory\")"
+				],
+				"execution_count": 52
+			},
+			{
+				"cell_type": "code",
+				"metadata": {
+					"jupyter": {
+						"source_hidden": false,
+						"outputs_hidden": false
+					},
+					"nteract": {
+						"transient": {
+							"deleting": false
+						}
+					}
+				},
+				"source": [
+					"#Create Gold Table\n",
+					"spark.sql(f\"\"\"CREATE DATABASE IF NOT EXISTS {db_notebookname};\"\"\")\n",
+					"spark.sql(f\"\"\"\n",
+					"CREATE TABLE IF NOT EXISTS {db_notebookname}.{db_tablename}\n",
+					"(\n",
+					"    QualityFlagId STRING,\n",
+					"    FinalQualityFlagHashId STRING,\n",
+					"    Description STRING\n",
+					")\n",
+					"USING delta\n",
+					"LOCATION 'abfss://{destination_container}@{destination_storage}.dfs.core.windows.net/{destination_path}/{db_tablename}'\n",
+					"\"\"\")"
+				],
+				"execution_count": 53
+			},
+			{
+				"cell_type": "code",
+				"metadata": {
+					"jupyter": {
+						"source_hidden": false,
+						"outputs_hidden": false
+					},
+					"nteract": {
+						"transient": {
+							"deleting": false
+						}
+					}
+				},
+				"source": [
+					"# Row count parameters\n",
+					"Gold_Insert_Pre=spark.sql(f\"\"\" SELECT COUNT(*) FROM {db_notebookname}.{db_tablename} \"\"\").collect()[0][0]"
+				],
+				"execution_count": 54
+			},
+			{
+				"cell_type": "code",
+				"metadata": {
+					"jupyter": {
+						"source_hidden": false,
+						"outputs_hidden": false
+					},
+					"nteract": {
+						"transient": {
+							"deleting": false
+						}
+					}
+				},
+				"source": [
+					"# Display\n",
+					"print(Gold_Insert_Pre)"
+				],
+				"execution_count": 55
+			},
+			{
+				"cell_type": "code",
+				"metadata": {
+					"jupyter": {
+						"source_hidden": false,
+						"outputs_hidden": false
+					},
+					"nteract": {
+						"transient": {
+							"deleting": false
+						}
+					}
+				},
+				"source": [
+					"#Create Data frame\n",
+					"# quality_methods \n",
+					"from pyspark.sql.types import StructField, StructType, StringType, IntegerType\n",
+					"\n",
+					"\n",
+					"schema_quality_methods = StructType([\n",
+					"    StructField(\"QualityFlagId\",StringType(),True),\n",
+					"    StructField(\"Description\",StringType(),True),\n",
+					"])\n",
+					"\n",
+					"df_gold = spark.createDataFrame(quality_flag, schema=schema_quality_methods)"
+				],
+				"execution_count": 56
+			},
+			{
+				"cell_type": "code",
+				"metadata": {
+					"jupyter": {
+						"source_hidden": false,
+						"outputs_hidden": false
+					},
+					"nteract": {
+						"transient": {
+							"deleting": false
+						}
+					}
+				},
+				"source": [
+					"# Add Hash columns\n",
+					"from pyspark.sql.functions import col, concat, lit, to_timestamp, to_date, when\n",
+					"from pyspark.sql.functions import sha2, concat_ws, regexp_replace\n",
+					"\n",
+					"df_gold = df_gold.withColumn(\"FinalQualityFlagHashId\", sha2(concat_ws(\"||\", \"QualityFlagId\"), 256))"
+				],
+				"execution_count": 57
+			},
+			{
+				"cell_type": "code",
+				"metadata": {
+					"jupyter": {
+						"source_hidden": false,
+						"outputs_hidden": false
+					},
+					"nteract": {
+						"transient": {
+							"deleting": false
+						}
+					}
+				},
+				"source": [
+					"# Create a temporary view of the dataframe\n",
+					"# df_gold which is created in previous for ReasonCode table\n",
+					"df_gold.createOrReplaceTempView(f\"\"\"Gold_temp_{db_tablename}\"\"\")\n",
+					"\n",
+					"# Use insert operation to update the target table\n",
+					"spark.sql(f\"\"\"\n",
+					"    INSERT INTO {db_notebookname}.{db_tablename}\n",
+					"    SELECT      QualityFlagId,\n",
+					"                FinalQualityFlagHashId,\n",
+					"                Description\n",
+					"    FROM Gold_temp_{db_tablename}\n",
+					"\"\"\")\n",
+					"\n",
+					"spark.sql(f\"\"\"\n",
+					"            DROP VIEW IF EXISTS Gold_temp_{db_tablename}\n",
+					"        \"\"\")"
+				],
+				"execution_count": 58
+			},
+			{
+				"cell_type": "code",
+				"metadata": {
+					"jupyter": {
+						"source_hidden": false,
+						"outputs_hidden": false
+					},
+					"nteract": {
+						"transient": {
+							"deleting": false
+						}
+					}
+				},
+				"source": [
+					"# Duplication count\n",
+					"Gold_duplicate_count= spark.sql(f\"\"\"\n",
+					"                                        SELECT sum(dCount)\n",
+					"                                        FROM (\n",
+					"                                                SELECT COUNT(FinalQualityFlagHashId) AS dCount FROM {db_notebookname}.{db_tablename}\n",
+					"                                                GROUP by FinalQualityFlagHashId\n",
+					"                                                HAVING COUNT(FinalQualityFlagHashId)>1 ) as subtb\n",
+					"                                    \n",
+					"                            \"\"\").collect()[0][0]\n",
+					"\n",
+					"assert Gold_duplicate_count == None\n",
+					"print(Gold_duplicate_count)"
+				],
+				"execution_count": 59
+			},
+			{
+				"cell_type": "code",
+				"metadata": {
+					"jupyter": {
+						"source_hidden": false,
+						"outputs_hidden": false
+					},
+					"nteract": {
+						"transient": {
+							"deleting": false
+						}
+					}
+				},
+				"source": [
+					"# Write using AAD Auth to internal table\n",
+					"# Add required imports\n",
+					"import com.microsoft.spark.sqlanalytics\n",
+					"from com.microsoft.spark.sqlanalytics.Constants import Constants\n",
+					"\n",
+					"\n",
+					"#order columns for Azure Synapse insert should match synapse table creation order.\n",
+					"df_gold=df_gold.select(\"QualityFlagId\", \"FinalQualityFlagHashId\", \"Description\")\n",
+					"\n",
+					"# Configure and submit the request to write to Synapse Dedicated SQL Pool\n",
+					"# Sample below is using AAD-based authentication approach; See further examples to leverage SQL Basic auth.\n",
+					"(df_gold.write\n",
+					" # If `Constants.SERVER` is not provided, the `<database_name>` from the three-part table name argument\n",
+					" # to `synapsesql` method is used to infer the Synapse Dedicated SQL End Point.\n",
+					" .option(Constants.SERVER, f\"\"\"{SynapseDedicatedServer}\"\"\")\n",
+					" # Like-wise, if `Constants.TEMP_FOLDER` is not provided, the connector will use the runtime staging directory config (see section on Configuration Options for details).\n",
+					" .option(Constants.TEMP_FOLDER, (f\"\"\"abfss://temp@{TempFolder}/{db_tablename}\"\"\"))\n",
+					" # Choose a save mode that is apt for your use case.\n",
+					" # Options for save modes are \"error\" or \"errorifexists\" (default), \"overwrite\", \"append\", \"ignore\".\n",
+					" # refer to https://spark.apache.org/docs/latest/sql-data-sources-load-save-functions.html#save-modes\n",
+					" .mode(\"overwrite\")\n",
+					" # Required parameter - Three-part table name to which data will be written\n",
+					" .synapsesql(f\"\"\"{SynapseDedicatedDatabase}.dbo.{db_tablename}\"\"\"))"
+				],
+				"execution_count": 60
+			},
+			{
+				"cell_type": "code",
+				"metadata": {
+					"jupyter": {
+						"source_hidden": false,
+						"outputs_hidden": false
+					},
+					"nteract": {
+						"transient": {
+							"deleting": false
+						}
+					}
+				},
+				"source": [
+					"#Row count parameters\n",
+					"Gold_TotalRowCount_Post=spark.sql(f\"\"\" SELECT COUNT(*) FROM {db_notebookname}.{db_tablename}\"\"\").collect()[0][0]"
+				],
+				"execution_count": 61
+			},
+			{
+				"cell_type": "code",
+				"metadata": {
+					"jupyter": {
+						"source_hidden": false,
+						"outputs_hidden": false
+					},
+					"nteract": {
+						"transient": {
+							"deleting": false
+						}
+					}
+				},
+				"source": [
+					"#Row calculation\n",
+					"Gold_TotalRows = Gold_TotalRowCount_Post"
+				],
+				"execution_count": 62
+			},
+			{
+				"cell_type": "code",
+				"metadata": {
+					"jupyter": {
+						"source_hidden": false,
+						"outputs_hidden": false
+					},
+					"nteract": {
+						"transient": {
+							"deleting": false
+						}
+					}
+				},
+				"source": [
+					"# Display\n",
+					"print(Gold_TotalRows)"
+				],
+				"execution_count": 63
+			},
+			{
+				"cell_type": "code",
+				"metadata": {
+					"jupyter": {
+						"source_hidden": false,
+						"outputs_hidden": false
+					},
+					"nteract": {
+						"transient": {
+							"deleting": false
+						}
+					}
+				},
+				"source": [
+					"from pyspark.sql.types import StructType, StructField, StringType, IntegerType, BooleanType,DateType, DoubleType,TimestampType\n",
+					"\n",
+					"log_data = [(db_notebookname,db_tablename,Gold_LoadDate,Gold_TotalRows,0,0,Gold_TotalRows,Gold_TotalRows)]\n",
+					"print(log_data)\n",
+					"log_columns = ['PIPELINE_NAME', 'TABLE_NAME', 'INGEST_DATETIME', 'INSERT','UPDATE','DELETE','ACTIVE_ROWS','TOTAL_ROWS']\n",
+					"df_log = spark.createDataFrame(log_data, log_columns)\n",
+					"#display(df_test)"
+				],
+				"execution_count": 64
+			},
+			{
+				"cell_type": "code",
+				"metadata": {
+					"jupyter": {
+						"source_hidden": false,
+						"outputs_hidden": false
+					},
+					"nteract": {
+						"transient": {
+							"deleting": false
+						}
+					}
+				},
+				"source": [
+					"#Write to controldb\n",
+					"import json\n",
+					"db_port = 1433\n",
+					"linked_service_name = \"LS_SQL_ELTFrameworkDB\"\n",
+					"linkedServiceProperties = json.loads(mssparkutils.credentials.getPropertiesAll(linked_service_name))\n",
+					"sql_server_name = linkedServiceProperties.get('Endpoint')\n",
+					"db_name = linkedServiceProperties.get('Database')\n",
+					"access_token = mssparkutils.credentials.getConnectionStringOrCreds(linked_service_name)\n",
+					"write_table_name = \"[CTL].[CFG_INGESTION_LOGS]\"\n",
+					"\n",
+					"try:\n",
+					"    df_log.write.format(\"jdbc\") \\\n",
+					"        .option(\"url\", \"jdbc:sqlserver://%s:%s\" % (sql_server_name, db_port)) \\\n",
+					"        .option(\"dbtable\", write_table_name) \\\n",
+					"        .option(\"accessToken\", access_token) \\\n",
+					"        .option(\"encrypt\", \"true\") \\\n",
+					"        .option(\"databaseName\", db_name) \\\n",
+					"        .option(\"hostNameInCertificate\", \"*.database.windows.net\") \\\n",
+					"        .mode(\"append\") \\\n",
+					"        .save()\n",
+					"except ValueError as error :\n",
+					"    print(\"MSSQL Connector write failed\", error)\n",
+					"\n",
+					"print(\"MSSQL Connector write(append) succeeded  \")"
+				],
+				"execution_count": 65
+			},
+			{
+				"cell_type": "markdown",
+				"metadata": {
+					"nteract": {
+						"transient": {
+							"deleting": false
+						}
+					}
+				},
+				"source": [
+					"# Table DimFinalQualityFlag: END"
+				]
+			},
+			{
+				"cell_type": "markdown",
+				"metadata": {
+					"nteract": {
+						"transient": {
+							"deleting": false
+						}
+					}
+				},
+				"source": [
+					"# Table DimUnitOfMeasurement: START"
+				]
+			},
+			{
+				"cell_type": "code",
+				"metadata": {
+					"jupyter": {
+						"source_hidden": false,
+						"outputs_hidden": false
+					},
+					"nteract": {
+						"transient": {
+							"deleting": false
+						}
+					}
+				},
+				"source": [
+					"#Set table name\n",
+					"db_tablename=\"DimUnitOfMeasurement\""
+				],
+				"execution_count": 66
+			},
+			{
+				"cell_type": "code",
+				"metadata": {
+					"jupyter": {
+						"source_hidden": false,
+						"outputs_hidden": false
+					},
+					"nteract": {
+						"transient": {
+							"deleting": false
+						}
+					}
+				},
+				"source": [
+					"# Drop table and storage folder if exists\n",
+					"from py4j.protocol import Py4JJavaError\n",
+					"\n",
+					"spark.sql(f\"\"\"DROP TABLE IF EXISTS {db_notebookname}.{db_tablename}\"\"\")\n",
+					"\n",
+					"try:\n",
+					"    raw_output_path = f\"abfss://{destination_container}@{destination_storage}.dfs.core.windows.net/{destination_path}/{db_tablename}\"\n",
+					"    mssparkutils.fs.rm(raw_output_path,recurse=True)\n",
+					"\n",
+					"    print(\"Delete successful\")\n",
+					"\n",
+					"except Py4JJavaError as error :\n",
+					"    if 'org.apache.hadoop.fs.PathNotFoundException' in str (error.java_exception):\n",
+					"        print(\"No such file or directory\")"
+				],
+				"execution_count": 67
+			},
+			{
+				"cell_type": "code",
+				"metadata": {
+					"jupyter": {
+						"source_hidden": false,
+						"outputs_hidden": false
+					},
+					"nteract": {
+						"transient": {
+							"deleting": false
+						}
+					}
+				},
+				"source": [
+					"#Create Gold Table\n",
+					"spark.sql(f\"\"\"CREATE DATABASE IF NOT EXISTS {db_notebookname};\"\"\")\n",
+					"spark.sql(f\"\"\"\n",
+					"CREATE TABLE IF NOT EXISTS {db_notebookname}.{db_tablename}\n",
+					"(\n",
+					"    UnitOfMeasurementId STRING,\n",
+					"    UnitOfMeasurementHashId STRING,\n",
+					"    Description STRING\n",
+					")\n",
+					"USING delta\n",
+					"LOCATION 'abfss://{destination_container}@{destination_storage}.dfs.core.windows.net/{destination_path}/{db_tablename}'\n",
+					"\"\"\")"
+				],
+				"execution_count": 68
+			},
+			{
+				"cell_type": "code",
+				"metadata": {
+					"jupyter": {
+						"source_hidden": false,
+						"outputs_hidden": false
+					},
+					"nteract": {
+						"transient": {
+							"deleting": false
+						}
+					}
+				},
+				"source": [
+					"# Row count parameters\n",
+					"Gold_Insert_Pre=spark.sql(f\"\"\" SELECT COUNT(*) FROM {db_notebookname}.{db_tablename} \"\"\").collect()[0][0]"
+				],
+				"execution_count": 69
+			},
+			{
+				"cell_type": "code",
+				"metadata": {
+					"jupyter": {
+						"source_hidden": false,
+						"outputs_hidden": false
+					},
+					"nteract": {
+						"transient": {
+							"deleting": false
+						}
+					}
+				},
+				"source": [
+					"# Display\n",
+					"print(Gold_Insert_Pre)"
+				],
+				"execution_count": 70
+			},
+			{
+				"cell_type": "code",
+				"metadata": {
+					"jupyter": {
+						"source_hidden": false,
+						"outputs_hidden": false
+					},
+					"nteract": {
+						"transient": {
+							"deleting": false
+						}
+					}
+				},
+				"source": [
+					"#Create Data frame\n",
+					"from pyspark.sql.types import StructField, StructType, StringType, IntegerType\n",
+					"\n",
+					"# refrence\n",
+					"# Url: https://aemo.com.au/-/media/files/stakeholder_consultation/consultations/nem-consultations/2023/july-2023-retail-electricity-market-procedures-consultation/final/mdff-specification-nem12-nem13-v26-clean-final.pdf?la=en\n",
+					"# Section: Appendix B\n",
+					"unit_of_measurements = [\n",
+					"        (\"MWh\", \"megawatt hour\"),\n",
+					"        (\"kWh\", \"kilowatt hour\"),\n",
+					"        (\"Wh\", \"watt hour\"),\n",
+					"        (\"MVArh\", \"megavolt ampere reactive hour (megavar hour)\"),\n",
+					"        (\"kVArh\", \"kilovolt ampere reactive hour\"),\n",
+					"        (\"VArh\", \"volt ampere reactive hour\"),\n",
+					"        (\"MVAr\", \"megavolt ampere reactive\"),\n",
+					"        (\"kVAr\", \"kilovolt ampere reactive \"),\n",
+					"        (\"VAr\", \"volt ampere reactive\"),\n",
+					"        (\"MW\", \"megawatt\"),\n",
+					"        (\"kW\", \"kilowatt\"),\n",
+					"        (\"W\", \"watt\"),\n",
+					"        (\"MVAh\", \"megavolt ampere hour\"),\n",
+					"        (\"kVAh\", \"kilovolt ampere hour\"),\n",
+					"        (\"VAh\", \"volt ampere hour\"),\n",
+					"        (\"MVA\", \"megavolt ampere\"),\n",
+					"        (\"kVA\", \"kilovolt ampere\"),\n",
+					"        (\"VA\", \"volt ampere\"),\n",
+					"        (\"kV\", \"kilovolt\"),\n",
+					"        (\"V\", \"volt\"),\n",
+					"        (\"kA\", \"kiloampere\"),\n",
+					"        (\"A\", \"ampere\"),\n",
+					"        (\"pf\", \"Power Factor\"),\n",
+					"        (None, \"No description\")\n",
+					"        ]\n",
+					"\n",
+					"schema_unit_of_measurements = StructType([\n",
+					"    StructField(\"UnitOfMeasurementId\",StringType(),True),\n",
+					"    StructField(\"Description\", StringType(),True)\n",
+					"])\n",
+					"\n",
+					"df_gold = spark.createDataFrame(unit_of_measurements, schema=schema_unit_of_measurements)"
+				],
+				"execution_count": 71
+			},
+			{
+				"cell_type": "code",
+				"metadata": {
+					"jupyter": {
+						"source_hidden": false,
+						"outputs_hidden": false
+					},
+					"nteract": {
+						"transient": {
+							"deleting": false
+						}
+					},
+					"collapsed": false
+				},
+				"source": [
+					"# Add Hash columns\n",
+					"from pyspark.sql.functions import col, concat, lit, to_timestamp, to_date, when, upper\n",
+					"from pyspark.sql.functions import sha2, concat_ws, regexp_replace\n",
+					"\n",
+					"df_gold = df_gold.withColumn(\"UnitOfMeasurementId\", upper(\"UnitOfMeasurementId\"))\n",
+					"#display(df_gold)\n",
+					"df_gold = df_gold.withColumn(\"UnitOfMeasurementHashId\", sha2(concat_ws(\"||\", \"UnitOfMeasurementId\"), 256))\n",
+					""
+				],
+				"execution_count": 72
+			},
+			{
+				"cell_type": "code",
+				"metadata": {
+					"jupyter": {
+						"source_hidden": false,
+						"outputs_hidden": false
+					},
+					"nteract": {
+						"transient": {
+							"deleting": false
+						}
+					}
+				},
+				"source": [
+					"# Create a temporary view of the dataframe\n",
+					"# df_gold which is created in previous for ReasonCode table\n",
+					"df_gold.createOrReplaceTempView(f\"\"\"Gold_temp_{db_tablename}\"\"\")\n",
+					"\n",
+					"# Use insert operation to update the target table\n",
+					"spark.sql(f\"\"\"\n",
+					"    INSERT INTO {db_notebookname}.{db_tablename}\n",
+					"    SELECT      UnitOfMeasurementId,\n",
+					"                UnitOfMeasurementHashId,\n",
+					"                Description\n",
+					"    FROM Gold_temp_{db_tablename}\n",
+					"\"\"\")\n",
+					"\n",
+					"spark.sql(f\"\"\"\n",
+					"            DROP VIEW IF EXISTS Gold_temp_{db_tablename}\n",
+					"        \"\"\")"
+				],
+				"execution_count": 73
+			},
+			{
+				"cell_type": "code",
+				"metadata": {
+					"jupyter": {
+						"source_hidden": false,
+						"outputs_hidden": false
+					},
+					"nteract": {
+						"transient": {
+							"deleting": false
+						}
+					}
+				},
+				"source": [
+					"# Duplication count\n",
+					"Gold_duplicate_count= spark.sql(f\"\"\"\n",
+					"                                        SELECT sum(dCount)\n",
+					"                                        FROM (\n",
+					"                                                SELECT COUNT(UnitOfMeasurementHashId) AS dCount FROM {db_notebookname}.{db_tablename}\n",
+					"                                                GROUP by UnitOfMeasurementHashId\n",
+					"                                                HAVING COUNT(UnitOfMeasurementHashId)>1 ) as subtb\n",
+					"                                    \n",
+					"                            \"\"\").collect()[0][0]\n",
+					"\n",
+					"assert Gold_duplicate_count == None\n",
+					"print(Gold_duplicate_count)"
+				],
+				"execution_count": 74
+			},
+			{
+				"cell_type": "code",
+				"metadata": {
+					"jupyter": {
+						"source_hidden": false,
+						"outputs_hidden": false
+					},
+					"nteract": {
+						"transient": {
+							"deleting": false
+						}
+					}
+				},
+				"source": [
+					"# Write using AAD Auth to internal table\n",
+					"# Add required imports\n",
+					"import com.microsoft.spark.sqlanalytics\n",
+					"from com.microsoft.spark.sqlanalytics.Constants import Constants\n",
+					"\n",
+					"\n",
+					"#order columns for Azure Synapse insert should match synapse table creation order.\n",
+					"df_gold=df_gold.select(\"UnitOfMeasurementId\", \"UnitOfMeasurementHashId\", \"Description\")\n",
+					"\n",
+					"# Configure and submit the request to write to Synapse Dedicated SQL Pool\n",
+					"# Sample below is using AAD-based authentication approach; See further examples to leverage SQL Basic auth.\n",
+					"(df_gold.write\n",
+					" # If `Constants.SERVER` is not provided, the `<database_name>` from the three-part table name argument\n",
+					" # to `synapsesql` method is used to infer the Synapse Dedicated SQL End Point.\n",
+					" .option(Constants.SERVER, f\"\"\"{SynapseDedicatedServer}\"\"\")\n",
+					" # Like-wise, if `Constants.TEMP_FOLDER` is not provided, the connector will use the runtime staging directory config (see section on Configuration Options for details).\n",
+					" .option(Constants.TEMP_FOLDER, (f\"\"\"abfss://temp@{TempFolder}/{db_tablename}\"\"\"))\n",
+					" # Choose a save mode that is apt for your use case.\n",
+					" # Options for save modes are \"error\" or \"errorifexists\" (default), \"overwrite\", \"append\", \"ignore\".\n",
+					" # refer to https://spark.apache.org/docs/latest/sql-data-sources-load-save-functions.html#save-modes\n",
+					" .mode(\"overwrite\")\n",
+					" # Required parameter - Three-part table name to which data will be written\n",
+					" .synapsesql(f\"\"\"{SynapseDedicatedDatabase}.dbo.{db_tablename}\"\"\"))"
+				],
+				"execution_count": 75
+			},
+			{
+				"cell_type": "code",
+				"metadata": {
+					"jupyter": {
+						"source_hidden": false,
+						"outputs_hidden": false
+					},
+					"nteract": {
+						"transient": {
+							"deleting": false
+						}
+					}
+				},
+				"source": [
+					"#Row count parameters\n",
+					"Gold_TotalRowCount_Post=spark.sql(f\"\"\" SELECT COUNT(*) FROM {db_notebookname}.{db_tablename}\"\"\").collect()[0][0]"
+				],
+				"execution_count": 76
+			},
+			{
+				"cell_type": "code",
+				"metadata": {
+					"jupyter": {
+						"source_hidden": false,
+						"outputs_hidden": false
+					},
+					"nteract": {
+						"transient": {
+							"deleting": false
+						}
+					}
+				},
+				"source": [
+					"#Row calculation\n",
+					"Gold_TotalRows = Gold_TotalRowCount_Post"
+				],
+				"execution_count": 77
+			},
+			{
+				"cell_type": "code",
+				"metadata": {
+					"jupyter": {
+						"source_hidden": false,
+						"outputs_hidden": false
+					},
+					"nteract": {
+						"transient": {
+							"deleting": false
+						}
+					}
+				},
+				"source": [
+					"from pyspark.sql.types import StructType, StructField, StringType, IntegerType, BooleanType,DateType, DoubleType,TimestampType\n",
+					"\n",
+					"log_data = [(db_notebookname,db_tablename,Gold_LoadDate,Gold_TotalRows,0,0,Gold_TotalRows,Gold_TotalRows)]\n",
+					"print(log_data)\n",
+					"log_columns = ['PIPELINE_NAME', 'TABLE_NAME', 'INGEST_DATETIME', 'INSERT','UPDATE','DELETE','ACTIVE_ROWS','TOTAL_ROWS']\n",
+					"df_log = spark.createDataFrame(log_data, log_columns)\n",
+					"#display(df_test)"
+				],
+				"execution_count": 78
+			},
+			{
+				"cell_type": "code",
+				"metadata": {
+					"jupyter": {
+						"source_hidden": false,
+						"outputs_hidden": false
+					},
+					"nteract": {
+						"transient": {
+							"deleting": false
+						}
+					}
+				},
+				"source": [
+					"#Write to controldb\n",
+					"import json\n",
+					"db_port = 1433\n",
+					"linked_service_name = \"LS_SQL_ELTFrameworkDB\"\n",
+					"linkedServiceProperties = json.loads(mssparkutils.credentials.getPropertiesAll(linked_service_name))\n",
+					"sql_server_name = linkedServiceProperties.get('Endpoint')\n",
+					"db_name = linkedServiceProperties.get('Database')\n",
+					"access_token = mssparkutils.credentials.getConnectionStringOrCreds(linked_service_name)\n",
+					"write_table_name = \"[CTL].[CFG_INGESTION_LOGS]\"\n",
+					"\n",
+					"try:\n",
+					"    df_log.write.format(\"jdbc\") \\\n",
+					"        .option(\"url\", \"jdbc:sqlserver://%s:%s\" % (sql_server_name, db_port)) \\\n",
+					"        .option(\"dbtable\", write_table_name) \\\n",
+					"        .option(\"accessToken\", access_token) \\\n",
+					"        .option(\"encrypt\", \"true\") \\\n",
+					"        .option(\"databaseName\", db_name) \\\n",
+					"        .option(\"hostNameInCertificate\", \"*.database.windows.net\") \\\n",
+					"        .mode(\"append\") \\\n",
+					"        .save()\n",
+					"except ValueError as error :\n",
+					"    print(\"MSSQL Connector write failed\", error)\n",
+					"\n",
+					"print(\"MSSQL Connector write(append) succeeded  \")"
+				],
+				"execution_count": 79
+			},
+			{
+				"cell_type": "markdown",
+				"metadata": {
+					"nteract": {
+						"transient": {
+							"deleting": false
+						}
+					}
+				},
+				"source": [
+					"# Table DimUnitOfMeasurement: END"
+				]
+			},
+			{
+				"cell_type": "markdown",
+				"metadata": {
+					"nteract": {
+						"transient": {
+							"deleting": false
+						}
+					}
+				},
+				"source": [
+					"# Table DimTransCode: START"
+				]
+			},
+			{
+				"cell_type": "code",
+				"metadata": {
+					"jupyter": {
+						"source_hidden": false,
+						"outputs_hidden": false
+					},
+					"nteract": {
+						"transient": {
+							"deleting": false
+						}
+					}
+				},
+				"source": [
+					"#Set table name\n",
+					"db_tablename=\"DimTransCode\""
+				],
+				"execution_count": 80
+			},
+			{
+				"cell_type": "code",
+				"metadata": {
+					"jupyter": {
+						"source_hidden": false,
+						"outputs_hidden": false
+					},
+					"nteract": {
+						"transient": {
+							"deleting": false
+						}
+					}
+				},
+				"source": [
+					"# Drop table and storage folder if exists\n",
+					"from py4j.protocol import Py4JJavaError\n",
+					"\n",
+					"spark.sql(f\"\"\"DROP TABLE IF EXISTS {db_notebookname}.{db_tablename}\"\"\")\n",
+					"\n",
+					"try:\n",
+					"    raw_output_path = f\"abfss://{destination_container}@{destination_storage}.dfs.core.windows.net/{destination_path}/{db_tablename}\"\n",
+					"    mssparkutils.fs.rm(raw_output_path,recurse=True)\n",
+					"\n",
+					"    print(\"Delete successful\")\n",
+					"\n",
+					"except Py4JJavaError as error :\n",
+					"    if 'org.apache.hadoop.fs.PathNotFoundException' in str (error.java_exception):\n",
+					"        print(\"No such file or directory\")"
+				],
+				"execution_count": 81
+			},
+			{
+				"cell_type": "code",
+				"metadata": {
+					"jupyter": {
+						"source_hidden": false,
+						"outputs_hidden": false
+					},
+					"nteract": {
+						"transient": {
+							"deleting": false
+						}
+					}
+				},
+				"source": [
+					"#Create Gold Table\n",
+					"spark.sql(f\"\"\"CREATE DATABASE IF NOT EXISTS {db_notebookname};\"\"\")\n",
+					"spark.sql(f\"\"\"\n",
+					"CREATE TABLE IF NOT EXISTS {db_notebookname}.{db_tablename}\n",
+					"(\n",
+					"    TransCodeId STRING,\n",
+					"    TransCodeHashId STRING,\n",
+					"    Description STRING,\n",
+					"    DetailedDescription STRING\n",
+					")\n",
+					"USING delta\n",
+					"LOCATION 'abfss://{destination_container}@{destination_storage}.dfs.core.windows.net/{destination_path}/{db_tablename}'\n",
+					"\"\"\")"
+				],
+				"execution_count": 82
+			},
+			{
+				"cell_type": "code",
+				"metadata": {
+					"jupyter": {
+						"source_hidden": false,
+						"outputs_hidden": false
+					},
+					"nteract": {
+						"transient": {
+							"deleting": false
+						}
+					}
+				},
+				"source": [
+					"# Row count parameters\n",
+					"Gold_Insert_Pre=spark.sql(f\"\"\" SELECT COUNT(*) FROM {db_notebookname}.{db_tablename} \"\"\").collect()[0][0]"
+				],
+				"execution_count": 83
+			},
+			{
+				"cell_type": "code",
+				"metadata": {
+					"jupyter": {
+						"source_hidden": false,
+						"outputs_hidden": false
+					},
+					"nteract": {
+						"transient": {
+							"deleting": false
+						}
+					}
+				},
+				"source": [
+					"# Display\n",
+					"print(Gold_Insert_Pre)"
+				],
+				"execution_count": 84
+			},
+			{
+				"cell_type": "code",
+				"metadata": {
+					"jupyter": {
+						"source_hidden": false,
+						"outputs_hidden": false
+					},
+					"nteract": {
+						"transient": {
+							"deleting": false
+						}
+					}
+				},
+				"source": [
+					"#Create Data frame\n",
+					"from pyspark.sql.types import StructField, StructType, StringType, IntegerType\n",
+					"\n",
+					"# refrence\n",
+					"# Url: https://aemo.com.au/-/media/files/stakeholder_consultation/consultations/nem-consultations/2023/july-2023-retail-electricity-market-procedures-consultation/final/mdff-specification-nem12-nem13-v26-clean-final.pdf?la=en\n",
+					"# Section: Appendix A\n",
+					"trans_codes = [\n",
+					"        (\"A\",\"Alteration\", \"Any action involving the alteration of the metering at a site. This includes a removal of one meter and replacing it with another and all New Connections and Add/Alts service orders.\"),\n",
+					"        (\"C\",\"Meter Reconfiguration\",\"Meter Reconfiguration service order. This includes Off-Peak (controlled load) timing changes. This does not apply to the removal of the meter.\"),\n",
+					"        (\"G\",\"Re-energisation\", \"Re-energisations service order.\"),\n",
+					"        (\"D\",\"De-energisation\", \"De-energisations including De-energisation for Non-payment service order.\"),\n",
+					"        (\"E\",\"Estimate\", \"For all Forward Estimates.\"),\n",
+					"        (\"N\",\"Normal Read\", \"Scheduled read. Also includes substitutions associated with a scheduled read.\"),\n",
+					"        (\"O\",\"Other\", \"Include Meter Investigation & Miscellaneous service orders. This value is used when providing historical data and where the TransCode information is unavailable.\"),\n",
+					"        (\"S\",\"Special Read\", \"Special Read service order.\"),\n",
+					"        (\"R\",\"Removal of meter\", \"This is used for meter removal or supply abolishment where the meter has been removed and will not be replaced. This excludes situations involving a meter changeover or where a meter is added to an existing configurations (these are considered to be alterations).\"),\n",
+					"        (None,\"No description\",\"No description\"),\n",
+					"        ]\n",
+					"\n",
+					"\n",
+					"\n",
+					"schema_trans_code = StructType([\n",
+					"    StructField(\"TransCodeId\",StringType(),True),\n",
+					"    StructField(\"Description\", StringType(),True),\n",
+					"    StructField(\"DetailedDescription\", StringType(),True)\n",
+					"])\n",
+					"\n",
+					"df_gold = spark.createDataFrame(trans_codes, schema=schema_trans_code)"
+				],
+				"execution_count": 85
+			},
+			{
+				"cell_type": "code",
+				"metadata": {
+					"jupyter": {
+						"source_hidden": false,
+						"outputs_hidden": false
+					},
+					"nteract": {
+						"transient": {
+							"deleting": false
+						}
+					}
+				},
+				"source": [
+					"# Add Hash columns\n",
+					"from pyspark.sql.functions import col, concat, lit, to_timestamp, to_date, when\n",
+					"from pyspark.sql.functions import sha2, concat_ws, regexp_replace\n",
+					"\n",
+					"df_gold = df_gold.withColumn(\"TransCodeHashId\", sha2(concat_ws(\"||\", \"TransCodeId\"), 256))"
+				],
+				"execution_count": 86
+			},
+			{
+				"cell_type": "code",
+				"metadata": {
+					"jupyter": {
+						"source_hidden": false,
+						"outputs_hidden": false
+					},
+					"nteract": {
+						"transient": {
+							"deleting": false
+						}
+					}
+				},
+				"source": [
+					"# Create a temporary view of the dataframe\n",
+					"df_gold.createOrReplaceTempView(f\"\"\"Gold_temp_{db_tablename}\"\"\")\n",
+					"\n",
+					"# Use insert operation to update the target table\n",
+					"spark.sql(f\"\"\"\n",
+					"            INSERT INTO {db_notebookname}.{db_tablename}\n",
+					"            SELECT      TransCodeId,\n",
+					"                        TransCodeHashId,\n",
+					"                        Description,\n",
+					"                        DetailedDescription\n",
+					"            FROM Gold_temp_{db_tablename}\n",
+					"        \"\"\")\n",
+					"\n",
+					"spark.sql(f\"\"\"\n",
+					"            DROP VIEW IF EXISTS Gold_temp_{db_tablename}\n",
+					"        \"\"\")"
+				],
+				"execution_count": 87
+			},
+			{
+				"cell_type": "code",
+				"metadata": {
+					"jupyter": {
+						"source_hidden": false,
+						"outputs_hidden": false
+					},
+					"nteract": {
+						"transient": {
+							"deleting": false
+						}
+					}
+				},
+				"source": [
+					"# Duplication count\n",
+					"Gold_duplicate_count= spark.sql(f\"\"\"\n",
+					"                                        SELECT sum(dCount)\n",
+					"                                        FROM (\n",
+					"                                                SELECT COUNT(TransCodeHashId) AS dCount FROM {db_notebookname}.{db_tablename}\n",
+					"                                                GROUP by TransCodeHashId\n",
+					"                                                HAVING COUNT(TransCodeHashId)>1 ) as subtb\n",
+					"                                    \n",
+					"                            \"\"\").collect()[0][0]\n",
+					"assert Gold_duplicate_count == None\n",
+					"print(Gold_duplicate_count)"
+				],
+				"execution_count": 88
+			},
+			{
+				"cell_type": "code",
+				"metadata": {
+					"jupyter": {
+						"source_hidden": false,
+						"outputs_hidden": false
+					},
+					"nteract": {
+						"transient": {
+							"deleting": false
+						}
+					}
+				},
+				"source": [
+					"# Write using AAD Auth to internal table\n",
+					"# Add required imports\n",
+					"import com.microsoft.spark.sqlanalytics\n",
+					"from com.microsoft.spark.sqlanalytics.Constants import Constants\n",
+					"\n",
+					"\n",
+					"#order columns for Azure Synapse insert should match synapse table creation order.\n",
+					"df_gold=df_gold.select(\"TransCodeId\", \"TransCodeHashId\", \"Description\", \"DetailedDescription\")\n",
+					"\n",
+					"# Configure and submit the request to write to Synapse Dedicated SQL Pool\n",
+					"# Sample below is using AAD-based authentication approach; See further examples to leverage SQL Basic auth.\n",
+					"(df_gold.write\n",
+					" # If `Constants.SERVER` is not provided, the `<database_name>` from the three-part table name argument\n",
+					" # to `synapsesql` method is used to infer the Synapse Dedicated SQL End Point.\n",
+					" .option(Constants.SERVER, f\"\"\"{SynapseDedicatedServer}\"\"\")\n",
+					" # Like-wise, if `Constants.TEMP_FOLDER` is not provided, the connector will use the runtime staging directory config (see section on Configuration Options for details).\n",
+					" .option(Constants.TEMP_FOLDER, (f\"\"\"abfss://temp@{TempFolder}/{db_tablename}\"\"\"))\n",
+					" # Choose a save mode that is apt for your use case.\n",
+					" # Options for save modes are \"error\" or \"errorifexists\" (default), \"overwrite\", \"append\", \"ignore\".\n",
+					" # refer to https://spark.apache.org/docs/latest/sql-data-sources-load-save-functions.html#save-modes\n",
+					" .mode(\"overwrite\")\n",
+					" # Required parameter - Three-part table name to which data will be written\n",
+					" .synapsesql(f\"\"\"{SynapseDedicatedDatabase}.dbo.{db_tablename}\"\"\"))"
+				],
+				"execution_count": 89
+			},
+			{
+				"cell_type": "code",
+				"metadata": {
+					"jupyter": {
+						"source_hidden": false,
+						"outputs_hidden": false
+					},
+					"nteract": {
+						"transient": {
+							"deleting": false
+						}
+					}
+				},
+				"source": [
+					"#Row count parameters\n",
+					"Gold_TotalRowCount_Post=spark.sql(f\"\"\" SELECT COUNT(*) FROM {db_notebookname}.{db_tablename}\"\"\").collect()[0][0]"
+				],
+				"execution_count": 90
+			},
+			{
+				"cell_type": "code",
+				"metadata": {
+					"jupyter": {
+						"source_hidden": false,
+						"outputs_hidden": false
+					},
+					"nteract": {
+						"transient": {
+							"deleting": false
+						}
+					}
+				},
+				"source": [
+					"#Row calculation\n",
+					"Gold_TotalRows = Gold_TotalRowCount_Post"
+				],
+				"execution_count": 91
+			},
+			{
+				"cell_type": "code",
+				"metadata": {
+					"jupyter": {
+						"source_hidden": false,
+						"outputs_hidden": false
+					},
+					"nteract": {
+						"transient": {
+							"deleting": false
+						}
+					}
+				},
+				"source": [
+					"# Display\n",
+					"print(Gold_TotalRows)"
+				],
+				"execution_count": 92
+			},
+			{
+				"cell_type": "code",
+				"metadata": {
+					"jupyter": {
+						"source_hidden": false,
+						"outputs_hidden": false
+					},
+					"nteract": {
+						"transient": {
+							"deleting": false
+						}
+					}
+				},
+				"source": [
+					"from pyspark.sql.types import StructType, StructField, StringType, IntegerType, BooleanType,DateType, DoubleType,TimestampType\n",
+					"\n",
+					"log_data = [(db_notebookname,db_tablename,Gold_LoadDate,Gold_TotalRows,0,0,Gold_TotalRows,Gold_TotalRows)]\n",
+					"print(log_data)\n",
+					"log_columns = ['PIPELINE_NAME', 'TABLE_NAME', 'INGEST_DATETIME', 'INSERT','UPDATE','DELETE','ACTIVE_ROWS','TOTAL_ROWS']\n",
+					"df_log = spark.createDataFrame(log_data, log_columns)\n",
+					"#display(df_test)"
+				],
+				"execution_count": 93
+			},
+			{
+				"cell_type": "code",
+				"metadata": {
+					"jupyter": {
+						"source_hidden": false,
+						"outputs_hidden": false
+					},
+					"nteract": {
+						"transient": {
+							"deleting": false
+						}
+					}
+				},
+				"source": [
+					"#Write to controldb\n",
+					"import json\n",
+					"db_port = 1433\n",
+					"linked_service_name = \"LS_SQL_ELTFrameworkDB\"\n",
+					"linkedServiceProperties = json.loads(mssparkutils.credentials.getPropertiesAll(linked_service_name))\n",
+					"sql_server_name = linkedServiceProperties.get('Endpoint')\n",
+					"db_name = linkedServiceProperties.get('Database')\n",
+					"access_token = mssparkutils.credentials.getConnectionStringOrCreds(linked_service_name)\n",
+					"write_table_name = \"[CTL].[CFG_INGESTION_LOGS]\"\n",
+					"\n",
+					"try:\n",
+					"    df_log.write.format(\"jdbc\") \\\n",
+					"        .option(\"url\", \"jdbc:sqlserver://%s:%s\" % (sql_server_name, db_port)) \\\n",
+					"        .option(\"dbtable\", write_table_name) \\\n",
+					"        .option(\"accessToken\", access_token) \\\n",
+					"        .option(\"encrypt\", \"true\") \\\n",
+					"        .option(\"databaseName\", db_name) \\\n",
+					"        .option(\"hostNameInCertificate\", \"*.database.windows.net\") \\\n",
+					"        .mode(\"append\") \\\n",
+					"        .save()\n",
+					"except ValueError as error :\n",
+					"    print(\"MSSQL Connector write failed\", error)\n",
+					"\n",
+					"print(\"MSSQL Connector write(append) succeeded  \")"
+				],
+				"execution_count": 94
+			},
+			{
+				"cell_type": "markdown",
+				"metadata": {
+					"nteract": {
+						"transient": {
+							"deleting": false
+						}
+					}
+				},
+				"source": [
+					"# Table DimTransCode: END"
+				]
+			},
+			{
+				"cell_type": "markdown",
+				"metadata": {
+					"nteract": {
+						"transient": {
+							"deleting": false
+						}
+					}
+				},
+				"source": [
+					"# Table DimMethodFlag: START"
+				]
+			},
+			{
+				"cell_type": "code",
+				"metadata": {
+					"jupyter": {
+						"source_hidden": false,
+						"outputs_hidden": false
+					},
+					"nteract": {
+						"transient": {
+							"deleting": false
+						}
+					}
+				},
+				"source": [
+					"#Set table name\n",
+					"db_tablename=\"DimMethodFlag\""
+				],
+				"execution_count": 95
+			},
+			{
+				"cell_type": "code",
+				"metadata": {
+					"jupyter": {
+						"source_hidden": false,
+						"outputs_hidden": false
+					},
+					"nteract": {
+						"transient": {
+							"deleting": false
+						}
+					}
+				},
+				"source": [
+					"# Drop table and storage folder if exists\n",
+					"from py4j.protocol import Py4JJavaError\n",
+					"\n",
+					"spark.sql(f\"\"\"DROP TABLE IF EXISTS {db_notebookname}.{db_tablename}\"\"\")\n",
+					"\n",
+					"try:\n",
+					"    raw_output_path = f\"abfss://{destination_container}@{destination_storage}.dfs.core.windows.net/{destination_path}/{db_tablename}\"\n",
+					"    mssparkutils.fs.rm(raw_output_path,recurse=True)\n",
+					"\n",
+					"    print(\"Delete successful\")\n",
+					"\n",
+					"except Py4JJavaError as error :\n",
+					"    if 'org.apache.hadoop.fs.PathNotFoundException' in str (error.java_exception):\n",
+					"        print(\"No such file or directory\")"
+				],
+				"execution_count": 96
+			},
+			{
+				"cell_type": "code",
+				"metadata": {
+					"jupyter": {
+						"source_hidden": false,
+						"outputs_hidden": false
+					},
+					"nteract": {
+						"transient": {
+							"deleting": false
+						}
+					}
+				},
+				"source": [
+					"#Create Gold Table\n",
+					"spark.sql(f\"\"\"CREATE DATABASE IF NOT EXISTS {db_notebookname};\"\"\")\n",
+					"spark.sql(f\"\"\"\n",
+					"CREATE TABLE IF NOT EXISTS {db_notebookname}.{db_tablename}\n",
+					"(\n",
+					"    MethodFlagId INT,\n",
+					"    MethodFlagHashId STRING,\n",
+					"    MethodFlagType STRING,\n",
+					"    ESTorSUB STRING,\n",
+					"    Description STRING\n",
+					")\n",
+					"USING delta\n",
+					"LOCATION 'abfss://{destination_container}@{destination_storage}.dfs.core.windows.net/{destination_path}/{db_tablename}'\n",
+					"\"\"\")"
+				],
+				"execution_count": 97
+			},
+			{
+				"cell_type": "code",
+				"metadata": {
+					"jupyter": {
+						"source_hidden": false,
+						"outputs_hidden": false
+					},
+					"nteract": {
+						"transient": {
+							"deleting": false
+						}
+					}
+				},
+				"source": [
+					"# Row count parameters\n",
+					"Gold_Insert_Pre=spark.sql(f\"\"\" SELECT COUNT(*) FROM {db_notebookname}.{db_tablename} \"\"\").collect()[0][0]"
+				],
+				"execution_count": 98
+			},
+			{
+				"cell_type": "code",
+				"metadata": {
+					"jupyter": {
+						"source_hidden": false,
+						"outputs_hidden": false
+					},
+					"nteract": {
+						"transient": {
+							"deleting": false
+						}
+					}
+				},
+				"source": [
+					"# Display\n",
+					"print(Gold_Insert_Pre)"
+				],
+				"execution_count": 99
+			},
+			{
+				"cell_type": "code",
+				"metadata": {
+					"jupyter": {
+						"source_hidden": false,
+						"outputs_hidden": false
+					},
+					"nteract": {
+						"transient": {
+							"deleting": false
+						}
+					}
+				},
+				"source": [
+					"# Create Data frame\n",
+					"from pyspark.sql.types import StructField, StructType, StringType, IntegerType\n",
+					"\n",
+					"# refrence\n",
+					"# Url: https://aemo.com.au/-/media/files/stakeholder_consultation/consultations/nem-consultations/2021/electricity-retail-market-procedures/oct-2021-consultation/second-stage/metrology-procedure-part-b-73-changemarked.pdf?la=en\n",
+					"# section 2.6\n",
+					"method_flag = [\n",
+					"            (11, \"Type 11\", \"SUB\", \"Check\"),\n",
+					"            (12, \"Type 12\", \"SUB\", \"Calculated\"),\n",
+					"            (13, \"Type 13\", \"SUB\", \"SCADA\"),\n",
+					"            (14, \"Type 14\", \"SUB\", \"Like Day\"),\n",
+					"            (15, \"Type 15\", \"SUB\", \"Ave Like Day\"),\n",
+					"            (16, \"Type 16\", \"SUB\", \"Agreed\"),\n",
+					"            (17, \"Type 17\", \"SUB\", \"Linear\"),\n",
+					"            (18, \"Type 18\", \"SUB\", \"Alternative\"),\n",
+					"            (19, \"Type 19\", \"SUB\", \"Zero\"),\n",
+					"            (20, \"Type 20\", \"SUB\", \"Churn Correction (Like Day)\"),\n",
+					"            (21, \"Type 21\", \"SUB\", \"Five-minute No Historical Data\"),\n",
+					"            (51, \"Type 51\", \"SUB or EST\", \"Previous Year\"),\n",
+					"            (52, \"Type 52\", \"SUB or EST\", \"Previous Read\"),\n",
+					"            (53, \"Type 53\", \"SUB\", \"Revision\"),\n",
+					"            (54, \"Type 54\", \"SUB\", \"Linear\"),\n",
+					"            (55, \"Type 55\", \"SUB\", \"Agreed\"),\n",
+					"            (56, \"Type 56\", \"SUB or EST\", \"Prior to First Read - Agreed\"),\n",
+					"            (57, \"Type 57\", \"SUB or EST\", \"Customer Class\"),\n",
+					"            (58, \"Type 58\", \"SUB or EST\", \"Zero\"),\n",
+					"            (59, \"Type 59\", \"SUB\", \"o EST Five-minute No Historical Data\"),\n",
+					"            (61, \"Type 61\", \"SUB or EST\", \"Previous Year\"),\n",
+					"            (62, \"Type 62\", \"SUB or EST\", \"Previous Read\"),\n",
+					"            (63, \"Type 63\", \"SUB or EST\", \"Customer Class\"),\n",
+					"            (64, \"Type 64\", \"SUB\", \"Agreed\"),\n",
+					"            (65, \"Type 65\", \"SUB or EST\", \"ADL\"),\n",
+					"            (66, \"Type 66\", \"SUB\", \"Revision\"),\n",
+					"            (67, \"Type 67\", \"SUB\", \"Customer Read\"),\n",
+					"            (68, \"Type 68\", \"SUB or EST\", \"Zero\"),\n",
+					"            (69, \"Type 69\", \"SUB\", \"Linear Interpolation\"),\n",
+					"            (71, \"Type 71\", \"SUB\", \"Recalculation\"),\n",
+					"            (72, \"Type 72\", \"SUB\", \"Revised Table\"),\n",
+					"            (73, \"Type 73\", \"SUB\", \"Revised Algorithm\"),\n",
+					"            (74, \"Type 74\", \"SUB\", \"Agreed\"),\n",
+					"            (75, \"Type 75\", \"EST\", \"Existing Table\"),\n",
+					"            (None,\"No description\",\"No description\",\"No description\")\n",
+					"        ]\n",
+					"\n",
+					"schema_reason_code = StructType([\n",
+					"                                StructField(\"MethodFlagId\",IntegerType(),True),\n",
+					"                                StructField(\"MethodFlagType\",StringType(),True),\n",
+					"                                StructField(\"ESTorSUB\",StringType(),True),\n",
+					"                                StructField(\"Description\",StringType(),True)\n",
+					"                                \n",
+					"                                ])\n",
+					"\n",
+					"\n",
+					"df_gold = spark.createDataFrame(method_flag, schema=schema_reason_code)\n",
+					"#df_reason_code.write.format(\"delta\").mode(\"overwrite\").option(\"mergeSchema\",\"true\").saveAsTable(\"DimReasonCode\")"
+				],
+				"execution_count": 100
+			},
+			{
+				"cell_type": "code",
+				"metadata": {
+					"jupyter": {
+						"source_hidden": false,
+						"outputs_hidden": false
+					},
+					"nteract": {
+						"transient": {
+							"deleting": false
+						}
+					}
+				},
+				"source": [
+					"# Add Hash columns\n",
+					"from pyspark.sql.functions import col, concat, lit, to_timestamp, to_date, when\n",
+					"from pyspark.sql.functions import sha2, concat_ws, regexp_replace\n",
+					"\n",
+					"df_gold = df_gold.withColumn(\"MethodFlagHashId\", sha2(concat_ws(\"||\", \"MethodFlagId\"), 256))"
+				],
+				"execution_count": 101
+			},
+			{
+				"cell_type": "code",
+				"metadata": {
+					"jupyter": {
+						"source_hidden": false,
+						"outputs_hidden": false
+					},
+					"nteract": {
+						"transient": {
+							"deleting": false
+						}
+					}
+				},
+				"source": [
+					"# Create a temporary view of the dataframe\n",
+					"df_gold.createOrReplaceTempView(f\"\"\"Gold_temp_{db_tablename}\"\"\")\n",
+					"\n",
+					"# Use insert operation to update the target table\n",
+					"spark.sql(f\"\"\"\n",
+					"            INSERT INTO {db_notebookname}.{db_tablename}\n",
+					"            SELECT      MethodFlagId,\n",
+					"                        MethodFlagHashId,\n",
+					"                        MethodFlagType,\n",
+					"                        ESTorSUB,\n",
+					"                        Description\n",
+					"            FROM Gold_temp_{db_tablename}\n",
+					"        \"\"\")\n",
+					"\n",
+					"spark.sql(f\"\"\"\n",
+					"            DROP VIEW IF EXISTS Gold_temp_{db_tablename}\n",
+					"        \"\"\")"
+				],
+				"execution_count": 102
+			},
+			{
+				"cell_type": "code",
+				"metadata": {
+					"jupyter": {
+						"source_hidden": false,
+						"outputs_hidden": false
+					},
+					"nteract": {
+						"transient": {
+							"deleting": false
+						}
+					}
+				},
+				"source": [
+					"# Duplication count\n",
+					"Gold_duplicate_count= spark.sql(f\"\"\"\n",
+					"                                        SELECT sum(dCount)\n",
+					"                                        FROM (\n",
+					"                                                SELECT COUNT(MethodFlagHashId) AS dCount FROM {db_notebookname}.{db_tablename}\n",
+					"                                                GROUP by MethodFlagHashId\n",
+					"                                                HAVING COUNT(MethodFlagHashId)>1 ) as subtb\n",
+					"                                    \n",
+					"                            \"\"\").collect()[0][0]\n",
+					"assert Gold_duplicate_count == None\n",
+					"print(Gold_duplicate_count)"
+				],
+				"execution_count": 103
+			},
+			{
+				"cell_type": "code",
+				"metadata": {
+					"jupyter": {
+						"source_hidden": false,
+						"outputs_hidden": false
+					},
+					"nteract": {
+						"transient": {
+							"deleting": false
+						}
+					}
+				},
+				"source": [
+					"# Write using AAD Auth to internal table\n",
+					"# Add required imports\n",
+					"import com.microsoft.spark.sqlanalytics\n",
+					"from com.microsoft.spark.sqlanalytics.Constants import Constants\n",
+					"\n",
+					"\n",
+					"#order columns for Azure Synapse insert should match synapse table creation order.\n",
+					"df_gold=df_gold.select(\"MethodFlagId\", \"MethodFlagHashId\", \"MethodFlagType\", \"ESTorSUB\", \"Description\")\n",
+					"\n",
+					"# Configure and submit the request to write to Synapse Dedicated SQL Pool\n",
+					"# Sample below is using AAD-based authentication approach; See further examples to leverage SQL Basic auth.\n",
+					"(df_gold.write\n",
+					" # If `Constants.SERVER` is not provided, the `<database_name>` from the three-part table name argument\n",
+					" # to `synapsesql` method is used to infer the Synapse Dedicated SQL End Point.\n",
+					" .option(Constants.SERVER, f\"\"\"{SynapseDedicatedServer}\"\"\")\n",
+					" # Like-wise, if `Constants.TEMP_FOLDER` is not provided, the connector will use the runtime staging directory config (see section on Configuration Options for details).\n",
+					" .option(Constants.TEMP_FOLDER, (f\"\"\"abfss://temp@{TempFolder}/{db_tablename}\"\"\"))\n",
+					" # Choose a save mode that is apt for your use case.\n",
+					" # Options for save modes are \"error\" or \"errorifexists\" (default), \"overwrite\", \"append\", \"ignore\".\n",
+					" # refer to https://spark.apache.org/docs/latest/sql-data-sources-load-save-functions.html#save-modes\n",
+					" .mode(\"overwrite\")\n",
+					" # Required parameter - Three-part table name to which data will be written\n",
+					" .synapsesql(f\"\"\"{SynapseDedicatedDatabase}.dbo.{db_tablename}\"\"\"))"
+				],
+				"execution_count": 104
+			},
+			{
+				"cell_type": "code",
+				"metadata": {
+					"jupyter": {
+						"source_hidden": false,
+						"outputs_hidden": false
+					},
+					"nteract": {
+						"transient": {
+							"deleting": false
+						}
+					}
+				},
+				"source": [
+					"#Row count parameters\n",
+					"Gold_TotalRowCount_Post=spark.sql(f\"\"\" SELECT COUNT(*) FROM {db_notebookname}.{db_tablename}\"\"\").collect()[0][0]"
+				],
+				"execution_count": 105
+			},
+			{
+				"cell_type": "code",
+				"metadata": {
+					"jupyter": {
+						"source_hidden": false,
+						"outputs_hidden": false
+					},
+					"nteract": {
+						"transient": {
+							"deleting": false
+						}
+					}
+				},
+				"source": [
+					"#Row calculation\n",
+					"Gold_TotalRows = Gold_TotalRowCount_Post"
+				],
+				"execution_count": 106
+			},
+			{
+				"cell_type": "code",
+				"metadata": {
+					"jupyter": {
+						"source_hidden": false,
+						"outputs_hidden": false
+					},
+					"nteract": {
+						"transient": {
+							"deleting": false
+						}
+					}
+				},
+				"source": [
+					"# Display\n",
+					"print(Gold_TotalRows)"
+				],
+				"execution_count": 107
+			},
+			{
+				"cell_type": "code",
+				"metadata": {
+					"jupyter": {
+						"source_hidden": false,
+						"outputs_hidden": false
+					},
+					"nteract": {
+						"transient": {
+							"deleting": false
+						}
+					}
+				},
+				"source": [
+					"from pyspark.sql.types import StructType, StructField, StringType, IntegerType, BooleanType,DateType, DoubleType,TimestampType\n",
+					"\n",
+					"log_data = [(db_notebookname,db_tablename,Gold_LoadDate,Gold_TotalRows,0,0,Gold_TotalRows,Gold_TotalRows)]\n",
+					"print(log_data)\n",
+					"log_columns = ['PIPELINE_NAME', 'TABLE_NAME', 'INGEST_DATETIME', 'INSERT','UPDATE','DELETE','ACTIVE_ROWS','TOTAL_ROWS']\n",
+					"df_log = spark.createDataFrame(log_data, log_columns)\n",
+					"#display(df_test)"
+				],
+				"execution_count": 108
+			},
+			{
+				"cell_type": "code",
+				"metadata": {
+					"jupyter": {
+						"source_hidden": false,
+						"outputs_hidden": false
+					},
+					"nteract": {
+						"transient": {
+							"deleting": false
+						}
+					}
+				},
+				"source": [
+					"#Write to controldb\n",
+					"import json\n",
+					"db_port = 1433\n",
+					"linked_service_name = \"LS_SQL_ELTFrameworkDB\"\n",
+					"linkedServiceProperties = json.loads(mssparkutils.credentials.getPropertiesAll(linked_service_name))\n",
+					"sql_server_name = linkedServiceProperties.get('Endpoint')\n",
+					"db_name = linkedServiceProperties.get('Database')\n",
+					"access_token = mssparkutils.credentials.getConnectionStringOrCreds(linked_service_name)\n",
+					"write_table_name = \"[CTL].[CFG_INGESTION_LOGS]\"\n",
+					"\n",
+					"try:\n",
+					"    df_log.write.format(\"jdbc\") \\\n",
+					"        .option(\"url\", \"jdbc:sqlserver://%s:%s\" % (sql_server_name, db_port)) \\\n",
+					"        .option(\"dbtable\", write_table_name) \\\n",
+					"        .option(\"accessToken\", access_token) \\\n",
+					"        .option(\"encrypt\", \"true\") \\\n",
+					"        .option(\"databaseName\", db_name) \\\n",
+					"        .option(\"hostNameInCertificate\", \"*.database.windows.net\") \\\n",
+					"        .mode(\"append\") \\\n",
+					"        .save()\n",
+					"except ValueError as error :\n",
+					"    print(\"MSSQL Connector write failed\", error)\n",
+					"\n",
+					"print(\"MSSQL Connector write(append) succeeded  \")"
+				],
+				"execution_count": 109
+			},
+			{
+				"cell_type": "markdown",
+				"metadata": {
+					"nteract": {
+						"transient": {
+							"deleting": false
+						}
+					}
+				},
+				"source": [
+					"# Table DimMethodFlag: END"
+				]
+			},
+			{
+				"cell_type": "markdown",
+				"metadata": {
+					"nteract": {
+						"transient": {
+							"deleting": false
+						}
+					}
+				},
+				"source": [
+					"# Table DimFinalMethodFlag: Start"
+				]
+			},
+			{
+				"cell_type": "code",
+				"metadata": {
+					"jupyter": {
+						"source_hidden": false,
+						"outputs_hidden": false
+					},
+					"nteract": {
+						"transient": {
+							"deleting": false
+						}
+					}
+				},
+				"source": [
+					"#Set table name\n",
+					"db_tablename=\"DimFinalMethodFlag\""
+				],
+				"execution_count": 110
+			},
+			{
+				"cell_type": "code",
+				"metadata": {
+					"jupyter": {
+						"source_hidden": false,
+						"outputs_hidden": false
+					},
+					"nteract": {
+						"transient": {
+							"deleting": false
+						}
+					}
+				},
+				"source": [
+					"# Drop table and storage folder if exists\n",
+					"from py4j.protocol import Py4JJavaError\n",
+					"\n",
+					"spark.sql(f\"\"\"DROP TABLE IF EXISTS {db_notebookname}.{db_tablename}\"\"\")\n",
+					"\n",
+					"try:\n",
+					"    raw_output_path = f\"abfss://{destination_container}@{destination_storage}.dfs.core.windows.net/{destination_path}/{db_tablename}\"\n",
+					"    mssparkutils.fs.rm(raw_output_path,recurse=True)\n",
+					"\n",
+					"    print(\"Delete successful\")\n",
+					"\n",
+					"except Py4JJavaError as error :\n",
+					"    if 'org.apache.hadoop.fs.PathNotFoundException' in str (error.java_exception):\n",
+					"        print(\"No such file or directory\")"
+				],
+				"execution_count": 111
+			},
+			{
+				"cell_type": "code",
+				"metadata": {
+					"jupyter": {
+						"source_hidden": false,
+						"outputs_hidden": false
+					},
+					"nteract": {
+						"transient": {
+							"deleting": false
+						}
+					}
+				},
+				"source": [
+					"#Create Gold Table\n",
+					"spark.sql(f\"\"\"CREATE DATABASE IF NOT EXISTS {db_notebookname};\"\"\")\n",
+					"spark.sql(f\"\"\"\n",
+					"CREATE TABLE IF NOT EXISTS {db_notebookname}.{db_tablename}\n",
+					"(\n",
+					"    MethodFlagId INT,\n",
+					"    FinalMethodFlagHashId STRING,\n",
+					"    MethodFlagType STRING,\n",
+					"    ESTorSUB STRING,\n",
+					"    Description STRING\n",
+					")\n",
+					"USING delta\n",
+					"LOCATION 'abfss://{destination_container}@{destination_storage}.dfs.core.windows.net/{destination_path}/{db_tablename}'\n",
+					"\"\"\")"
+				],
+				"execution_count": 112
+			},
+			{
+				"cell_type": "code",
+				"metadata": {
+					"jupyter": {
+						"source_hidden": false,
+						"outputs_hidden": false
+					},
+					"nteract": {
+						"transient": {
+							"deleting": false
+						}
+					}
+				},
+				"source": [
+					"# Row count parameters\n",
+					"Gold_Insert_Pre=spark.sql(f\"\"\" SELECT COUNT(*) FROM {db_notebookname}.{db_tablename} \"\"\").collect()[0][0]"
+				],
+				"execution_count": 113
+			},
+			{
+				"cell_type": "code",
+				"metadata": {
+					"jupyter": {
+						"source_hidden": false,
+						"outputs_hidden": false
+					},
+					"nteract": {
+						"transient": {
+							"deleting": false
+						}
+					}
+				},
+				"source": [
+					"# Display\n",
+					"print(Gold_Insert_Pre)"
+				],
+				"execution_count": 114
+			},
+			{
+				"cell_type": "code",
+				"metadata": {
+					"jupyter": {
+						"source_hidden": false,
+						"outputs_hidden": false
+					},
+					"nteract": {
+						"transient": {
+							"deleting": false
+						}
+					}
+				},
+				"source": [
+					"#Create Data frame\n",
+					"# method_flags comming from Methodflag table\n",
+					"from pyspark.sql.types import StructField, StructType, StringType, IntegerType\n",
+					"\n",
+					"schema_reason_code = StructType([\n",
+					"                                StructField(\"MethodFlagId\",IntegerType(),True),\n",
+					"                                StructField(\"MethodFlagType\",StringType(),True),\n",
+					"                                StructField(\"ESTorSUB\",StringType(),True),\n",
+					"                                StructField(\"Description\",StringType(),True)\n",
+					"                                \n",
+					"                                ])\n",
+					"\n",
+					"\n",
+					"df_gold = spark.createDataFrame(method_flag, schema=schema_reason_code)\n",
+					"#df_reason_code.write.format(\"delta\").mode(\"overwrite\").option(\"mergeSchema\",\"true\").saveAsTable(\"DimReasonCode\")"
+				],
+				"execution_count": 115
+			},
+			{
+				"cell_type": "code",
+				"metadata": {
+					"jupyter": {
+						"source_hidden": false,
+						"outputs_hidden": false
+					},
+					"nteract": {
+						"transient": {
+							"deleting": false
+						}
+					}
+				},
+				"source": [
+					"# Add Hash columns\n",
+					"from pyspark.sql.functions import col, concat, lit, to_timestamp, to_date, when\n",
+					"from pyspark.sql.functions import sha2, concat_ws, regexp_replace\n",
+					"\n",
+					"df_gold = df_gold.withColumn(\"FinalMethodFlagHashId\", sha2(concat_ws(\"||\", \"MethodFlagId\"), 256))"
+				],
+				"execution_count": 116
+			},
+			{
+				"cell_type": "code",
+				"metadata": {
+					"jupyter": {
+						"source_hidden": false,
+						"outputs_hidden": false
+					},
+					"nteract": {
+						"transient": {
+							"deleting": false
+						}
+					}
+				},
+				"source": [
+					"# Create a temporary view of the dataframe\n",
+					"df_gold.createOrReplaceTempView(f\"\"\"Gold_temp_{db_tablename}\"\"\")\n",
+					"\n",
+					"# Use insert operation to update the target table\n",
+					"spark.sql(f\"\"\"\n",
+					"            INSERT INTO {db_notebookname}.{db_tablename}\n",
+					"            SELECT      MethodFlagId,\n",
+					"                        FinalMethodFlagHashId,\n",
+					"                        MethodFlagType,\n",
+					"                        ESTorSUB,\n",
+					"                        Description\n",
+					"            FROM Gold_temp_{db_tablename}\n",
+					"        \"\"\")\n",
+					"\n",
+					"spark.sql(f\"\"\"\n",
+					"            DROP VIEW IF EXISTS Gold_temp_{db_tablename}\n",
+					"        \"\"\")"
+				],
+				"execution_count": 117
+			},
+			{
+				"cell_type": "code",
+				"metadata": {
+					"jupyter": {
+						"source_hidden": false,
+						"outputs_hidden": false
+					},
+					"nteract": {
+						"transient": {
+							"deleting": false
+						}
+					}
+				},
+				"source": [
+					"# Duplication count\n",
+					"Gold_duplicate_count= spark.sql(f\"\"\"\n",
+					"                                        SELECT sum(dCount)\n",
+					"                                        FROM (\n",
+					"                                                SELECT COUNT(FinalMethodFlagHashId) AS dCount FROM {db_notebookname}.{db_tablename}\n",
+					"                                                GROUP by FinalMethodFlagHashId\n",
+					"                                                HAVING COUNT(FinalMethodFlagHashId)>1 ) as subtb\n",
+					"                                    \n",
+					"                            \"\"\").collect()[0][0]\n",
+					"assert Gold_duplicate_count == None\n",
+					"print(Gold_duplicate_count)"
+				],
+				"execution_count": 118
+			},
+			{
+				"cell_type": "code",
+				"metadata": {
+					"jupyter": {
+						"source_hidden": false,
+						"outputs_hidden": false
+					},
+					"nteract": {
+						"transient": {
+							"deleting": false
+						}
+					}
+				},
+				"source": [
+					"# Write using AAD Auth to internal table\n",
+					"# Add required imports\n",
+					"import com.microsoft.spark.sqlanalytics\n",
+					"from com.microsoft.spark.sqlanalytics.Constants import Constants\n",
+					"\n",
+					"\n",
+					"#order columns for Azure Synapse insert should match synapse table creation order.\n",
+					"df_gold=df_gold.select(\"MethodFlagId\", \"FinalMethodFlagHashId\", \"MethodFlagType\", \"ESTorSUB\", \"Description\")\n",
+					"\n",
+					"# Configure and submit the request to write to Synapse Dedicated SQL Pool\n",
+					"# Sample below is using AAD-based authentication approach; See further examples to leverage SQL Basic auth.\n",
+					"(df_gold.write\n",
+					" # If `Constants.SERVER` is not provided, the `<database_name>` from the three-part table name argument\n",
+					" # to `synapsesql` method is used to infer the Synapse Dedicated SQL End Point.\n",
+					" .option(Constants.SERVER, f\"\"\"{SynapseDedicatedServer}\"\"\")\n",
+					" # Like-wise, if `Constants.TEMP_FOLDER` is not provided, the connector will use the runtime staging directory config (see section on Configuration Options for details).\n",
+					" .option(Constants.TEMP_FOLDER, (f\"\"\"abfss://temp@{TempFolder}/{db_tablename}\"\"\"))\n",
+					" # Choose a save mode that is apt for your use case.\n",
+					" # Options for save modes are \"error\" or \"errorifexists\" (default), \"overwrite\", \"append\", \"ignore\".\n",
+					" # refer to https://spark.apache.org/docs/latest/sql-data-sources-load-save-functions.html#save-modes\n",
+					" .mode(\"overwrite\")\n",
+					" # Required parameter - Three-part table name to which data will be written\n",
+					" .synapsesql(f\"\"\"{SynapseDedicatedDatabase}.dbo.{db_tablename}\"\"\"))"
+				],
+				"execution_count": 119
+			},
+			{
+				"cell_type": "code",
+				"metadata": {
+					"jupyter": {
+						"source_hidden": false,
+						"outputs_hidden": false
+					},
+					"nteract": {
+						"transient": {
+							"deleting": false
+						}
+					}
+				},
+				"source": [
+					"#Row count parameters\n",
+					"Gold_TotalRowCount_Post=spark.sql(f\"\"\" SELECT COUNT(*) FROM {db_notebookname}.{db_tablename}\"\"\").collect()[0][0]"
+				],
+				"execution_count": 120
+			},
+			{
+				"cell_type": "code",
+				"metadata": {
+					"jupyter": {
+						"source_hidden": false,
+						"outputs_hidden": false
+					},
+					"nteract": {
+						"transient": {
+							"deleting": false
+						}
+					}
+				},
+				"source": [
+					"#Row calculation\n",
+					"Gold_TotalRows = Gold_TotalRowCount_Post"
+				],
+				"execution_count": 121
+			},
+			{
+				"cell_type": "code",
+				"metadata": {
+					"jupyter": {
+						"source_hidden": false,
+						"outputs_hidden": false
+					},
+					"nteract": {
+						"transient": {
+							"deleting": false
+						}
+					}
+				},
+				"source": [
+					"# Display\n",
+					"print(Gold_TotalRows)"
+				],
+				"execution_count": 122
+			},
+			{
+				"cell_type": "code",
+				"metadata": {
+					"jupyter": {
+						"source_hidden": false,
+						"outputs_hidden": false
+					},
+					"nteract": {
+						"transient": {
+							"deleting": false
+						}
+					}
+				},
+				"source": [
+					"from pyspark.sql.types import StructType, StructField, StringType, IntegerType, BooleanType,DateType, DoubleType,TimestampType\n",
+					"\n",
+					"log_data = [(db_notebookname,db_tablename,Gold_LoadDate,Gold_TotalRows,0,0,Gold_TotalRows,Gold_TotalRows)]\n",
+					"print(log_data)\n",
+					"log_columns = ['PIPELINE_NAME', 'TABLE_NAME', 'INGEST_DATETIME', 'INSERT','UPDATE','DELETE','ACTIVE_ROWS','TOTAL_ROWS']\n",
+					"df_log = spark.createDataFrame(log_data, log_columns)\n",
+					"#display(df_test)"
+				],
+				"execution_count": 123
+			},
+			{
+				"cell_type": "code",
+				"metadata": {
+					"jupyter": {
+						"source_hidden": false,
+						"outputs_hidden": false
+					},
+					"nteract": {
+						"transient": {
+							"deleting": false
+						}
+					}
+				},
+				"source": [
+					"#Write to controldb\n",
+					"import json\n",
+					"db_port = 1433\n",
+					"linked_service_name = \"LS_SQL_ELTFrameworkDB\"\n",
+					"linkedServiceProperties = json.loads(mssparkutils.credentials.getPropertiesAll(linked_service_name))\n",
+					"sql_server_name = linkedServiceProperties.get('Endpoint')\n",
+					"db_name = linkedServiceProperties.get('Database')\n",
+					"access_token = mssparkutils.credentials.getConnectionStringOrCreds(linked_service_name)\n",
+					"write_table_name = \"[CTL].[CFG_INGESTION_LOGS]\"\n",
+					"\n",
+					"try:\n",
+					"    df_log.write.format(\"jdbc\") \\\n",
+					"        .option(\"url\", \"jdbc:sqlserver://%s:%s\" % (sql_server_name, db_port)) \\\n",
+					"        .option(\"dbtable\", write_table_name) \\\n",
+					"        .option(\"accessToken\", access_token) \\\n",
+					"        .option(\"encrypt\", \"true\") \\\n",
+					"        .option(\"databaseName\", db_name) \\\n",
+					"        .option(\"hostNameInCertificate\", \"*.database.windows.net\") \\\n",
+					"        .mode(\"append\") \\\n",
+					"        .save()\n",
+					"except ValueError as error :\n",
+					"    print(\"MSSQL Connector write failed\", error)\n",
+					"\n",
+					"print(\"MSSQL Connector write(append) succeeded  \")"
+				],
+				"execution_count": 124
+			},
+			{
+				"cell_type": "markdown",
+				"metadata": {
+					"nteract": {
+						"transient": {
+							"deleting": false
+						}
+					}
+				},
+				"source": [
+					"# Table DimFinalMethodFlag: END"
+				]
+			},
+			{
+				"cell_type": "markdown",
+				"metadata": {
+					"nteract": {
+						"transient": {
+							"deleting": false
+						}
+					}
+				},
+				"source": [
+					"# Table DimNMI: Start"
+				]
+			},
+			{
+				"cell_type": "code",
+				"metadata": {
+					"jupyter": {
+						"source_hidden": false,
+						"outputs_hidden": false
+					},
+					"nteract": {
+						"transient": {
+							"deleting": false
+						}
+					}
+				},
+				"source": [
+					"#Set table name\n",
+					"db_tablename=\"DimNMI\"\n",
+					"source_dbname=\"aemo_silver\"\n",
+					"source_tablename=\"nem12_silver\""
+				],
+				"execution_count": 125
+			},
+			{
+				"cell_type": "code",
+				"metadata": {
+					"jupyter": {
+						"source_hidden": false,
+						"outputs_hidden": false
+					},
+					"nteract": {
+						"transient": {
+							"deleting": false
+						}
+					}
+				},
+				"source": [
+					"# Drop table and storage folder if exists\n",
+					"from py4j.protocol import Py4JJavaError\n",
+					"\n",
+					"spark.sql(f\"\"\"DROP TABLE IF EXISTS {db_notebookname}.{db_tablename}\"\"\")\n",
+					"\n",
+					"try:\n",
+					"    raw_output_path = f\"abfss://{destination_container}@{destination_storage}.dfs.core.windows.net/{destination_path}/{db_tablename}\"\n",
+					"    mssparkutils.fs.rm(raw_output_path,recurse=True)\n",
+					"\n",
+					"    print(\"Delete successful\")\n",
+					"\n",
+					"except Py4JJavaError as error :\n",
+					"    if 'org.apache.hadoop.fs.PathNotFoundException' in str (error.java_exception):\n",
+					"        print(\"No such file or directory\")"
+				],
+				"execution_count": 126
+			},
+			{
+				"cell_type": "code",
+				"metadata": {
+					"jupyter": {
+						"source_hidden": false,
+						"outputs_hidden": false
+					},
+					"nteract": {
+						"transient": {
+							"deleting": false
+						}
+					}
+				},
+				"source": [
+					"#Create Gold Table\n",
+					"spark.sql(f\"\"\"CREATE DATABASE IF NOT EXISTS {db_notebookname};\"\"\")\n",
+					"spark.sql(f\"\"\"\n",
+					"CREATE TABLE IF NOT EXISTS {db_notebookname}.{db_tablename}\n",
+					"(\n",
+					"    NMI STRING, \n",
+					"    NMIHashId STRING   \n",
+					")\n",
+					"USING delta\n",
+					"LOCATION 'abfss://{destination_container}@{destination_storage}.dfs.core.windows.net/{destination_path}/{db_tablename}'\n",
+					"\"\"\")"
+				],
+				"execution_count": 127
+			},
+			{
+				"cell_type": "code",
+				"metadata": {
+					"jupyter": {
+						"source_hidden": false,
+						"outputs_hidden": false
+					},
+					"nteract": {
+						"transient": {
+							"deleting": false
+						}
+					}
+				},
+				"source": [
+					"# Row count parameters\n",
+					"Gold_Insert_Pre=spark.sql(f\"\"\" SELECT COUNT(*) FROM {db_notebookname}.{db_tablename} \"\"\").collect()[0][0]"
+				],
+				"execution_count": 128
+			},
+			{
+				"cell_type": "code",
+				"metadata": {
+					"jupyter": {
+						"source_hidden": false,
+						"outputs_hidden": false
+					},
+					"nteract": {
+						"transient": {
+							"deleting": false
+						}
+					}
+				},
+				"source": [
+					"# Display\n",
+					"print(Gold_Insert_Pre)"
+				],
+				"execution_count": 129
+			},
+			{
+				"cell_type": "code",
+				"metadata": {
+					"jupyter": {
+						"source_hidden": false,
+						"outputs_hidden": false
+					},
+					"nteract": {
+						"transient": {
+							"deleting": false
+						}
+					}
+				},
+				"source": [
+					"# Create a temporary view\n",
+					"df_gold = spark.sql(f\"\"\"\n",
+					"                    SELECT DISTINCT NMI\n",
+					"                        FROM {source_dbname}.{source_tablename}\n",
+					"        \"\"\")"
+				],
+				"execution_count": 130
+			},
+			{
+				"cell_type": "code",
+				"metadata": {
+					"jupyter": {
+						"source_hidden": false,
+						"outputs_hidden": false
+					},
+					"nteract": {
+						"transient": {
+							"deleting": false
+						}
+					}
+				},
+				"source": [
+					"# Add Hash columns\n",
+					"from pyspark.sql.functions import col, concat, lit, to_timestamp, to_date, when\n",
+					"from pyspark.sql.functions import sha2, concat_ws, regexp_replace\n",
+					"\n",
+					"\n",
+					"df_gold = df_gold.withColumn(\"nmiHashId\", sha2(concat_ws(\"||\", \"nmi\"), 256))"
+				],
+				"execution_count": 131
+			},
+			{
+				"cell_type": "code",
+				"metadata": {
+					"jupyter": {
+						"source_hidden": false,
+						"outputs_hidden": false
+					},
+					"nteract": {
+						"transient": {
+							"deleting": false
+						}
+					}
+				},
+				"source": [
+					"# Create a temporary view of the dataframe\n",
+					"df_gold.createOrReplaceTempView(f\"\"\"Gold_temp_{db_tablename}\"\"\")\n",
+					"\n",
+					"# Use insert operation to update the target table\n",
+					"spark.sql(f\"\"\"\n",
+					"            INSERT INTO {db_notebookname}.{db_tablename}\n",
+					"            SELECT      NMI,\n",
+					"                        NMIHashId\n",
+					"            FROM Gold_temp_{db_tablename}\n",
+					"        \"\"\")\n",
+					"\n",
+					"spark.sql(f\"\"\"\n",
+					"            DROP VIEW IF EXISTS Gold_temp_{db_tablename}\n",
+					"        \"\"\")"
+				],
+				"execution_count": 132
+			},
+			{
+				"cell_type": "code",
+				"metadata": {
+					"jupyter": {
+						"source_hidden": false,
+						"outputs_hidden": false
+					},
+					"nteract": {
+						"transient": {
+							"deleting": false
+						}
+					}
+				},
+				"source": [
+					"# Duplication count\n",
+					"Gold_duplicate_count= spark.sql(f\"\"\"\n",
+					"                                        SELECT sum(dCount)\n",
+					"                                        FROM (\n",
+					"                                                SELECT COUNT(NMIHashId) AS dCount FROM {db_notebookname}.{db_tablename}\n",
+					"                                                GROUP by NMIHashId\n",
+					"                                                HAVING COUNT(NMIHashId)>1 ) as subtb\n",
+					"                                    \n",
+					"                            \"\"\").collect()[0][0]\n",
+					"assert Gold_duplicate_count == None\n",
+					"print(Gold_duplicate_count)"
+				],
+				"execution_count": 133
+			},
+			{
+				"cell_type": "code",
+				"metadata": {
+					"jupyter": {
+						"source_hidden": false,
+						"outputs_hidden": false
+					},
+					"nteract": {
+						"transient": {
+							"deleting": false
+						}
+					}
+				},
+				"source": [
+					"# Write using AAD Auth to internal table\n",
+					"# Add required imports\n",
+					"import com.microsoft.spark.sqlanalytics\n",
+					"from com.microsoft.spark.sqlanalytics.Constants import Constants\n",
+					"\n",
+					"\n",
+					"#order columns for Azure Synapse insert should match synapse table creation order.\n",
+					"df_gold=df_gold.select(\"NMI\", \"NMIHashId\")\n",
+					"\n",
+					"# Configure and submit the request to write to Synapse Dedicated SQL Pool\n",
+					"# Sample below is using AAD-based authentication approach; See further examples to leverage SQL Basic auth.\n",
+					"(df_gold.write\n",
+					" # If `Constants.SERVER` is not provided, the `<database_name>` from the three-part table name argument\n",
+					" # to `synapsesql` method is used to infer the Synapse Dedicated SQL End Point.\n",
+					" .option(Constants.SERVER, f\"\"\"{SynapseDedicatedServer}\"\"\")\n",
+					" # Like-wise, if `Constants.TEMP_FOLDER` is not provided, the connector will use the runtime staging directory config (see section on Configuration Options for details).\n",
+					" .option(Constants.TEMP_FOLDER, (f\"\"\"abfss://temp@{TempFolder}/{db_tablename}\"\"\"))\n",
+					" # Choose a save mode that is apt for your use case.\n",
+					" # Options for save modes are \"error\" or \"errorifexists\" (default), \"overwrite\", \"append\", \"ignore\".\n",
+					" # refer to https://spark.apache.org/docs/latest/sql-data-sources-load-save-functions.html#save-modes\n",
+					" .mode(\"overwrite\")\n",
+					" # Required parameter - Three-part table name to which data will be written\n",
+					" .synapsesql(f\"\"\"{SynapseDedicatedDatabase}.dbo.{db_tablename}\"\"\"))"
+				],
+				"execution_count": 134
+			},
+			{
+				"cell_type": "code",
+				"metadata": {
+					"jupyter": {
+						"source_hidden": false,
+						"outputs_hidden": false
+					},
+					"nteract": {
+						"transient": {
+							"deleting": false
+						}
+					}
+				},
+				"source": [
+					"#Row count parameters\n",
+					"Gold_TotalRowCount_Post=spark.sql(f\"\"\" SELECT COUNT(*) FROM {db_notebookname}.{db_tablename}\"\"\").collect()[0][0]"
+				],
+				"execution_count": 135
+			},
+			{
+				"cell_type": "code",
+				"metadata": {
+					"jupyter": {
+						"source_hidden": false,
+						"outputs_hidden": false
+					},
+					"nteract": {
+						"transient": {
+							"deleting": false
+						}
+					}
+				},
+				"source": [
+					"#Row calculation\n",
+					"Gold_TotalRows = Gold_TotalRowCount_Post"
+				],
+				"execution_count": 136
+			},
+			{
+				"cell_type": "code",
+				"metadata": {
+					"jupyter": {
+						"source_hidden": false,
+						"outputs_hidden": false
+					},
+					"nteract": {
+						"transient": {
+							"deleting": false
+						}
+					}
+				},
+				"source": [
+					"# Display\n",
+					"print(Gold_TotalRows)"
+				],
+				"execution_count": 137
+			},
+			{
+				"cell_type": "code",
+				"metadata": {
+					"jupyter": {
+						"source_hidden": false,
+						"outputs_hidden": false
+					},
+					"nteract": {
+						"transient": {
+							"deleting": false
+						}
+					}
+				},
+				"source": [
+					"from pyspark.sql.types import StructType, StructField, StringType, IntegerType, BooleanType,DateType, DoubleType,TimestampType\n",
+					"\n",
+					"log_data = [(db_notebookname,db_tablename,Gold_LoadDate,Gold_TotalRows,0,0,Gold_TotalRows,Gold_TotalRows)]\n",
+					"print(log_data)\n",
+					"log_columns = ['PIPELINE_NAME', 'TABLE_NAME', 'INGEST_DATETIME', 'INSERT','UPDATE','DELETE','ACTIVE_ROWS','TOTAL_ROWS']\n",
+					"df_log = spark.createDataFrame(log_data, log_columns)\n",
+					"#display(df_test)"
+				],
+				"execution_count": 138
+			},
+			{
+				"cell_type": "code",
+				"metadata": {
+					"jupyter": {
+						"source_hidden": false,
+						"outputs_hidden": false
+					},
+					"nteract": {
+						"transient": {
+							"deleting": false
+						}
+					}
+				},
+				"source": [
+					"#Write to controldb\n",
+					"import json\n",
+					"db_port = 1433\n",
+					"linked_service_name = \"LS_SQL_ELTFrameworkDB\"\n",
+					"linkedServiceProperties = json.loads(mssparkutils.credentials.getPropertiesAll(linked_service_name))\n",
+					"sql_server_name = linkedServiceProperties.get('Endpoint')\n",
+					"db_name = linkedServiceProperties.get('Database')\n",
+					"access_token = mssparkutils.credentials.getConnectionStringOrCreds(linked_service_name)\n",
+					"write_table_name = \"[CTL].[CFG_INGESTION_LOGS]\"\n",
+					"\n",
+					"try:\n",
+					"    df_log.write.format(\"jdbc\") \\\n",
+					"        .option(\"url\", \"jdbc:sqlserver://%s:%s\" % (sql_server_name, db_port)) \\\n",
+					"        .option(\"dbtable\", write_table_name) \\\n",
+					"        .option(\"accessToken\", access_token) \\\n",
+					"        .option(\"encrypt\", \"true\") \\\n",
+					"        .option(\"databaseName\", db_name) \\\n",
+					"        .option(\"hostNameInCertificate\", \"*.database.windows.net\") \\\n",
+					"        .mode(\"append\") \\\n",
+					"        .save()\n",
+					"except ValueError as error :\n",
+					"    print(\"MSSQL Connector write failed\", error)\n",
+					"\n",
+					"print(\"MSSQL Connector write(append) succeeded  \")"
+				],
+				"execution_count": 139
+			},
+			{
+				"cell_type": "markdown",
+				"metadata": {
+					"nteract": {
+						"transient": {
+							"deleting": false
+						}
+					}
+				},
+				"source": [
+					"# Table DimNMI: END"
+				]
+			},
+			{
+				"cell_type": "markdown",
+				"metadata": {
+					"nteract": {
+						"transient": {
+							"deleting": false
+						}
+					}
+				},
+				"source": [
+					"# Table DimChannel: Start"
+				]
+			},
+			{
+				"cell_type": "code",
+				"metadata": {
+					"jupyter": {
+						"source_hidden": false,
+						"outputs_hidden": false
+					},
+					"nteract": {
+						"transient": {
+							"deleting": false
+						}
+					}
+				},
+				"source": [
+					"#Set table name\n",
+					"db_tablename=\"DimChannel\"\n",
+					"source_dbname=\"aemo_silver\"\n",
+					"source_tablename=\"nem12_silver\""
+				],
+				"execution_count": 140
+			},
+			{
+				"cell_type": "code",
+				"metadata": {
+					"jupyter": {
+						"source_hidden": false,
+						"outputs_hidden": false
+					},
+					"nteract": {
+						"transient": {
+							"deleting": false
+						}
+					}
+				},
+				"source": [
+					"# Drop table and storage folder if exists\n",
+					"from py4j.protocol import Py4JJavaError\n",
+					"\n",
+					"spark.sql(f\"\"\"DROP TABLE IF EXISTS {db_notebookname}.{db_tablename}\"\"\")\n",
+					"\n",
+					"try:\n",
+					"    raw_output_path = f\"abfss://{destination_container}@{destination_storage}.dfs.core.windows.net/{destination_path}/{db_tablename}\"\n",
+					"    mssparkutils.fs.rm(raw_output_path,recurse=True)\n",
+					"\n",
+					"    print(\"Delete successful\")\n",
+					"\n",
+					"except Py4JJavaError as error :\n",
+					"    if 'org.apache.hadoop.fs.PathNotFoundException' in str (error.java_exception):\n",
+					"        print(\"No such file or directory\")"
+				],
+				"execution_count": 141
+			},
+			{
+				"cell_type": "code",
+				"metadata": {
+					"jupyter": {
+						"source_hidden": false,
+						"outputs_hidden": false
+					},
+					"nteract": {
+						"transient": {
+							"deleting": false
+						}
+					}
+				},
+				"source": [
+					"#Create Gold Table\n",
+					"spark.sql(f\"\"\"CREATE DATABASE IF NOT EXISTS {db_notebookname};\"\"\")\n",
+					"spark.sql(f\"\"\"\n",
+					"CREATE TABLE IF NOT EXISTS {db_notebookname}.{db_tablename}\n",
+					"(\n",
+					"    NMIConfiguration STRING, \n",
+					"    RegisterID STRING,\n",
+					"    NMISuffix STRING,\n",
+					"    ChannelHashId STRING    \n",
+					")\n",
+					"USING delta\n",
+					"LOCATION 'abfss://{destination_container}@{destination_storage}.dfs.core.windows.net/{destination_path}/{db_tablename}'\n",
+					"\"\"\")"
+				],
+				"execution_count": 142
+			},
+			{
+				"cell_type": "code",
+				"metadata": {
+					"jupyter": {
+						"source_hidden": false,
+						"outputs_hidden": false
+					},
+					"nteract": {
+						"transient": {
+							"deleting": false
+						}
+					}
+				},
+				"source": [
+					"# Row count parameters\n",
+					"Gold_Insert_Pre=spark.sql(f\"\"\" SELECT COUNT(*) FROM {db_notebookname}.{db_tablename} \"\"\").collect()[0][0]"
+				],
+				"execution_count": 143
+			},
+			{
+				"cell_type": "code",
+				"metadata": {
+					"jupyter": {
+						"source_hidden": false,
+						"outputs_hidden": false
+					},
+					"nteract": {
+						"transient": {
+							"deleting": false
+						}
+					}
+				},
+				"source": [
+					"# Display\n",
+					"print(Gold_Insert_Pre)"
+				],
+				"execution_count": 144
+			},
+			{
+				"cell_type": "code",
+				"metadata": {
+					"jupyter": {
+						"source_hidden": false,
+						"outputs_hidden": false
+					},
+					"nteract": {
+						"transient": {
+							"deleting": false
+						}
+					}
+				},
+				"source": [
+					"# Create a temporary view\n",
+					"df_gold = spark.sql(f\"\"\"\n",
+					"                    SELECT DISTINCT  NMIConfiguration, RegisterID, NMISuffix\n",
+					"                        FROM {source_dbname}.{source_tablename}\n",
+					"                \"\"\")"
+				],
+				"execution_count": 145
+			},
+			{
+				"cell_type": "code",
+				"metadata": {
+					"jupyter": {
+						"source_hidden": false,
+						"outputs_hidden": false
+					},
+					"nteract": {
+						"transient": {
+							"deleting": false
+						}
+					}
+				},
+				"source": [
+					"# Add Hash columns\n",
+					"from pyspark.sql.functions import col, concat, lit, to_timestamp, to_date, when\n",
+					"from pyspark.sql.functions import sha2, concat_ws, regexp_replace\n",
+					"\n",
+					"\n",
+					"df_gold = df_gold.withColumn(\"ChannelHashId\", sha2(concat_ws(\"||\", \"NMIConfiguration\",\"RegisterID\",\"NMISuffix\"), 256))"
+				],
+				"execution_count": 146
+			},
+			{
+				"cell_type": "code",
+				"metadata": {
+					"jupyter": {
+						"source_hidden": false,
+						"outputs_hidden": false
+					},
+					"nteract": {
+						"transient": {
+							"deleting": false
+						}
+					}
+				},
+				"source": [
+					"# Create a temporary view of the dataframe\n",
+					"df_gold.createOrReplaceTempView(f\"\"\"Gold_temp_{db_tablename}\"\"\")\n",
+					"\n",
+					"# Use insert operation to update the target table\n",
+					"spark.sql(f\"\"\"\n",
+					"            INSERT INTO {db_notebookname}.{db_tablename}\n",
+					"            SELECT      NMIConfiguration, \n",
+					"                        RegisterID, \n",
+					"                        NMISuffix,\n",
+					"                        ChannelHashId\n",
+					"            FROM Gold_temp_{db_tablename}\n",
+					"        \"\"\")\n",
+					"\n",
+					"spark.sql(f\"\"\"\n",
+					"            DROP VIEW IF EXISTS Gold_temp_{db_tablename}\n",
+					"        \"\"\")"
+				],
+				"execution_count": 147
+			},
+			{
+				"cell_type": "code",
+				"metadata": {
+					"jupyter": {
+						"source_hidden": false,
+						"outputs_hidden": false
+					},
+					"nteract": {
+						"transient": {
+							"deleting": false
+						}
+					}
+				},
+				"source": [
+					"# Duplication count\n",
+					"Gold_duplicate_count= spark.sql(f\"\"\"\n",
+					"                                        SELECT sum(dCount)\n",
+					"                                        FROM (\n",
+					"                                                SELECT COUNT(ChannelHashId) AS dCount FROM {db_notebookname}.{db_tablename}\n",
+					"                                                GROUP by ChannelHashId\n",
+					"                                                HAVING COUNT(ChannelHashId)>1 ) as subtb\n",
+					"                                    \n",
+					"                            \"\"\").collect()[0][0]\n",
+					"assert Gold_duplicate_count == None\n",
+					"print(Gold_duplicate_count)"
+				],
+				"execution_count": 148
+			},
+			{
+				"cell_type": "code",
+				"metadata": {
+					"jupyter": {
+						"source_hidden": false,
+						"outputs_hidden": false
+					},
+					"nteract": {
+						"transient": {
+							"deleting": false
+						}
+					}
+				},
+				"source": [
+					"# Write using AAD Auth to internal table\n",
+					"# Add required imports\n",
+					"import com.microsoft.spark.sqlanalytics\n",
+					"from com.microsoft.spark.sqlanalytics.Constants import Constants\n",
+					"\n",
+					"\n",
+					"#order columns for Azure Synapse insert should match synapse table creation order.\n",
+					"df_gold=df_gold.select(\"NMIConfiguration\", \"RegisterID\", \"NMISuffix\", \"ChannelHashId\")\n",
+					"\n",
+					"# Configure and submit the request to write to Synapse Dedicated SQL Pool\n",
+					"# Sample below is using AAD-based authentication approach; See further examples to leverage SQL Basic auth.\n",
+					"(df_gold.write\n",
+					" # If `Constants.SERVER` is not provided, the `<database_name>` from the three-part table name argument\n",
+					" # to `synapsesql` method is used to infer the Synapse Dedicated SQL End Point.\n",
+					" .option(Constants.SERVER, f\"\"\"{SynapseDedicatedServer}\"\"\")\n",
+					" # Like-wise, if `Constants.TEMP_FOLDER` is not provided, the connector will use the runtime staging directory config (see section on Configuration Options for details).\n",
+					" .option(Constants.TEMP_FOLDER, (f\"\"\"abfss://temp@{TempFolder}/{db_tablename}\"\"\"))\n",
+					" # Choose a save mode that is apt for your use case.\n",
+					" # Options for save modes are \"error\" or \"errorifexists\" (default), \"overwrite\", \"append\", \"ignore\".\n",
+					" # refer to https://spark.apache.org/docs/latest/sql-data-sources-load-save-functions.html#save-modes\n",
+					" .mode(\"overwrite\")\n",
+					" # Required parameter - Three-part table name to which data will be written\n",
+					" .synapsesql(f\"\"\"{SynapseDedicatedDatabase}.dbo.{db_tablename}\"\"\"))"
+				],
+				"execution_count": 149
+			},
+			{
+				"cell_type": "code",
+				"metadata": {
+					"jupyter": {
+						"source_hidden": false,
+						"outputs_hidden": false
+					},
+					"nteract": {
+						"transient": {
+							"deleting": false
+						}
+					}
+				},
+				"source": [
+					"#Row count parameters\n",
+					"Gold_TotalRowCount_Post=spark.sql(f\"\"\" SELECT COUNT(*) FROM {db_notebookname}.{db_tablename}\"\"\").collect()[0][0]"
+				],
+				"execution_count": 150
+			},
+			{
+				"cell_type": "code",
+				"metadata": {
+					"jupyter": {
+						"source_hidden": false,
+						"outputs_hidden": false
+					},
+					"nteract": {
+						"transient": {
+							"deleting": false
+						}
+					}
+				},
+				"source": [
+					"#Row calculation\n",
+					"Gold_TotalRows = Gold_TotalRowCount_Post"
+				],
+				"execution_count": 151
+			},
+			{
+				"cell_type": "code",
+				"metadata": {
+					"jupyter": {
+						"source_hidden": false,
+						"outputs_hidden": false
+					},
+					"nteract": {
+						"transient": {
+							"deleting": false
+						}
+					}
+				},
+				"source": [
+					"# Display\n",
+					"print(Gold_TotalRows)"
+				],
+				"execution_count": 152
+			},
+			{
+				"cell_type": "code",
+				"metadata": {
+					"jupyter": {
+						"source_hidden": false,
+						"outputs_hidden": false
+					},
+					"nteract": {
+						"transient": {
+							"deleting": false
+						}
+					}
+				},
+				"source": [
+					"from pyspark.sql.types import StructType, StructField, StringType, IntegerType, BooleanType,DateType, DoubleType,TimestampType\n",
+					"\n",
+					"log_data = [(db_notebookname,db_tablename,Gold_LoadDate,Gold_TotalRows,0,0,Gold_TotalRows,Gold_TotalRows)]\n",
+					"print(log_data)\n",
+					"log_columns = ['PIPELINE_NAME', 'TABLE_NAME', 'INGEST_DATETIME', 'INSERT','UPDATE','DELETE','ACTIVE_ROWS','TOTAL_ROWS']\n",
+					"df_log = spark.createDataFrame(log_data, log_columns)\n",
+					"#display(df_test)"
+				],
+				"execution_count": 153
+			},
+			{
+				"cell_type": "code",
+				"metadata": {
+					"jupyter": {
+						"source_hidden": false,
+						"outputs_hidden": false
+					},
+					"nteract": {
+						"transient": {
+							"deleting": false
+						}
+					}
+				},
+				"source": [
+					"#Write to controldb\n",
+					"import json\n",
+					"db_port = 1433\n",
+					"linked_service_name = \"LS_SQL_ELTFrameworkDB\"\n",
+					"linkedServiceProperties = json.loads(mssparkutils.credentials.getPropertiesAll(linked_service_name))\n",
+					"sql_server_name = linkedServiceProperties.get('Endpoint')\n",
+					"db_name = linkedServiceProperties.get('Database')\n",
+					"access_token = mssparkutils.credentials.getConnectionStringOrCreds(linked_service_name)\n",
+					"write_table_name = \"[CTL].[CFG_INGESTION_LOGS]\"\n",
+					"\n",
+					"try:\n",
+					"    df_log.write.format(\"jdbc\") \\\n",
+					"        .option(\"url\", \"jdbc:sqlserver://%s:%s\" % (sql_server_name, db_port)) \\\n",
+					"        .option(\"dbtable\", write_table_name) \\\n",
+					"        .option(\"accessToken\", access_token) \\\n",
+					"        .option(\"encrypt\", \"true\") \\\n",
+					"        .option(\"databaseName\", db_name) \\\n",
+					"        .option(\"hostNameInCertificate\", \"*.database.windows.net\") \\\n",
+					"        .mode(\"append\") \\\n",
+					"        .save()\n",
+					"except ValueError as error :\n",
+					"    print(\"MSSQL Connector write failed\", error)\n",
+					"\n",
+					"print(\"MSSQL Connector write(append) succeeded  \")"
+				],
+				"execution_count": 154
+			},
+			{
+				"cell_type": "markdown",
+				"metadata": {
+					"nteract": {
+						"transient": {
+							"deleting": false
+						}
+					}
+				},
+				"source": [
+					"# Table DimChannel: END"
+				]
+			},
+			{
+				"cell_type": "markdown",
+				"metadata": {
+					"nteract": {
+						"transient": {
+							"deleting": false
+						}
+					}
+				},
+				"source": [
+					"# Table FactRetailNMI: START"
+				]
+			},
+			{
+				"cell_type": "code",
+				"metadata": {
+					"jupyter": {
+						"source_hidden": false,
+						"outputs_hidden": false
+					},
+					"nteract": {
+						"transient": {
+							"deleting": false
+						}
+					}
+				},
+				"source": [
+					"#Set table name\n",
+					"db_tablename=\"FactMeterConsumption\"\n",
+					""
+				],
+				"execution_count": 155
+			},
+			{
+				"cell_type": "code",
+				"metadata": {
+					"jupyter": {
+						"source_hidden": false,
+						"outputs_hidden": false
+					},
+					"nteract": {
+						"transient": {
+							"deleting": false
+						}
+					}
+				},
+				"source": [
+					"# Drop table and storage folder if exists\n",
+					"from py4j.protocol import Py4JJavaError\n",
+					"\n",
+					"spark.sql(f\"\"\"DROP TABLE IF EXISTS {db_notebookname}.{db_tablename}\"\"\")\n",
+					"\n",
+					"try:\n",
+					"    raw_output_path = f\"abfss://{destination_container}@{destination_storage}.dfs.core.windows.net/{destination_path}/{db_tablename}\"\n",
+					"    mssparkutils.fs.rm(raw_output_path,recurse=True)\n",
+					"\n",
+					"    print(\"Delete successful\")\n",
+					"\n",
+					"except Py4JJavaError as error :\n",
+					"    if 'org.apache.hadoop.fs.PathNotFoundException' in str (error.java_exception):\n",
+					"        print(\"No such file or directory\")"
+				],
+				"execution_count": 156
+			},
+			{
+				"cell_type": "code",
+				"metadata": {
+					"jupyter": {
+						"source_hidden": false,
+						"outputs_hidden": false
+					},
+					"nteract": {
+						"transient": {
+							"deleting": false
+						}
+					}
+				},
+				"source": [
+					"spark.sql(f\"\"\"\n",
+					"CREATE TABLE IF NOT EXISTS {db_notebookname}.{db_tablename}\n",
+					"(\n",
+					"    VersionHeader STRING,\n",
+					"    CreationDate STRING,\n",
+					"    FromParticipant STRING,\n",
+					"    ToParticipant STRING,\n",
+					"    IntervalDate STRING, \n",
+					"    IntervalLength DOUBLE,\n",
+					"    IntervalIndex INT,\n",
+					"    Timestamp TIMESTAMP,\n",
+					"    DisplayTimestamp_d STRING, \n",
+					"    DateHashId STRING, \n",
+					"    NormalizedTimeStart STRING,\n",
+					"    NormalizedTimeEnd STRING,\n",
+					"    TimeHashId STRING,\n",
+					"    NMI STRING,\n",
+					"    NMIHashId STRING,\n",
+					"    NMIConfiguration STRING,\n",
+					"    RegisterID STRING,\n",
+					"    NMISuffix STRING,\n",
+					"    ChannelHashId STRING,\n",
+					"    ReasonCodeId STRING,\n",
+					"    ReasonCodeHashId STRING,\n",
+					"    ReasonDescription STRING,\n",
+					"    FinalReasonCodeId STRING, \n",
+					"    FinalReasonCodeHashId STRING,\n",
+					"    TransCodeId STRING,\n",
+					"    TransCodeHashId STRING,\n",
+					"    UnitOfMeasurementId STRING,\n",
+					"    UnitOfMeasurementHashId STRING,\n",
+					"    QualityMethodId STRING,\n",
+					"    QualityFlag STRING,\n",
+					"    QualityFlagHashId STRING,\n",
+					"    MethodFlag STRING,\n",
+					"    MethodFlagHashId STRING, \n",
+					"    FinalQualityMethodId STRING,\n",
+					"    FinalQualityFlag STRING,\n",
+					"    FinalQualityFlagHashId STRING,\n",
+					"    FinalMethodFlag STRING, \n",
+					"    FinalMethodFlagHashId STRING,\n",
+					"    MDMDataStreamIdentifier STRING,\n",
+					"    MeterSerialNumber STRING, \n",
+					"    NextScheduledReadDate INT, \n",
+					"    MSATSLoadDateTime STRING,  \n",
+					"    RetServiceOrder STRING, \n",
+					"    ReadDatetime STRING,\n",
+					"    IndexRead STRING,\n",
+					"    Usage_d DOUBLE, \n",
+					"    Usage DOUBLE,\n",
+					"    FileName STRING,\n",
+					"    report_status_id LONG,\n",
+					"\tsequence_number INT,\n",
+					"\trow_status STRING,\n",
+					"\tfrom_date TIMESTAMP,\n",
+					"\tto_date TIMESTAMP,\n",
+					"\ttni STRING,\n",
+					"\tdistribution_loss_factor STRING,\n",
+					"\tparent_embedded_network_identifier STRING,\n",
+					"\tchild_embedded_network_identifier STRING,\n",
+					"\tstatus STRING,\n",
+					"    LoadDate TIMESTAMP\n",
+					")\n",
+					"USING delta\n",
+					"LOCATION 'abfss://{destination_container}@{destination_storage}.dfs.core.windows.net/{destination_path}/{db_tablename}'\n",
+					"\"\"\")\n",
+					""
+				],
+				"execution_count": 157
+			},
+			{
+				"cell_type": "code",
+				"metadata": {
+					"jupyter": {
+						"source_hidden": false,
+						"outputs_hidden": false
+					},
+					"nteract": {
+						"transient": {
+							"deleting": false
+						}
+					}
+				},
+				"source": [
+					"# Row count parameters\n",
+					"Gold_Insert_Pre=spark.sql(f\"\"\" SELECT COUNT(*) FROM {db_notebookname}.{db_tablename} \"\"\").collect()[0][0]"
+				],
+				"execution_count": 158
+			},
+			{
+				"cell_type": "code",
+				"metadata": {
+					"jupyter": {
+						"source_hidden": false,
+						"outputs_hidden": false
+					},
+					"nteract": {
+						"transient": {
+							"deleting": false
+						}
+					}
+				},
+				"source": [
+					"df_gold = spark.sql(f\"\"\"SELECT * FROM \n",
+					"(SELECT\n",
+					"    aemo.VersionHeader,\n",
+					"    aemo.CreationDate,\n",
+					"    aemo.FromParticipant ,\n",
+					"    aemo.ToParticipant ,\n",
+					"    aemo.IntervalDate , \n",
+					"    aemo.IntervalLength ,\n",
+					"    aemo.IntervalIndex,\n",
+					"    aemo.Timestamp ,\n",
+					"    aemo.DisplayTimestamp_d ,\n",
+					"    aemo.DateHashId , \n",
+					"    aemo.NormalizedTimeStart ,\n",
+					"    aemo.NormalizedTimeEnd ,\n",
+					"    aemo.TimeHashId ,\n",
+					"    aemo.NMI ,\n",
+					"    aemo.NMIHashId ,\n",
+					"    aemo.NMIConfiguration ,\n",
+					"    aemo.RegisterID ,\n",
+					"    aemo.NMISuffix ,\n",
+					"    aemo.ChannelHashId ,\n",
+					"    aemo.ReasonCodeId,\n",
+					"    aemo.ReasonCodeHashId,\n",
+					"    aemo.ReasonDescription ,\n",
+					"    aemo.FinalReasonCodeId , \n",
+					"    aemo.FinalReasonCodeHashId ,\n",
+					"    aemo.TransCodeId ,\n",
+					"    aemo.TransCodeHashId ,\n",
+					"    aemo.UnitOfMeasurementId ,\n",
+					"    aemo.UnitOfMeasurementHashId ,\n",
+					"    aemo.QualityMethodId,\n",
+					"    aemo.QualityFlag,\n",
+					"    aemo.QualityFlagHashId,\n",
+					"    aemo.MethodFlag,\n",
+					"    aemo.MethodFlagHashId, \n",
+					"    aemo.FinalQualityMethodId,\n",
+					"    aemo.FinalQualityFlag,\n",
+					"    aemo.FinalQualityFlagHashId,\n",
+					"    aemo.FinalMethodFlag, \n",
+					"    aemo.FinalMethodFlagHashId,\n",
+					"    aemo.MDMDataStreamIdentifier,\n",
+					"    aemo.MeterSerialNumber, \n",
+					"    aemo.NextScheduledReadDate, \n",
+					"    aemo.MSATSLoadDateTime,  \n",
+					"    aemo.RetServiceOrder, \n",
+					"    aemo.ReadDatetime,\n",
+					"    aemo.IndexRead,\n",
+					"    aemo.Usage_d, \n",
+					"    aemo.Usage,\n",
+					"    aemo.FileName,\n",
+					"    msats.report_status_id, \n",
+					"    msats.sequence_number,\n",
+					"    msats.row_status, \n",
+					"    msats.from_date, \n",
+					"    msats.to_date, \n",
+					"    msats.tni, \n",
+					"    msats.distribution_loss_factor, \n",
+					"    msats.parent_embedded_network_identifier, \n",
+					"    msats.child_embedded_network_identifier,\n",
+					"    msats.status,\n",
+					"    \"{Gold_LoadDate}\" AS LoadDate,\n",
+					"    RANK () OVER (PARTITION BY aemo.nmi, aemo.IntervalDate ORDER BY msats.report_status_id DESC) AS MSATSRank,\n",
+					"    RANK () OVER (PARTITION BY aemo.NMI, aemo.IntervalDate,aemo.RegisterID ,aemo.NMISuffix,aemo.NMIConfiguration ORDER BY aemo.MSATSLoadDateTime DESC) AS FileRank\n",
+					"FROM aemo_silver.nem12_silver aemo LEFT JOIN msats_silver.report_c4_nmi_data msats \n",
+					"    ON aemo.nmi = msats.nmi AND aemo.timestamp BETWEEN msats.from_date AND msats.to_date\n",
+					"    WHERE aemo.CDC_CurrentFlag = true) TEMP\n",
+					" WHERE TEMP.MSATSRank = 1 and TEMP.FileRank = 1  \n",
+					"\"\"\")"
+				],
+				"execution_count": 159
+			},
+			{
+				"cell_type": "code",
+				"metadata": {
+					"jupyter": {
+						"source_hidden": false,
+						"outputs_hidden": false
+					},
+					"nteract": {
+						"transient": {
+							"deleting": false
+						}
+					}
+				},
+				"source": [
+					"# Create a temporary view of the dataframe\n",
+					"df_gold.createOrReplaceTempView(\"gold_view\")\n",
+					"\n",
+					"# Use insert operation to update the target table\n",
+					"spark.sql(f\"\"\" \n",
+					"\n",
+					"INSERT INTO {db_notebookname}.{db_tablename} \n",
+					"    SELECT\n",
+					"    VersionHeader,\n",
+					"    CreationDate,\n",
+					"    FromParticipant ,\n",
+					"    ToParticipant ,\n",
+					"    IntervalDate , \n",
+					"    IntervalLength ,\n",
+					"    IntervalIndex ,\n",
+					"    Timestamp ,\n",
+					"    DisplayTimestamp_d,\n",
+					"    DateHashId , \n",
+					"    NormalizedTimeStart ,\n",
+					"    NormalizedTimeEnd ,\n",
+					"    TimeHashId ,\n",
+					"    NMI ,\n",
+					"    NMIHashId ,\n",
+					"    NMIConfiguration ,\n",
+					"    RegisterID ,\n",
+					"    NMISuffix ,\n",
+					"    ChannelHashId ,\n",
+					"    ReasonCodeId,\n",
+					"    ReasonCodeHashId,\n",
+					"    ReasonDescription ,\n",
+					"    FinalReasonCodeId , \n",
+					"    FinalReasonCodeHashId ,\n",
+					"    TransCodeId ,\n",
+					"    TransCodeHashId ,\n",
+					"    UnitOfMeasurementId ,\n",
+					"    UnitOfMeasurementHashId ,\n",
+					"    QualityMethodId,\n",
+					"    QualityFlag,\n",
+					"    QualityFlagHashId,\n",
+					"    MethodFlag,\n",
+					"    MethodFlagHashId, \n",
+					"    FinalQualityMethodId,\n",
+					"    FinalQualityFlag,\n",
+					"    FinalQualityFlagHashId,\n",
+					"    FinalMethodFlag, \n",
+					"    FinalMethodFlagHashId,\n",
+					"    MDMDataStreamIdentifier,\n",
+					"    MeterSerialNumber, \n",
+					"    NextScheduledReadDate, \n",
+					"    MSATSLoadDateTime,  \n",
+					"    RetServiceOrder, \n",
+					"    ReadDatetime,\n",
+					"    IndexRead,\n",
+					"    Usage_d,\n",
+					"    Usage,\n",
+					"    FileName,    \n",
+					"    report_status_id,\n",
+					"\tsequence_number,\n",
+					"\trow_status,\n",
+					"\tfrom_date,\n",
+					"\tto_date,\n",
+					"\ttni,\n",
+					"\tdistribution_loss_factor,\n",
+					"\tparent_embedded_network_identifier,\n",
+					"\tchild_embedded_network_identifier,\n",
+					"\tstatus,\n",
+					"    LoadDate\n",
+					"    FROM gold_view;\n",
+					"\n",
+					"\"\"\")"
+				],
+				"execution_count": 160
+			},
+			{
+				"cell_type": "code",
+				"metadata": {
+					"jupyter": {
+						"source_hidden": false,
+						"outputs_hidden": false
+					},
+					"nteract": {
+						"transient": {
+							"deleting": false
+						}
+					}
+				},
+				"source": [
+					"column_order = [\n",
+					"    \"VersionHeader\",\n",
+					"    \"FromParticipant\",\n",
+					"    \"ToParticipant\",\n",
+					"    \"IntervalDate\", \n",
+					"    \"IntervalLength\",\n",
+					"    \"IntervalIndex\",\n",
+					"    \"Timestamp\",\n",
+					"    \"DisplayTimestamp_d\",\n",
+					"    \"DateHashId\", \n",
+					"    \"NormalizedTimeStart\",\n",
+					"    \"NormalizedTimeEnd\",\n",
+					"    \"TimeHashId\",\n",
+					"     \"NMI\",\n",
+					"    \"NMIHashId\",\n",
+					"    \"NMIConfiguration\",\n",
+					"    \"RegisterID\",\n",
+					"    \"NMISuffix\",\n",
+					"    \"ChannelHashId\",\n",
+					"    \"ReasonCodeId\",\n",
+					"    \"ReasonCodeHashId\",\n",
+					"    \"ReasonDescription\",\n",
+					"    \"FinalReasonCodeId\", \n",
+					"    \"FinalReasonCodeHashId\",\n",
+					"    \"TransCodeId\",\n",
+					"    \"TransCodeHashId\",\n",
+					"    \"UnitOfMeasurementId\",\n",
+					"    \"UnitOfMeasurementHashId\",\n",
+					"    \"QualityMethodId\",\n",
+					"    \"QualityFlag\",\n",
+					"    \"QualityFlagHashId\",\n",
+					"    \"MethodFlag\",\n",
+					"    \"MethodFlagHashId\", \n",
+					"    \"FinalQualityMethodId\",\n",
+					"    \"FinalQualityFlag\",\n",
+					"    \"FinalQualityFlagHashId\",\n",
+					"    \"FinalMethodFlag\", \n",
+					"    \"FinalMethodFlagHashId\",\n",
+					"    \"MDMDataStreamIdentifier\",\n",
+					"    \"MeterSerialNumber\", \n",
+					"    \"NextScheduledReadDate\", \n",
+					"    \"MSATSLoadDateTime\", \n",
+					"    \"RetServiceOrder\", \n",
+					"    \"ReadDatetime\",\n",
+					"    \"IndexRead\",\n",
+					"    \"Usage_d\",\n",
+					"    \"Usage\",\n",
+					"    \"FileName\",\n",
+					"    \"report_status_id\",\n",
+					"\t\"sequence_number\",\n",
+					"\t\"row_status\",\n",
+					"\t\"from_date\",\n",
+					"\t\"to_date\",\n",
+					"\t\"tni\",\n",
+					"\t\"distribution_loss_factor\",\n",
+					"\t\"parent_embedded_network_identifier\",\n",
+					"\t\"child_embedded_network_identifier\",\n",
+					"\t\"status\",\n",
+					"    \"LoadDate\",\n",
+					"    \"CreationDate\"  \n",
+					"    ]"
+				],
+				"execution_count": 161
+			},
+			{
+				"cell_type": "code",
+				"metadata": {
+					"jupyter": {
+						"source_hidden": false,
+						"outputs_hidden": false
+					},
+					"nteract": {
+						"transient": {
+							"deleting": false
+						}
+					}
+				},
+				"source": [
+					"# Write using AAD Auth to internal table\n",
+					"# Add required imports\n",
+					"import com.microsoft.spark.sqlanalytics\n",
+					"from com.microsoft.spark.sqlanalytics.Constants import Constants\n",
+					"from pyspark.sql.functions import *\n",
+					"\n",
+					"df_gold = df_gold.withColumn(\"LoadDate\",col(\"LoadDate\").cast(\"Timestamp\"))\n",
+					"\n",
+					"#order columns for Azure Synapse insert should match synapse table creation order.\n",
+					"df_gold=df_gold.select(*column_order)\n",
+					"\n",
+					"# Configure and submit the request to write to Synapse Dedicated SQL Pool\n",
+					"# Sample below is using AAD-based authentication approach; See further examples to leverage SQL Basic auth.\n",
+					"(df_gold.write\n",
+					" # If `Constants.SERVER` is not provided, the `<database_name>` from the three-part table name argument\n",
+					" # to `synapsesql` method is used to infer the Synapse Dedicated SQL End Point.\n",
+					" .option(Constants.SERVER, f\"\"\"{SynapseDedicatedServer}\"\"\")\n",
+					" # Like-wise, if `Constants.TEMP_FOLDER` is not provided, the connector will use the runtime staging directory config (see section on Configuration Options for details).\n",
+					" .option(Constants.TEMP_FOLDER, (f\"\"\"abfss://temp@{TempFolder}/{db_tablename}\"\"\"))\n",
+					" # Choose a save mode that is apt for your use case.\n",
+					" # Options for save modes are \"error\" or \"errorifexists\" (default), \"overwrite\", \"append\", \"ignore\".\n",
+					" # refer to https://spark.apache.org/docs/latest/sql-data-sources-load-save-functions.html#save-modes\n",
+					" .mode(\"overwrite\")\n",
+					" # Required parameter - Three-part table name to which data will be written\n",
+					" .synapsesql(f\"\"\"{SynapseDedicatedDatabase}.dbo.{db_tablename}\"\"\"))"
+				],
+				"execution_count": 162
+			},
+			{
+				"cell_type": "code",
+				"metadata": {
+					"jupyter": {
+						"source_hidden": false,
+						"outputs_hidden": false
+					},
+					"nteract": {
+						"transient": {
+							"deleting": false
+						}
+					}
+				},
+				"source": [
+					"Gold_TotalRowCount_Post=spark.sql(f\"\"\" SELECT COUNT(*) FROM {db_notebookname}.{db_tablename}\"\"\").collect()[0][0]"
+				],
+				"execution_count": null
+			},
+			{
+				"cell_type": "code",
+				"metadata": {
+					"jupyter": {
+						"source_hidden": false,
+						"outputs_hidden": false
+					},
+					"nteract": {
+						"transient": {
+							"deleting": false
+						}
+					}
+				},
+				"source": [
+					"#Row calculation\n",
+					"Gold_TotalRows = Gold_TotalRowCount_Post"
+				],
+				"execution_count": null
+			},
+			{
+				"cell_type": "code",
+				"metadata": {
+					"jupyter": {
+						"source_hidden": false,
+						"outputs_hidden": false
+					},
+					"nteract": {
+						"transient": {
+							"deleting": false
+						}
+					}
+				},
+				"source": [
+					"from pyspark.sql.types import StructType, StructField, StringType, IntegerType, BooleanType,DateType, DoubleType,TimestampType\n",
+					"\n",
+					"log_data = [(db_notebookname,db_tablename,Gold_LoadDate,Gold_TotalRows,0,0,Gold_TotalRows,Gold_TotalRows)]\n",
+					"print(log_data)\n",
+					"log_columns = ['PIPELINE_NAME', 'TABLE_NAME', 'INGEST_DATETIME', 'INSERT','UPDATE','DELETE','ACTIVE_ROWS','TOTAL_ROWS']\n",
+					"df_log = spark.createDataFrame(log_data, log_columns)"
+				],
+				"execution_count": null
+			},
+			{
+				"cell_type": "code",
+				"metadata": {
+					"jupyter": {
+						"source_hidden": false,
+						"outputs_hidden": false
+					},
+					"nteract": {
+						"transient": {
+							"deleting": false
+						}
+					}
+				},
+				"source": [
+					"#Write to controldb\n",
+					"import json\n",
+					"db_port = 1433\n",
+					"linked_service_name = \"LS_SQL_ELTFrameworkDB\"\n",
+					"linkedServiceProperties = json.loads(mssparkutils.credentials.getPropertiesAll(linked_service_name))\n",
+					"sql_server_name = linkedServiceProperties.get('Endpoint')\n",
+					"db_name = linkedServiceProperties.get('Database')\n",
+					"access_token = mssparkutils.credentials.getConnectionStringOrCreds(linked_service_name)\n",
+					"write_table_name = \"[CTL].[CFG_INGESTION_LOGS]\"\n",
+					"\n",
+					"try:\n",
+					"    df_log.write.format(\"jdbc\") \\\n",
+					"        .option(\"url\", \"jdbc:sqlserver://%s:%s\" % (sql_server_name, db_port)) \\\n",
+					"        .option(\"dbtable\", write_table_name) \\\n",
+					"        .option(\"accessToken\", access_token) \\\n",
+					"        .option(\"encrypt\", \"true\") \\\n",
+					"        .option(\"databaseName\", db_name) \\\n",
+					"        .option(\"hostNameInCertificate\", \"*.database.windows.net\") \\\n",
+					"        .mode(\"append\") \\\n",
+					"        .save()\n",
+					"except ValueError as error :\n",
+					"    print(\"MSSQL Connector write failed\", error)\n",
+					"\n",
+					"print(\"MSSQL Connector write(append) succeeded  \")"
+				],
+				"execution_count": null
+			},
+			{
+				"cell_type": "markdown",
+				"metadata": {
+					"nteract": {
+						"transient": {
+							"deleting": false
+						}
+					}
+				},
+				"source": [
+					"# Table FactRetailNMI: END"
+				]
+			}
+		]
+	}
+}

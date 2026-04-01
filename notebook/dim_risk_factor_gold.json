@@ -1,0 +1,565 @@
+{
+	"name": "dim_risk_factor_gold",
+	"properties": {
+		"description": "A table that links the spm_Category and the sp_Name tables",
+		"folder": {
+			"name": "DataHubBatchScripts/GOLD/DIMENSIONS"
+		},
+		"nbformat": 4,
+		"nbformat_minor": 2,
+		"bigDataPool": {
+			"referenceName": "Sparkpool01",
+			"type": "BigDataPoolReference"
+		},
+		"sessionProperties": {
+			"driverMemory": "56g",
+			"driverCores": 8,
+			"executorMemory": "56g",
+			"executorCores": 8,
+			"numExecutors": 2,
+			"conf": {
+				"spark.dynamicAllocation.enabled": "false",
+				"spark.dynamicAllocation.minExecutors": "2",
+				"spark.dynamicAllocation.maxExecutors": "2",
+				"spark.autotune.trackingId": "ede34ae0-a309-408d-9697-2941a37eca4f"
+			}
+		},
+		"metadata": {
+			"saveOutput": true,
+			"enableDebugMode": false,
+			"kernelspec": {
+				"name": "synapse_pyspark",
+				"display_name": "Synapse PySpark"
+			},
+			"language_info": {
+				"name": "python"
+			},
+			"a365ComputeOptions": {
+				"id": "/subscriptions/2e9f823e-dc76-4e8e-b815-c8a4f22d05ff/resourceGroups/CQL-AZUR1-DEVDATAHUB01-RG/providers/Microsoft.Synapse/workspaces/cql-dev-datahub-synapse01/bigDataPools/Sparkpool01",
+				"name": "Sparkpool01",
+				"type": "Spark",
+				"endpoint": "https://cql-dev-datahub-synapse01.dev.azuresynapse.net/livyApi/versions/2019-11-01-preview/sparkPools/Sparkpool01",
+				"auth": {
+					"type": "AAD",
+					"authResource": "https://dev.azuresynapse.net"
+				},
+				"sparkVersion": "3.4",
+				"nodeCount": 10,
+				"cores": 8,
+				"memory": 56,
+				"automaticScaleJobs": false
+			},
+			"sessionKeepAliveTimeout": 30
+		},
+		"cells": [
+			{
+				"cell_type": "markdown",
+				"metadata": {
+					"nteract": {
+						"transient": {
+							"deleting": false
+						}
+					}
+				},
+				"source": [
+					"# SPM_dimriskfactor"
+				]
+			},
+			{
+				"cell_type": "code",
+				"source": [
+					"#Imports\n",
+					"import json\n",
+					"from pyspark.sql.functions import hash\n",
+					"from pyspark.sql import functions as fn\n",
+					"from pyspark.sql.functions import col, concat, count, lit, to_timestamp,current_timestamp,date_format\n",
+					"from pyspark.sql.functions import sha2, concat_ws\n",
+					"from pyspark.sql.types import StructType, StructField, StringType, IntegerType, BooleanType,DateType, DoubleType,TimestampType\n",
+					"from datetime import datetime"
+				],
+				"execution_count": 1
+			},
+			{
+				"cell_type": "markdown",
+				"metadata": {
+					"nteract": {
+						"transient": {
+							"deleting": false
+						}
+					}
+				},
+				"source": [
+					"### Config Database"
+				]
+			},
+			{
+				"cell_type": "code",
+				"source": [
+					"#Get Parameter from controldb\n",
+					"db_port = 1433\n",
+					"linked_service_name = \"LS_SQL_ELTFrameworkDB\"\n",
+					"lake_db_name = \"gold\"\n",
+					"db_notebookname= \"dim_risk_factor_gold\"\n",
+					"linkedServiceProperties = json.loads(mssparkutils.credentials.getPropertiesAll(linked_service_name))\n",
+					"sql_server_name = linkedServiceProperties.get('Endpoint')\n",
+					"db_name = linkedServiceProperties.get('Database')\n",
+					"#print(linkedServiceProperties)\n",
+					"access_token = mssparkutils.credentials.getConnectionStringOrCreds(linked_service_name)\n",
+					"\n",
+					"db_query =\"SELECT A.*,B.NotebookParameterId,B.ParameterType,B.Value  FROM [CTL].[CFG_NOTEBOOK] A LEFT JOIN [CTL].[CFG_NOTEBOOK_PARAMETER] B ON A.NotebookId = B.NotebookId\"\n",
+					"\n",
+					"df = spark.read.format(\"jdbc\") \\\n",
+					"    .option(\"url\", \"jdbc:sqlserver://%s:%s\" % (sql_server_name, db_port)) \\\n",
+					"    .option(\"query\", db_query) \\\n",
+					"    .option(\"accessToken\", access_token) \\\n",
+					"    .option(\"encrypt\", \"true\") \\\n",
+					"    .option(\"databaseName\", db_name) \\\n",
+					"    .option(\"hostNameInCertificate\", \"*.database.windows.net\") \\\n",
+					"    .load()\n",
+					"\n",
+					"df2 = df.where(df.NotebookPath==db_notebookname) "
+				],
+				"execution_count": 2
+			},
+			{
+				"cell_type": "code",
+				"source": [
+					"#Destination DataLake storage details\n",
+					"destination_storage = df2.where(df2.ParameterType=='destination_storage').collect()[0][\"Value\"] #Storage name\n",
+					"destination_container = df2.where(df2.ParameterType=='destination_container').collect()[0][\"Value\"] #raw storage container details\n",
+					"destination_path = df2.where(df2.ParameterType=='destination_path').collect()[0][\"Value\"] #raw delta file patch\n",
+					"\n",
+					"#Get Current Date\n",
+					"Date_Collection = spark.sql(\"select current_timestamp() AS Current,(current_timestamp() + interval '-1' second) AS EndDate\").collect()\n",
+					"Gold_LoadDate = Date_Collection[0]['Current']\n",
+					"Gold_UpdateEndDate = Date_Collection[0]['EndDate']\n",
+					"\n",
+					"#Synapse Dedicated Server detials\n",
+					"SynapseDedicatedServer = df2.where(df2.ParameterType=='destination_storage').collect()[0]['SynapseDedicatedServer'] \n",
+					"TempFolder = df2.where(df2.ParameterType=='destination_storage').collect()[0]['TempFolder']\n",
+					"SynapseDedicatedDatabase = df2.where(df2.ParameterType=='destination_storage').collect()[0]['SynapseDedicatedDatabase']"
+				],
+				"execution_count": 3
+			},
+			{
+				"cell_type": "code",
+				"source": [
+					"#Set table name\n",
+					"db_tablename = \"dim_risk_factor\""
+				],
+				"execution_count": 4
+			},
+			{
+				"cell_type": "markdown",
+				"metadata": {
+					"nteract": {
+						"transient": {
+							"deleting": false
+						}
+					}
+				},
+				"source": [
+					"### Table Creation"
+				]
+			},
+			{
+				"cell_type": "code",
+				"source": [
+					"# Create a table\n",
+					"spark.sql(f\"\"\"\n",
+					"CREATE TABLE IF NOT EXISTS {lake_db_name}.{db_tablename}\n",
+					"(\n",
+					"        SPM_CategoryHashId string,\n",
+					"        SPM_NameHashId string,\n",
+					"        SPM_LacimaRiskFactorHashId string,\n",
+					"        RiskFactorNames string,\n",
+					"        RiskFactorNamesHashId string,\n",
+					"        SPM_Name_ID int,\n",
+					"        SPM_Category_ID int,\n",
+					"        StationName string,\n",
+					"        Capacity double,\n",
+					"        StartDate date,\n",
+					"        EndDate date,\n",
+					"        MLF double,\n",
+					"        AuxiliaryLoss double,\n",
+					"        NumberOfUnits double,\n",
+					"        Duration int,\n",
+					"        Category1 string,\n",
+					"        Category2 string,\n",
+					"        Category3 string,\n",
+					"        Category4 string,\n",
+					"        Category5 string,\n",
+					"        Category6 string,\n",
+					"        HashKey string,\n",
+					"        HashDiff string,\n",
+					"        CDCLoadDate timestamp,\n",
+					"        CDCStartDate timestamp,\n",
+					"        CDCEndDate timestamp,\n",
+					"        CDCCurrentFlag int,\n",
+					"        CDCOps int\n",
+					")\n",
+					"USING delta\n",
+					"LOCATION 'abfss://{destination_container}@{destination_storage}.dfs.core.windows.net/{destination_path}/{db_tablename}'\n",
+					"\"\"\")"
+				],
+				"execution_count": 5
+			},
+			{
+				"cell_type": "markdown",
+				"metadata": {
+					"nteract": {
+						"transient": {
+							"deleting": false
+						}
+					}
+				},
+				"source": [
+					""
+				]
+			},
+			{
+				"cell_type": "markdown",
+				"metadata": {
+					"nteract": {
+						"transient": {
+							"deleting": false
+						}
+					}
+				},
+				"source": [
+					"### Load/Transform Data"
+				]
+			},
+			{
+				"cell_type": "code",
+				"source": [
+					"#Load source data\n",
+					"\n",
+					"# station table (silver)\n",
+					"station_table = \"sharepoint_silver.spm_name\"\n",
+					"\n",
+					"# category table (silver)\n",
+					"category_table = \"sharepoint_silver.spm_category\"\n",
+					"\n",
+					"# lacimariskfactor table (silver)\n",
+					"lacimariskfactor_table = \"sharepoint_silver.spm_lacimariskfactor\""
+				],
+				"execution_count": 6
+			},
+			{
+				"cell_type": "code",
+				"metadata": {
+					"collapsed": false
+				},
+				"source": [
+					"#Drop unnecessary columns in Station Table\n",
+					"\n",
+					"df_s = spark.sql(f\"\"\"\n",
+					"    SELECT *\n",
+					"    FROM {station_table}\n",
+					"\"\"\")\n",
+					"#.drop(\"ID\", \"FileName\", \"Lacima_loaddate\")\n",
+					"#df_s.dtypes"
+				],
+				"execution_count": 20
+			},
+			{
+				"cell_type": "code",
+				"source": [
+					"#Drop unnecessary columns in Category Table\n",
+					"\n",
+					"df_c = spark.sql(f\"\"\"\n",
+					"    SELECT *\n",
+					"    FROM {category_table}\n",
+					"\"\"\")\n",
+					"#.drop(\"ID\", \"FileName\", \"Lacima_loaddate\")\n",
+					"#df_c.dtypes"
+				],
+				"execution_count": 8
+			},
+			{
+				"cell_type": "code",
+				"metadata": {
+					"collapsed": false
+				},
+				"source": [
+					"#Drop unnecessary columns in Lacimariskfactor Table\n",
+					"\n",
+					"df_l = spark.sql(f\"\"\"\n",
+					"    SELECT *\n",
+					"    FROM {lacimariskfactor_table}\n",
+					"\"\"\")\n",
+					"#.drop(\"ID\", \"FileName\", \"Lacima_loaddate\")\n",
+					"#df_l.dtypes"
+				],
+				"execution_count": 9
+			},
+			{
+				"cell_type": "code",
+				"metadata": {
+					"collapsed": false
+				},
+				"source": [
+					"# Join tables\n",
+					"df_gold = df_l.join(df_s, \"SPM_NameHashId\", \"left\").join(df_c, \"SPM_CategoryHashId\", \"left\")\n",
+					"#display(df_gold)"
+				],
+				"execution_count": 10
+			},
+			{
+				"cell_type": "code",
+				"metadata": {
+					"ms_comments": [
+						{
+							"threadId": "27c5cdd8-ce46-46ea-b88a-0b4c5061bc20",
+							"text": "Should any ID columns be listed in the HashDiff",
+							"status": "active",
+							"user": {
+								"name": "Admin.Su.Seol",
+								"idType": "aad"
+							},
+							"createdDateUTC": 1755236836995,
+							"modifiedDateUTC": 1755236836995,
+							"replies": []
+						}
+					]
+				},
+				"source": [
+					"# Add CDC columns\n",
+					"df_gold = df_gold.withColumns({\n",
+					"    \"HashKey\" : sha2(concat_ws(\"||\", \"SPM_CategoryHashId\", \"SPM_NameHashId\", \"SPM_LacimaRiskFactorHashId\"), 256),\n",
+					"    \"HashDiff\" : sha2(concat_ws(\"||\",\n",
+					"                                'RiskFactorNames',\n",
+					"                                'StationName',\n",
+					"                                'Capacity',\n",
+					"                                'StartDate',\n",
+					"                                'EndDate',\n",
+					"                                'MLF',\n",
+					"                                'AuxiliaryLoss',\n",
+					"                                'NumberOfUnits',\n",
+					"                                'Duration',\n",
+					"                                'Category1',\n",
+					"                                'Category2',\n",
+					"                                'Category3',\n",
+					"                                'Category4',\n",
+					"                                'Category5',\n",
+					"                                'Category6'\n",
+					"                                ), 256),\n",
+					"    \"CDCLoadDate\" : to_timestamp(lit(Gold_LoadDate),'yyyy-MM-dd HH:mm:ss'),\n",
+					"    \"CDCStartDate\" : to_timestamp(lit(Gold_LoadDate), 'yyyy-MM-dd HH:mm:ss'),\n",
+					"    \"CDCEndDate\" : to_timestamp(lit(\"9999-12-31 23:59:59\"), 'yyyy-MM-dd HH:mm:ss'),\n",
+					"    \"CDCCurrentFlag\" : lit(1),\n",
+					"    \"CDCOps\" : lit(1)\n",
+					"    })"
+				],
+				"execution_count": 11
+			},
+			{
+				"cell_type": "markdown",
+				"metadata": {
+					"nteract": {
+						"transient": {
+							"deleting": false
+						}
+					}
+				},
+				"source": [
+					"### Create a TempView"
+				]
+			},
+			{
+				"cell_type": "code",
+				"source": [
+					"# Create a temporary view of the dataframe\n",
+					"df_gold.createOrReplaceTempView(\"temp_view\")"
+				],
+				"execution_count": 12
+			},
+			{
+				"cell_type": "markdown",
+				"metadata": {
+					"nteract": {
+						"transient": {
+							"deleting": false
+						}
+					}
+				},
+				"source": [
+					"### Merge a TempView with the target table"
+				]
+			},
+			{
+				"cell_type": "code",
+				"metadata": {
+					"ms_comments": []
+				},
+				"source": [
+					"# SCD2 logic\n",
+					"# Use the merge operation to update the target table\n",
+					"spark.sql(f\"\"\"\n",
+					"    MERGE INTO {lake_db_name}.{db_tablename} t\n",
+					"    USING temp_view s\n",
+					"    ON t.HashKey = s.HashKey AND t.CDCCurrentFlag == true\n",
+					"    WHEN MATCHED AND t.HashDiff <> s.HashDiff THEN\n",
+					"      UPDATE SET t.CDCEndDate = '{Gold_UpdateEndDate}',\n",
+					"                 t.CDCCurrentFlag = false,\n",
+					"                 t.CDCOps = s.CDCOps + 1\n",
+					"    WHEN NOT MATCHED THEN\n",
+					"      INSERT (SPM_CategoryHashId, SPM_NameHashId, SPM_LacimaRiskFactorHashId, RiskFactorNames, RiskFactorNamesHashId, SPM_Name_ID, SPM_Category_ID, StationName, Capacity, StartDate, EndDate, MLF, AuxiliaryLoss, NumberOfUnits, Duration, Category1, Category2, Category3, Category4, Category5, Category6, HashKey, HashDiff, CDCLoadDate, CDCStartDate, CDCEndDate, CDCCurrentFlag, CDCOps)\n",
+					"      VALUES (s.SPM_CategoryHashId, s.SPM_NameHashId, s.SPM_LacimaRiskFactorHashId, s.RiskFactorNames, s.RiskFactorNamesHashId, s.SPM_Name_ID, s.SPM_Category_ID, s.StationName, s.Capacity, s.StartDate, s.EndDate, s.MLF, s.AuxiliaryLoss, s.NumberOfUnits, s.Duration, s.Category1, s.Category2, s.Category3, s.Category4, s.Category5, s.Category6, s.HashKey, s.HashDiff, s.CDCLoadDate, s.CDCStartDate, s.CDCEndDate, s.CDCCurrentFlag, s.CDCOps)\n",
+					"\"\"\")\n",
+					"\n",
+					"# Use the merge operation to Insert updated record \n",
+					"spark.sql(f\"\"\"\n",
+					"    MERGE INTO {lake_db_name}.{db_tablename} t\n",
+					"    USING temp_view s\n",
+					"    ON t.HashKey = s.HashKey AND t.CDCCurrentFlag == true\n",
+					"    WHEN MATCHED AND t.HashDiff <> s.HashDiff THEN\n",
+					"      UPDATE SET t.CDCEndDate = '{Gold_UpdateEndDate}',\n",
+					"                 t.CDCCurrentFlag = false,\n",
+					"                 t.CDCOps = s.CDCOps + 1\n",
+					"    WHEN NOT MATCHED THEN\n",
+					"      INSERT (SPM_CategoryHashId, SPM_NameHashId, SPM_LacimaRiskFactorHashId, RiskFactorNames, RiskFactorNamesHashId, SPM_Name_ID, SPM_Category_ID, StationName, Capacity, StartDate, EndDate, MLF, AuxiliaryLoss, NumberOfUnits, Duration, Category1, Category2, Category3, Category4, Category5, Category6, HashKey, HashDiff, CDCLoadDate, CDCStartDate, CDCEndDate, CDCCurrentFlag, CDCOps)\n",
+					"      VALUES (s.SPM_CategoryHashId, s.SPM_NameHashId, s.SPM_LacimaRiskFactorHashId, s.RiskFactorNames, s.RiskFactorNamesHashId, s.SPM_Name_ID, s.SPM_Category_ID, s.StationName, s.Capacity, s.StartDate, s.EndDate, s.MLF, s.AuxiliaryLoss, s.NumberOfUnits, s.Duration, s.Category1, s.Category2, s.Category3, s.Category4, s.Category5, s.Category6, s.HashKey, s.HashDiff, s.CDCLoadDate, s.CDCStartDate, s.CDCEndDate, s.CDCCurrentFlag, s.CDCOps)\n",
+					"\"\"\")\n",
+					""
+				],
+				"execution_count": 13
+			},
+			{
+				"cell_type": "code",
+				"source": [
+					"column_order = [\n",
+					"        \"SPM_CategoryHashId\",\n",
+					"        \"SPM_NameHashId\",\n",
+					"        \"SPM_LacimaRiskFactorHashId\",\n",
+					"        \"RiskFactorNames\",\n",
+					"        \"RiskFactorNamesHashId\",\n",
+					"        \"SPM_Name_ID\",\n",
+					"        \"SPM_Category_ID\",\n",
+					"        \"StationName\",\n",
+					"        \"Capacity\",\n",
+					"        \"StartDate\",\n",
+					"        \"EndDate\",\n",
+					"        \"MLF\",\n",
+					"        \"AuxiliaryLoss\",\n",
+					"        \"NumberOfUnits\",\n",
+					"        \"Duration\",\n",
+					"        \"Category1\",\n",
+					"        \"Category2\",\n",
+					"        \"Category3\",\n",
+					"        \"Category4\",\n",
+					"        \"Category5\",\n",
+					"        \"Category6\",\n",
+					"        \"HashKey\",\n",
+					"        \"HashDiff\",\n",
+					"        \"CDCLoadDate\",\n",
+					"        \"CDCStartDate\",\n",
+					"        \"CDCEndDate\",\n",
+					"        \"CDCCurrentFlag\",\n",
+					"        \"CDCOps\"\n",
+					"]"
+				],
+				"execution_count": 14
+			},
+			{
+				"cell_type": "markdown",
+				"metadata": {
+					"nteract": {
+						"transient": {
+							"deleting": false
+						}
+					}
+				},
+				"source": [
+					"### Load into Dedicated SQL"
+				]
+			},
+			{
+				"cell_type": "code",
+				"source": [
+					"db_tablename_dedicated = \"DimRiskFactor\""
+				],
+				"execution_count": 15
+			},
+			{
+				"cell_type": "code",
+				"source": [
+					"# Write using AAD Auth to internal table\n",
+					"# Add required imports\n",
+					"import com.microsoft.spark.sqlanalytics\n",
+					"from com.microsoft.spark.sqlanalytics.Constants import Constants\n",
+					"from pyspark.sql.functions import *\n",
+					"\n",
+					"#order columns for Azure Synapse insert should match synapse table creation order.\n",
+					"df_gold=df_gold.select(*column_order)\n",
+					"\n",
+					"# Configure and submit the request to write to Synapse Dedicated SQL Pool\n",
+					"# Sample below is using AAD-based authentication approach; See further examples to leverage SQL Basic auth.\n",
+					"(df_gold.write\n",
+					"    # If `Constants.SERVER` is not provided, the `<database_name>` from the three-part table name argument\n",
+					"    # to `synapsesql` method is used to infer the Synapse Dedicated SQL End Point.\n",
+					"    .option(Constants.SERVER, f\"\"\"{SynapseDedicatedServer}\"\"\")\n",
+					"    # Like-wise, if `Constants.TEMP_FOLDER` is not provided, the connector will use the runtime staging directory config (see section on Configuration Options for details).\n",
+					"    .option(Constants.TEMP_FOLDER, (f\"\"\"abfss://temp@{TempFolder}/{db_tablename_dedicated}\"\"\"))\n",
+					"    # Choose a save mode that is apt for your use case.\n",
+					"    # Options for save modes are \"error\" or \"errorifexists\" (default), \"overwrite\", \"append\", \"ignore\".\n",
+					"    # refer to https://spark.apache.org/docs/latest/sql-data-sources-load-save-functions.html#save-modes\n",
+					"    .mode(\"overwrite\")\n",
+					"    # Required parameter - Three-part table name to which data will be written\n",
+					"    .synapsesql(f\"\"\"{SynapseDedicatedDatabase}.dbo.{db_tablename_dedicated}\"\"\"))"
+				],
+				"execution_count": 16
+			},
+			{
+				"cell_type": "code",
+				"source": [
+					"Gold_TotalRows=spark.sql(f\"\"\" SELECT COUNT(*) FROM {lake_db_name}.{db_tablename}\"\"\").collect()[0][0]"
+				],
+				"execution_count": 17
+			},
+			{
+				"cell_type": "code",
+				"source": [
+					"from pyspark.sql.types import StructType, StructField, StringType, IntegerType, BooleanType,DateType, DoubleType,TimestampType\n",
+					"\n",
+					"log_data = [(db_notebookname,db_tablename,Gold_LoadDate,Gold_TotalRows,0,0,Gold_TotalRows,Gold_TotalRows)]\n",
+					"print(log_data)\n",
+					"log_columns = ['PIPELINE_NAME', 'TABLE_NAME', 'INGEST_DATETIME', 'INSERT','UPDATE','DELETE','ACTIVE_ROWS','TOTAL_ROWS']\n",
+					"df_log = spark.createDataFrame(log_data, log_columns)"
+				],
+				"execution_count": 18
+			},
+			{
+				"cell_type": "code",
+				"source": [
+					"#Write to controldb\n",
+					"import json\n",
+					"db_port = 1433\n",
+					"linked_service_name = \"LS_SQL_ELTFrameworkDB\"\n",
+					"linkedServiceProperties = json.loads(mssparkutils.credentials.getPropertiesAll(linked_service_name))\n",
+					"sql_server_name = linkedServiceProperties.get('Endpoint')\n",
+					"db_name = linkedServiceProperties.get('Database')\n",
+					"access_token = mssparkutils.credentials.getConnectionStringOrCreds(linked_service_name)\n",
+					"write_table_name = \"[CTL].[CFG_INGESTION_LOGS]\"\n",
+					"\n",
+					"try:\n",
+					"    df_log.write.format(\"jdbc\") \\\n",
+					"        .option(\"url\", \"jdbc:sqlserver://%s:%s\" % (sql_server_name, db_port)) \\\n",
+					"        .option(\"dbtable\", write_table_name) \\\n",
+					"        .option(\"accessToken\", access_token) \\\n",
+					"        .option(\"encrypt\", \"true\") \\\n",
+					"        .option(\"databaseName\", db_name) \\\n",
+					"        .option(\"hostNameInCertificate\", \"*.database.windows.net\") \\\n",
+					"        .mode(\"append\") \\\n",
+					"        .save()\n",
+					"except ValueError as error :\n",
+					"    print(\"MSSQL Connector write failed\", error)\n",
+					"\n",
+					"print(\"MSSQL Connector write(append) succeeded  \")"
+				],
+				"execution_count": 19
+			}
+		]
+	}
+}

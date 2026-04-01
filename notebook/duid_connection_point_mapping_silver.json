@@ -1,0 +1,509 @@
+{
+	"name": "duid_connection_point_mapping_silver",
+	"properties": {
+		"folder": {
+			"name": "DataHubBatchScripts/SILVER/SustainabilityUseCase"
+		},
+		"nbformat": 4,
+		"nbformat_minor": 2,
+		"bigDataPool": {
+			"referenceName": "Sparkpool01",
+			"type": "BigDataPoolReference"
+		},
+		"sessionProperties": {
+			"driverMemory": "56g",
+			"driverCores": 8,
+			"executorMemory": "56g",
+			"executorCores": 8,
+			"numExecutors": 2,
+			"conf": {
+				"spark.dynamicAllocation.enabled": "false",
+				"spark.dynamicAllocation.minExecutors": "2",
+				"spark.dynamicAllocation.maxExecutors": "2",
+				"spark.autotune.trackingId": "649a039f-b16d-4e6c-b453-b96a137fb0f3"
+			}
+		},
+		"metadata": {
+			"saveOutput": true,
+			"enableDebugMode": false,
+			"kernelspec": {
+				"name": "synapse_pyspark",
+				"display_name": "Synapse PySpark"
+			},
+			"language_info": {
+				"name": "python"
+			},
+			"a365ComputeOptions": {
+				"id": "/subscriptions/2e9f823e-dc76-4e8e-b815-c8a4f22d05ff/resourceGroups/CQL-AZUR1-DEVDATAHUB01-RG/providers/Microsoft.Synapse/workspaces/cql-dev-datahub-synapse01/bigDataPools/Sparkpool01",
+				"name": "Sparkpool01",
+				"type": "Spark",
+				"endpoint": "https://cql-dev-datahub-synapse01.dev.azuresynapse.net/livyApi/versions/2019-11-01-preview/sparkPools/Sparkpool01",
+				"auth": {
+					"type": "AAD",
+					"authResource": "https://dev.azuresynapse.net"
+				},
+				"sparkVersion": "3.4",
+				"nodeCount": 10,
+				"cores": 8,
+				"memory": 56,
+				"automaticScaleJobs": false
+			},
+			"sessionKeepAliveTimeout": 30
+		},
+		"cells": [
+			{
+				"cell_type": "markdown",
+				"metadata": {
+					"nteract": {
+						"transient": {
+							"deleting": false
+						}
+					}
+				},
+				"source": [
+					"#### Implement Feature Flags"
+				]
+			},
+			{
+				"cell_type": "code",
+				"source": [
+					"duid_connection_point_mapping_silver = False"
+				],
+				"execution_count": 5
+			},
+			{
+				"cell_type": "code",
+				"source": [
+					"%run \"DataHubBatchScripts/DEVELOPMENT_TOOLS/get_feature_flags\""
+				],
+				"execution_count": 6
+			},
+			{
+				"cell_type": "code",
+				"source": [
+					"try:\n",
+					"    duid_connection_point_mapping_silver = df_feature_flags.where(\"FlagName = 'duid_connection_point_mapping_silver'\").collect()[0][\"FlagState\"]\n",
+					"except Exception as e:\n",
+					"    print(e) # printing error output in case unexpected errors occur with the above\n",
+					"\n",
+					"if duid_connection_point_mapping_silver:\n",
+					"    print(\"Feature flag is configured for this notebook\")    \n",
+					"else:\n",
+					"    # Feature flag doesn't exist, so this section runs by default. The below kill command stops the Notebook from running. \n",
+					"    print(\"Feature Flag for this notebook is not configured or not in the True state.\")\n",
+					"    mssparkutils.notebook.exit(\"Feature is not Production-ready. Closing Notebook.\")"
+				],
+				"execution_count": 7
+			},
+			{
+				"cell_type": "markdown",
+				"metadata": {
+					"nteract": {
+						"transient": {
+							"deleting": false
+						}
+					}
+				},
+				"source": [
+					"#### Import python libraries"
+				]
+			},
+			{
+				"cell_type": "code",
+				"source": [
+					"# - json: for encoding (serializing) Python objects to JSON and decoding (deserializing) JSON strings\n",
+					"# - logging: for logging events or errors within the application\n",
+					"# - sys: for accessing system-specific parameters and functions\n",
+					"# - Window: perform window operations on DataFrames\n",
+					"# - hash: for computing a hash value for specified columns\n",
+					"# - functions: for column operations and transformations\n",
+					"# - col, concat, lit, to_timestamp,current_timestamp,date_format: for column reference, string concatenation, literal values, timestamp conversion, current timestamp, and date formatting\n",
+					"# - sha2, concat_ws: for SHA-2 hashing and concatenating strings with a separator\n",
+					"# - types: for defining DataFrame schemas with structured fields and specific column types\n",
+					"# - datetime: for handling date and time operations\n",
+					"import json\n",
+					"import logging\n",
+					"import sys\n",
+					"from pyspark.sql import Window\n",
+					"from pyspark.sql.functions import col, concat, lit, to_timestamp, current_timestamp, date_format, to_date\n",
+					"from pyspark.sql.functions import hash, sha2, concat_ws, when, coalesce, regexp_extract, lower, row_number\n",
+					"from pyspark.sql.types import StructType, StructField, StringType, IntegerType, BooleanType,DateType, DoubleType,TimestampType\n",
+					"\n",
+					"from datetime import datetime"
+				],
+				"execution_count": 4
+			},
+			{
+				"cell_type": "markdown",
+				"metadata": {
+					"nteract": {
+						"transient": {
+							"deleting": false
+						}
+					}
+				},
+				"source": [
+					"#### Configure sql client connection"
+				]
+			},
+			{
+				"cell_type": "code",
+				"source": [
+					"#Get Parameter from controldb\n",
+					"db_port = 1433\n",
+					"linked_service_name = \"LS_SQL_ELTFrameworkDB\"\n",
+					"lake_db_name = \"silver\"\n",
+					"db_notebookname= \"duid_connection_point_mapping_silver\"\n",
+					"linkedServiceProperties = json.loads(mssparkutils.credentials.getPropertiesAll(linked_service_name))\n",
+					"sql_server_name = linkedServiceProperties.get('Endpoint')\n",
+					"db_name = linkedServiceProperties.get('Database')\n",
+					"#print(linkedServiceProperties)\n",
+					"access_token = mssparkutils.credentials.getConnectionStringOrCreds(linked_service_name)\n",
+					"\n",
+					"db_query =\"SELECT A.*,B.NotebookParameterId,B.ParameterType,B.Value  FROM [CTL].[CFG_NOTEBOOK] A LEFT JOIN [CTL].[CFG_NOTEBOOK_PARAMETER] B ON A.NotebookId = B.NotebookId\"\n",
+					"\n",
+					"df = spark.read.format(\"jdbc\") \\\n",
+					"    .option(\"url\", \"jdbc:sqlserver://%s:%s\" % (sql_server_name, db_port)) \\\n",
+					"    .option(\"query\", db_query) \\\n",
+					"    .option(\"accessToken\", access_token) \\\n",
+					"    .option(\"encrypt\", \"true\") \\\n",
+					"    .option(\"databaseName\", db_name) \\\n",
+					"    .option(\"hostNameInCertificate\", \"*.database.windows.net\") \\\n",
+					"    .load()\n",
+					"\n",
+					"df2 = df.where(df.NotebookPath==db_notebookname) "
+				],
+				"execution_count": 2
+			},
+			{
+				"cell_type": "code",
+				"source": [
+					"#Destination DataLake storage details\n",
+					"destination_storage = df2.where(df2.ParameterType=='destination_storage').collect()[0][\"Value\"]\n",
+					"destination_container = df2.where(df2.ParameterType=='destination_container').collect()[0][\"Value\"]\n",
+					"destination_path = df2.where(df2.ParameterType=='destination_path').collect()[0][\"Value\"]\n",
+					"\n",
+					"\n",
+					"#Get Current Date\n",
+					"Date_Collection = spark.sql(\"select current_timestamp() AS Current,(current_timestamp() + interval '-1' second) AS EndDate\").collect()\n",
+					"Silver_LoadDate = Date_Collection[0]['Current']\n",
+					"Silver_UpdateEndDate = Date_Collection[0]['EndDate']"
+				],
+				"execution_count": 3
+			},
+			{
+				"cell_type": "markdown",
+				"metadata": {
+					"nteract": {
+						"transient": {
+							"deleting": false
+						}
+					}
+				},
+				"source": [
+					"#### Configure logging"
+				]
+			},
+			{
+				"cell_type": "code",
+				"source": [
+					"# Configure logging\n",
+					"def setup_logger(notebook_name):\n",
+					"    # Get or create logger\n",
+					"    logger = logging.getLogger(notebook_name)\n",
+					"    logger.setLevel(logging.DEBUG)  # Set to DEBUG for detailed logs\n",
+					"\n",
+					"    # Remove any existing handlers to prevent duplicates\n",
+					"    logger.handlers.clear()\n",
+					"\n",
+					"    # Prevent propagation to root logger (avoids default handlers)\n",
+					"    logger.propagate = False\n",
+					"\n",
+					"    # Create console handler\n",
+					"    console_handler = logging.StreamHandler(sys.stdout)\n",
+					"    console_handler.setLevel(logging.DEBUG)\n",
+					"\n",
+					"    # Define log format (only the formatted line will appear)\n",
+					"    log_format = logging.Formatter('%(asctime)s - %(name)s - %(levelname)s - %(message)s')\n",
+					"    console_handler.setFormatter(log_format)\n",
+					"\n",
+					"    # Add handler to logger\n",
+					"    logger.addHandler(console_handler)\n",
+					"    \n",
+					"    return logger"
+				],
+				"execution_count": 4
+			},
+			{
+				"cell_type": "code",
+				"source": [
+					"# Set up logger for this notebook\n",
+					"logger = setup_logger(\"DUID_Connection_Point_Mapping_Bronze_To_Silver\")"
+				],
+				"execution_count": 5
+			},
+			{
+				"cell_type": "markdown",
+				"metadata": {
+					"nteract": {
+						"transient": {
+							"deleting": false
+						}
+					}
+				},
+				"source": [
+					"# Table: duid_connection_point_mapping: START"
+				]
+			},
+			{
+				"cell_type": "code",
+				"source": [
+					"#Set table name\n",
+					"db_tablename=\"duid_connection_point_mapping\""
+				],
+				"execution_count": 6
+			},
+			{
+				"cell_type": "code",
+				"source": [
+					"#Create silver sf6_emissions Table\n",
+					"try:\n",
+					"    spark.sql(f\"\"\"CREATE DATABASE IF NOT EXISTS {lake_db_name};\"\"\")\n",
+					"    spark.sql(f\"\"\"\n",
+					"    CREATE TABLE IF NOT EXISTS {lake_db_name}.{db_tablename}\n",
+					"    (\n",
+					"        ParticipantId STRING,\n",
+					"        StationId STRING,\n",
+					"        Mapped_DUID STRING,\n",
+					"        DUID STRING,\n",
+					"        GenSetId STRING,\n",
+					"        RegionId STRING,\n",
+					"        ConnectionPointId STRING,\n",
+					"        ValidFromDate DATE,\n",
+					"        ValidToDate DATE,\n",
+					"        CDCLoadDate TIMESTAMP,\n",
+					"        CDCStartDate TIMESTAMP,\n",
+					"        CDCEndDate TIMESTAMP,\n",
+					"        CDCOps INT,\n",
+					"        CDCCurrentFlag BOOLEAN,\n",
+					"        HashKey STRING,\n",
+					"        HashDiff STRING\n",
+					"    )\n",
+					"    USING delta\n",
+					"    LOCATION 'abfss://{destination_container}@{destination_storage}.dfs.core.windows.net/{destination_path}/{db_tablename}'\n",
+					"    \"\"\")\n",
+					"\n",
+					"except Exception as e:\n",
+					"    logger.error(f\"Failed to create delta table:  {lake_db_name}.{db_tablename}: {str(e)}\")\n",
+					"    raise"
+				],
+				"execution_count": 7
+			},
+			{
+				"cell_type": "code",
+				"metadata": {
+					"collapsed": false
+				},
+				"source": [
+					"logger.info(f\"Started - Process to extract data from esg_sharepoint_bronze.duid_connection_point_mapping\")\n",
+					"\n",
+					"try:\n",
+					"    df_silver = spark.sql(\"\"\"\n",
+					"        SELECT\n",
+					"            ParticipantId,\n",
+					"            StationId,\n",
+					"            Mapped_DUID,\n",
+					"            DUID,\n",
+					"            GenSetId,\n",
+					"            RegionId,\n",
+					"            ConnectionPointId,\n",
+					"            ValidFromDate,\n",
+					"            ValidToDate\n",
+					"        FROM\n",
+					"            esg_sharepoint_bronze.duid_connection_point_mapping \n",
+					"        WHERE 1=1\n",
+					"            AND CDCCurrentFlag = 1\n",
+					"    \"\"\")\n",
+					"\n",
+					"except Exception as e:\n",
+					"    logger.error(f\"Error - Process to extract data from esg_sharepoint_bronze.duid_connection_point_mapping: {str(e)}\")\n",
+					"    raise\n",
+					"finally:\n",
+					"    logger.info(\"Completed - Process to extract data from esg_sharepoint_bronze.duid_connection_point_mapping\")\n",
+					"    "
+				],
+				"execution_count": 10
+			},
+			{
+				"cell_type": "code",
+				"source": [
+					"# Add CDC columns\n",
+					"try:\n",
+					"    df_silver = df_silver.withColumn(\"HashKey\", sha2(concat_ws(\"||\", \"ParticipantId\", \"StationId\", \"Mapped_DUID\", \"DUID\", \"GenSetId\", \"ConnectionPointId\", \"ValidFromDate\", \"ValidToDate\"), 256))\n",
+					"    df_silver = df_silver.withColumn(\"HashDiff\", sha2(concat_ws(\"||\", \"RegionId\"), 256))\n",
+					"    df_silver = df_silver.withColumn(\"CDCLoadDate\", to_timestamp(lit(Silver_LoadDate),'yyyy-MM-dd HH:mm:ss'))\n",
+					"    df_silver = df_silver.withColumn(\"CDCStartDate\", to_timestamp(lit(Silver_LoadDate), 'yyyy-MM-dd HH:mm:ss'))\n",
+					"    df_silver = df_silver.withColumn(\"CDCEndDate\", to_timestamp(lit(\"9999-12-31 23:59:59\"), 'yyyy-MM-dd HH:mm:ss'))\n",
+					"    df_silver = df_silver.withColumn(\"CDCCurrentFlag\", lit(1))\n",
+					"    df_silver = df_silver.withColumn(\"CDCOps\", lit(1))\n",
+					"\n",
+					"except Exception as e:\n",
+					"    logger.error(f\"Error - Error adding CDC columns to: {lake_db_name}.{db_tablename} : {str(e)}\")\n",
+					"    raise"
+				],
+				"execution_count": 12
+			},
+			{
+				"cell_type": "code",
+				"source": [
+					"# Row count parameters\n",
+					"Silver_Insert_Pre=spark.sql(f\"\"\" SELECT COUNT(*) FROM {lake_db_name}.{db_tablename} WHERE CDCOps = 1 \"\"\").collect()[0][0]\n",
+					"Silver_Update_Pre=spark.sql(f\"\"\" SELECT COUNT(*) FROM {lake_db_name}.{db_tablename} WHERE CDCOps = 2 \"\"\").collect()[0][0]\n",
+					"Silver_Delete_Pre=spark.sql(f\"\"\" SELECT COUNT(*) FROM {lake_db_name}.{db_tablename} WHERE CDCOps = 0 \"\"\").collect()[0][0]"
+				],
+				"execution_count": 13
+			},
+			{
+				"cell_type": "code",
+				"source": [
+					"# Create a temporary view of the dataframe\n",
+					"df_silver.createOrReplaceTempView(\"temp_table\")"
+				],
+				"execution_count": 14
+			},
+			{
+				"cell_type": "code",
+				"source": [
+					"logger.info(f\"Started - Merge operation to update the target table: {lake_db_name}.{db_tablename}\")\n",
+					"# SCD2 logic\n",
+					"try:\n",
+					"  # Use the merge operation to update the target table\n",
+					"  spark.sql(f\"\"\"\n",
+					"    MERGE INTO {lake_db_name}.{db_tablename} t\n",
+					"    USING temp_table s\n",
+					"    ON t.HashKey = s.HashKey AND t.CDCCurrentFlag == true\n",
+					"    WHEN MATCHED AND t.HashDiff <> s.HashDiff THEN\n",
+					"      UPDATE SET t.CDCEndDate = '{Silver_UpdateEndDate}',\n",
+					"                 t.CDCCurrentFlag = false,\n",
+					"                 t.CDCOps = s.CDCOps + 1\n",
+					"    WHEN NOT MATCHED THEN\n",
+					"        INSERT (ParticipantId, StationId, Mapped_DUID, DUID, GenSetId, RegionId, ConnectionPointId, ValidFromDate, ValidToDate, CDCLoadDate, CDCStartDate, CDCEndDate, CDCOps, CDCCurrentFlag, HashKey, HashDiff)\n",
+					"        VALUES (s.ParticipantId, s.StationId, s.Mapped_DUID, s.DUID, s.GenSetId, s.RegionId, s.ConnectionPointId, s.ValidFromDate, s.ValidToDate, s.CDCLoadDate, s.CDCStartDate, s.CDCEndDate, 1, s.CDCCurrentFlag, s.HashKey, s.HashDiff)\n",
+					"  \"\"\")\n",
+					"\n",
+					"  # Use the merge operation to Insert updated record \n",
+					"  spark.sql(f\"\"\"\n",
+					"      MERGE INTO {lake_db_name}.{db_tablename} t\n",
+					"      USING temp_table s\n",
+					"      ON t.HashKey = s.HashKey AND t.CDCCurrentFlag == true\n",
+					"      WHEN MATCHED AND t.HashDiff <> s.HashDiff THEN\n",
+					"        UPDATE SET t.CDCEndDate = '{Silver_UpdateEndDate}',\n",
+					"                  t.CDCCurrentFlag = false,\n",
+					"                  t.CDCOps = s.CDCOps + 1\n",
+					"      WHEN NOT MATCHED THEN\n",
+					"         INSERT (ParticipantId, StationId, Mapped_DUID, DUID, GenSetId, RegionId, ConnectionPointId, ValidFromDate, ValidToDate, CDCLoadDate, CDCStartDate, CDCEndDate, CDCOps, CDCCurrentFlag, HashKey, HashDiff)\n",
+					"        VALUES (s.ParticipantId, s.StationId, s.Mapped_DUID, s.DUID, s.GenSetId, s.RegionId, s.ConnectionPointId, s.ValidFromDate, s.ValidToDate, s.CDCLoadDate, s.CDCStartDate, s.CDCEndDate, 1, s.CDCCurrentFlag, s.HashKey, s.HashDiff)\n",
+					"    \"\"\")\n",
+					"\n",
+					"except Exception as e:\n",
+					"    logger.error(f\"Error - Merge operation to update the target table: {lake_db_name}.{db_tablename} : {str(e)}\")\n",
+					"    raise\n",
+					"finally:\n",
+					"    logger.info(f\"Completed - Merge operation to update the target table: {lake_db_name}.{db_tablename}\")"
+				],
+				"execution_count": 15
+			},
+			{
+				"cell_type": "code",
+				"source": [
+					"#Row count parameters\n",
+					"Silver_Insert_Post=spark.sql(f\"\"\" SELECT COUNT(*) FROM {lake_db_name}.{db_tablename} WHERE CDCOps = 1 \"\"\").collect()[0][0]\n",
+					"Silver_Update_Post=spark.sql(f\"\"\" SELECT COUNT(*) FROM {lake_db_name}.{db_tablename} WHERE CDCOps = 2 \"\"\").collect()[0][0]\n",
+					"Silver_Delete_Post=spark.sql(f\"\"\" SELECT COUNT(*) FROM {lake_db_name}.{db_tablename} WHERE CDCOps = 0 \"\"\").collect()[0][0]\n",
+					"Silver_TotalRowCount_Post=spark.sql(f\"\"\" SELECT COUNT(*) FROM {lake_db_name}.{db_tablename}\"\"\").collect()[0][0]\n",
+					"Silver_ActiveRecord_Post=spark.sql(f\"\"\" SELECT COUNT(*) FROM {lake_db_name}.{db_tablename} WHERE CDCCurrentFlag = true \"\"\").collect()[0][0]"
+				],
+				"execution_count": 16
+			},
+			{
+				"cell_type": "code",
+				"source": [
+					"#Row calculation\n",
+					"Silver_Update = Silver_Update_Post - Silver_Update_Pre\n",
+					"Silver_Insert = (Silver_Insert_Post - Silver_Insert_Pre) + Silver_Update\n",
+					"Silver_Delete = Silver_Delete_Post - Silver_Delete_Pre\n",
+					"Silver_ActiveRows = Silver_ActiveRecord_Post \n",
+					"Silver_TotalRows = Silver_TotalRowCount_Post"
+				],
+				"execution_count": 17
+			},
+			{
+				"cell_type": "code",
+				"source": [
+					"log_data = [(lake_db_name,db_tablename,Silver_LoadDate,Silver_Insert,Silver_Update,Silver_Delete,Silver_ActiveRows,Silver_TotalRows)]\n",
+					"print(log_data)\n",
+					"log_columns = ['PIPELINE_NAME', 'TABLE_NAME', 'INGEST_DATETIME', 'INSERT','UPDATE','DELETE','ACTIVE_ROWS','TOTAL_ROWS']\n",
+					"df_log = spark.createDataFrame(log_data, log_columns)"
+				],
+				"execution_count": 18
+			},
+			{
+				"cell_type": "code",
+				"source": [
+					"#Write to controldb\n",
+					"db_port = 1433\n",
+					"linked_service_name = \"LS_SQL_ELTFrameworkDB\"\n",
+					"linkedServiceProperties = json.loads(mssparkutils.credentials.getPropertiesAll(linked_service_name))\n",
+					"sql_server_name = linkedServiceProperties.get('Endpoint')\n",
+					"db_name = linkedServiceProperties.get('Database')\n",
+					"access_token = mssparkutils.credentials.getConnectionStringOrCreds(linked_service_name)\n",
+					"write_table_name = \"[CTL].[CFG_INGESTION_LOGS]\"\n",
+					"\n",
+					"try:\n",
+					"    df_log.write.format(\"jdbc\") \\\n",
+					"        .option(\"url\", \"jdbc:sqlserver://%s:%s\" % (sql_server_name, db_port)) \\\n",
+					"        .option(\"dbtable\", write_table_name) \\\n",
+					"        .option(\"accessToken\", access_token) \\\n",
+					"        .option(\"encrypt\", \"true\") \\\n",
+					"        .option(\"databaseName\", db_name) \\\n",
+					"        .option(\"hostNameInCertificate\", \"*.database.windows.net\") \\\n",
+					"        .mode(\"append\") \\\n",
+					"        .save()\n",
+					"except ValueError as error :\n",
+					"    print(\"MSSQL Connector write failed\", error)\n",
+					"\n",
+					"print(\"MSSQL Connector write(append) succeeded  \")"
+				],
+				"execution_count": 19
+			},
+			{
+				"cell_type": "markdown",
+				"metadata": {
+					"nteract": {
+						"transient": {
+							"deleting": false
+						}
+					}
+				},
+				"source": [
+					"# Table: duid_connection_point_mapping: END"
+				]
+			},
+			{
+				"cell_type": "code",
+				"source": [
+					"#archive_file_path = 'abfss://silver@cqldevdatahubsynapse.dfs.core.windows.net/duid_connection_point_mapping/duid_connection_point_mapping'\n",
+					"#mssparkutils.fs.rm(archive_file_path, recurse=True)"
+				],
+				"execution_count": 72
+			},
+			{
+				"cell_type": "code",
+				"source": [
+					"#spark.sql(f\"\"\"DROP TABLE silver.duid_connection_point_mapping;\"\"\")"
+				],
+				"execution_count": 73
+			}
+		]
+	}
+}

@@ -1,0 +1,524 @@
+{
+	"name": "pdf_dz_to_landing",
+	"properties": {
+		"folder": {
+			"name": "DataHubBatchScripts/ESG_SHAREPOINT/PDF"
+		},
+		"nbformat": 4,
+		"nbformat_minor": 2,
+		"bigDataPool": {
+			"referenceName": "Sparkpool01",
+			"type": "BigDataPoolReference"
+		},
+		"sessionProperties": {
+			"driverMemory": "56g",
+			"driverCores": 8,
+			"executorMemory": "56g",
+			"executorCores": 8,
+			"numExecutors": 2,
+			"conf": {
+				"spark.dynamicAllocation.enabled": "false",
+				"spark.dynamicAllocation.minExecutors": "2",
+				"spark.dynamicAllocation.maxExecutors": "2",
+				"spark.autotune.trackingId": "878d5f46-02e0-436c-85c5-c39261add0f1"
+			}
+		},
+		"metadata": {
+			"saveOutput": true,
+			"enableDebugMode": false,
+			"kernelspec": {
+				"name": "synapse_pyspark",
+				"display_name": "Synapse PySpark"
+			},
+			"language_info": {
+				"name": "python"
+			},
+			"a365ComputeOptions": {
+				"id": "/subscriptions/2e9f823e-dc76-4e8e-b815-c8a4f22d05ff/resourceGroups/CQL-AZUR1-DEVDATAHUB01-RG/providers/Microsoft.Synapse/workspaces/cql-dev-datahub-synapse01/bigDataPools/Sparkpool01",
+				"name": "Sparkpool01",
+				"type": "Spark",
+				"endpoint": "https://cql-dev-datahub-synapse01.dev.azuresynapse.net/livyApi/versions/2019-11-01-preview/sparkPools/Sparkpool01",
+				"auth": {
+					"type": "AAD",
+					"authResource": "https://dev.azuresynapse.net"
+				},
+				"sparkVersion": "3.5",
+				"nodeCount": 10,
+				"cores": 8,
+				"memory": 56,
+				"automaticScaleJobs": false
+			},
+			"sessionKeepAliveTimeout": 30
+		},
+		"cells": [
+			{
+				"cell_type": "markdown",
+				"metadata": {
+					"nteract": {
+						"transient": {
+							"deleting": false
+						}
+					}
+				},
+				"source": [
+					"#### Define parameters passed in from ADF"
+				]
+			},
+			{
+				"cell_type": "code",
+				"metadata": {
+					"tags": [
+						"parameters"
+					]
+				},
+				"source": [
+					"# Specifies the destination Azure Storage account and container where data will be retrieved.\n",
+					"datahub_storage = \"cqldevdatahubdata\"\n",
+					"source_container = \"drop-zone\"\n",
+					"destination_container = \"landing\"\n",
+					"archive_container = \"archive\"\n",
+					"\n",
+					"# Define the necessary variables to authenticate and access Azure Document Intelligence\n",
+					"# param_key_vault_name is the name of the secret in the Key Vault that contains the API key for Document Intelligence\n",
+					"# param_document_ai_endpoint is the URL endpoint for the Azure Document Intelligence service\n",
+					"# key_vault_linked_service_name is the name of the Azure Key Vault linked service for Synapse\n",
+					"# param_synapse_sql_linked_service_name is the name of the SQL linked service for Synapse\n",
+					"param_key_vault_name = \"cql-dev-datahub-key\"\n",
+					"param_document_ai_endpoint = \"https://cql-dev-datahub-documentintelligence01.cognitiveservices.azure.com/\"\n",
+					"param_document_ai_key_secret_name = \"cleanco-azure-ai-services-api-key\"\n",
+					"param_synapse_key_vault_linked_service_name = \"LS_AKV_AA_KV01\"\n",
+					"param_synapse_sql_linked_service_name = \"LS_SQL_ELTFrameworkDB\""
+				],
+				"execution_count": 10
+			},
+			{
+				"cell_type": "markdown",
+				"metadata": {
+					"nteract": {
+						"transient": {
+							"deleting": false
+						}
+					}
+				},
+				"source": [
+					"#### Import python libararies"
+				]
+			},
+			{
+				"cell_type": "code",
+				"source": [
+					"# Importing necessary libraries for handling Azure services and document analysis\n",
+					"# - os: for interacting with the operating system (e.g., environment variables)\n",
+					"# - sys: for accessing system-specific parameters and functions\n",
+					"# - pandas: for data manipulation and analysis (e.g., working with tabular data)\n",
+					"# - re: built-in regular expressions module for pattern matching and text extraction\n",
+					"# - azure.ai.documentintelligence: for accessing Azure Document Intelligence APIs\n",
+					"# - azure.core.credentials: for handling Azure authentication using keys or credentials\n",
+					"# - azure.identity: for authenticating Azure resources using Azure CLI or managed identity\n",
+					"# - azure.keyvault.secrets: for accessing secrets stored in Azure Key Vault (e.g., credentials)\n",
+					"# - azure.storage.blob: for working with Azure Blob Storage (e.g., uploading/downloading files)\n",
+					"# - BytesIO: which allows handling bytes data in memory as a file-like object (binary stream)\n",
+					"# - datetime: for handling date and time operations\n",
+					"# - json: for encoding (serializing) Python objects to JSON and decoding (deserializing) JSON strings\n",
+					"# - pytz: for handling timezone-aware datetime objects\n",
+					"# - logging: for logging events or errors within the application\n",
+					"import os\n",
+					"import sys\n",
+					"import pandas as pd\n",
+					"import re\n",
+					"from azure.ai.documentintelligence import DocumentIntelligenceClient\n",
+					"from azure.ai.documentintelligence.models import AnalyzeResult, DocumentAnalysisFeature, AnalyzeDocumentRequest\n",
+					"from azure.core.credentials import AzureKeyCredential\n",
+					"from azure.identity import AzureCliCredential\n",
+					"from azure.storage.blob import BlobServiceClient\n",
+					"from io import BytesIO\n",
+					"from datetime import datetime\n",
+					"import json\n",
+					"import pytz\n",
+					"import logging"
+				],
+				"execution_count": 11
+			},
+			{
+				"cell_type": "markdown",
+				"metadata": {
+					"nteract": {
+						"transient": {
+							"deleting": false
+						}
+					}
+				},
+				"source": [
+					"#### Configure logging"
+				]
+			},
+			{
+				"cell_type": "code",
+				"source": [
+					"# Configure logging\n",
+					"def setup_logger(notebook_name):\n",
+					"    # Get or create logger\n",
+					"    logger = logging.getLogger(notebook_name)\n",
+					"    logger.setLevel(logging.DEBUG)  # Set to DEBUG for detailed logs\n",
+					"\n",
+					"    # Remove any existing handlers to prevent duplicates\n",
+					"    logger.handlers.clear()\n",
+					"\n",
+					"    # Prevent propagation to root logger (avoids default handlers)\n",
+					"    logger.propagate = False\n",
+					"\n",
+					"    # Create console handler\n",
+					"    console_handler = logging.StreamHandler(sys.stdout)\n",
+					"    console_handler.setLevel(logging.DEBUG)\n",
+					"\n",
+					"    # Define log format (only the formatted line will appear)\n",
+					"    log_format = logging.Formatter('%(asctime)s - %(name)s - %(levelname)s - %(message)s')\n",
+					"    console_handler.setFormatter(log_format)\n",
+					"\n",
+					"    # Add handler to logger\n",
+					"    logger.addHandler(console_handler)\n",
+					"    \n",
+					"    return logger"
+				],
+				"execution_count": 12
+			},
+			{
+				"cell_type": "code",
+				"source": [
+					"# Set up logger for this notebook\n",
+					"logger = setup_logger(\"PDF_DZ_To_Landing\")"
+				],
+				"execution_count": 13
+			},
+			{
+				"cell_type": "markdown",
+				"metadata": {
+					"nteract": {
+						"transient": {
+							"deleting": false
+						}
+					}
+				},
+				"source": [
+					"#### Configure document intelligence client connection"
+				]
+			},
+			{
+				"cell_type": "code",
+				"source": [
+					"# Retrieves an access token or credentials for the specified Azure Key Vault linked service.\n",
+					"# This token can be used to authenticate with Azure Document Intelligence.\n",
+					"access_token = mssparkutils.credentials.getConnectionStringOrCreds(param_synapse_key_vault_linked_service_name)\n",
+					"\n",
+					"# Retrieves the Document Intelligence API key from Azure Key Vault using the specified linked service.\n",
+					"# The retrieved secret is used to create an AzureKeyCredential, which is then passed to the \n",
+					"# DocumentIntelligenceClient to authenticate API calls.\n",
+					"document_intelligence_key = mssparkutils.credentials.getSecret(param_key_vault_name,param_document_ai_key_secret_name, param_synapse_key_vault_linked_service_name)\n",
+					"document_intelligence_credential = AzureKeyCredential(document_intelligence_key)\n",
+					"document_intelligence_client = DocumentIntelligenceClient(endpoint=param_document_ai_endpoint, credential=document_intelligence_credential)"
+				],
+				"execution_count": 14
+			},
+			{
+				"cell_type": "markdown",
+				"metadata": {
+					"nteract": {
+						"transient": {
+							"deleting": false
+						}
+					}
+				},
+				"source": [
+					"#### Configure sql client connection"
+				]
+			},
+			{
+				"cell_type": "code",
+				"metadata": {
+					"collapsed": false
+				},
+				"source": [
+					"# Retrieve and parse SQL linked service properties, extract server name, database name, and access token for database connection.\n",
+					"linkedServiceProperties = json.loads(mssparkutils.credentials.getPropertiesAll(param_synapse_sql_linked_service_name))\n",
+					"db_port = 1433\n",
+					"sql_server_name = linkedServiceProperties.get('Endpoint')\n",
+					"db_name = linkedServiceProperties.get('Database') \n",
+					"sql_access_token = mssparkutils.credentials.getConnectionStringOrCreds(param_synapse_sql_linked_service_name)"
+				],
+				"execution_count": 15
+			},
+			{
+				"cell_type": "markdown",
+				"metadata": {
+					"nteract": {
+						"transient": {
+							"deleting": false
+						}
+					}
+				},
+				"source": [
+					"#### Define python functions:"
+				]
+			},
+			{
+				"cell_type": "code",
+				"source": [
+					"def get_file_object_from_adls(file_name):\n",
+					"    \"\"\"\n",
+					"    Reads a file from ADLS (abfss://) and returns a file-like object (BytesIO)\n",
+					"    \n",
+					"    Args:\n",
+					"        file_name (str): Path to the file in ADLS.\n",
+					"    \n",
+					"    Returns:\n",
+					"        file_obj: file-like object (BytesIO).\n",
+					"    \"\"\"    \n",
+					"    try:\n",
+					"        # Read file as binary using Spark\n",
+					"        pdf_df = spark.read.format(\"binaryFile\").load(file_name)\n",
+					"        \n",
+					"        # Extract binary content (first row, content column)\n",
+					"        pdf_bytes = pdf_df.select(\"content\").head()[0]\n",
+					"        \n",
+					"        # Convert to a file-like object\n",
+					"        file_obj = BytesIO(pdf_bytes)\n",
+					"        \n",
+					"        return file_obj  # Now it behaves like an open file\n",
+					"    \n",
+					"    except Exception as e:\n",
+					"        logger.error(f\"get_file_object_from_adls - Failed to read file: {file_name}: {str(e)}\")\n",
+					"        raise"
+				],
+				"execution_count": 16
+			},
+			{
+				"cell_type": "code",
+				"source": [
+					"def analyze_pdf_document(file_name: str) -> AnalyzeResult:\n",
+					"    \"\"\"\n",
+					"    Analyze a PDF document from Azure Blob Storage using the Document Intelligence API\n",
+					"    \n",
+					"    Args:\n",
+					"        file_name (str): The name of the PDF file in the storage container.\n",
+					"    \n",
+					"    Returns:\n",
+					"        result: The result object containing the analysis output.\n",
+					"    \"\"\"\n",
+					"    try:\n",
+					"        with get_file_object_from_adls(file_name) as file_object:\n",
+					"            poller = document_intelligence_client.begin_analyze_document(\n",
+					"                model_id=\"prebuilt-layout\",\n",
+					"                body=file_object,\n",
+					"                content_type=\"application/pdf\",\n",
+					"                features=[DocumentAnalysisFeature.KEY_VALUE_PAIRS],\n",
+					"            )\n",
+					"            result = poller.result()\n",
+					"        logger.info(f\"Analysis completed for: {file_name}\")\n",
+					"        return result\n",
+					"\n",
+					"    except Exception as e:\n",
+					"        logger.error(f\"analyze_pdf_document - Failed to analyze file: {file_name}: {str(e)}\")\n",
+					"        raise"
+				],
+				"execution_count": 17
+			},
+			{
+				"cell_type": "markdown",
+				"metadata": {
+					"nteract": {
+						"transient": {
+							"deleting": false
+						}
+					}
+				},
+				"source": [
+					"#### Retrieve Drop-Zone file list to process"
+				]
+			},
+			{
+				"cell_type": "code",
+				"metadata": {
+					"collapsed": false
+				},
+				"source": [
+					"db_query =\"SELECT [SP_SOURCE_ID], [TARGET_ROOT_FOLDER] ,[TARGET_FOLDER_PATH] ,[TARGET_FILE_NAME], [SUPPLIER] FROM [CTL].[ESG_SHAREPOINT_FILE_DETAILS] WHERE [FILE_TYPE] = 'PDF' and ENABLED = 1\"\n",
+					"\n",
+					"# Extract the results of the SQL query into a dataframe\n",
+					"df = spark.read.format(\"jdbc\") \\\n",
+					"    .option(\"url\", \"jdbc:sqlserver://%s:%s\" % (sql_server_name, db_port)) \\\n",
+					"    .option(\"query\", db_query) \\\n",
+					"    .option(\"accessToken\", sql_access_token) \\\n",
+					"    .option(\"encrypt\", \"true\") \\\n",
+					"    .option(\"databaseName\", db_name) \\\n",
+					"    .option(\"hostNameInCertificate\", \"*.database.windows.net\") \\\n",
+					"    .load()\n",
+					"\n",
+					"#display(df)"
+				],
+				"execution_count": 18
+			},
+			{
+				"cell_type": "markdown",
+				"metadata": {
+					"nteract": {
+						"transient": {
+							"deleting": false
+						}
+					}
+				},
+				"source": [
+					"#### Extract JSON from PDF document"
+				]
+			},
+			{
+				"cell_type": "code",
+				"source": [
+					"timezone = pytz.timezone(\"UTC\")\n",
+					"rows = df.collect() \n",
+					"destination_containers = []\n",
+					"destination_file_names = []\n",
+					"destination_file_paths = []\n",
+					"archive_file_names = []\n",
+					"archive_file_paths = []\n",
+					"\n",
+					"logger.info(\"Started - Process to extract JSON from PDF\")\n",
+					"\n",
+					"try:\n",
+					"    # Iterate and process each file\n",
+					"    for row in rows:\n",
+					"        source_file_id = row[\"SP_SOURCE_ID\"]\n",
+					"        source_root_path = row[\"TARGET_ROOT_FOLDER\"]\n",
+					"        source_path = row[\"TARGET_FOLDER_PATH\"]\n",
+					"        source_file_name = row[\"TARGET_FILE_NAME\"]\n",
+					"        supplier = row[\"SUPPLIER\"]\n",
+					"        source_folder_path = os.path.join(source_root_path, source_path)\n",
+					"        destination_folder_path = source_folder_path\n",
+					"        archive_folder_path = source_folder_path\n",
+					"        \n",
+					"        #Build source file path\n",
+					"        source_file_path = f\"abfss://{source_container}@{datahub_storage}.dfs.core.windows.net/{source_folder_path}/{source_file_name}\"\n",
+					"\n",
+					"        #Check if the file exists in the source file path\n",
+					"        if mssparkutils.fs.exists(source_file_path):            \n",
+					"            logger.debug(f\"source_file_path: {source_file_path}\")\n",
+					"\n",
+					"            #Build destination file path\n",
+					"            destination_file_name = source_file_name.removesuffix('.pdf') + '.json'\n",
+					"            destination_file_path = f\"abfss://{destination_container}@{datahub_storage}.dfs.core.windows.net/{destination_folder_path}/{destination_file_name}\"\n",
+					"            logger.debug(f\"destination_file_path: {destination_file_path}\")\n",
+					"        \n",
+					"            # Get the current time with timezone\n",
+					"            current_time = datetime.now(timezone).strftime(\"%Y_%m_%dT%H_%M_%S\")            \n",
+					"            # Convert the timestamp to a datetime object\n",
+					"            timestamp_obj = datetime.strptime(current_time, \"%Y_%m_%dT%H_%M_%S\")\n",
+					"            # Create the filepath in YYYY/MM/DD format\n",
+					"            YYYYmmdd_filepath = timestamp_obj.strftime(\"%Y/%m/%d\")\n",
+					"\n",
+					"            #Build archive file path   \n",
+					"            archive_file_name = source_file_name.removesuffix('.pdf') + '_' +current_time + '.zip' \n",
+					"            archive_file_path = f\"abfss://{archive_container}@{datahub_storage}.dfs.core.windows.net/{archive_folder_path}/{YYYYmmdd_filepath}/{archive_file_name}\"\n",
+					"            archive_folder_path = f\"/{source_folder_path}/{YYYYmmdd_filepath}\" \n",
+					"            logger.debug(f\"archive_file_path: {archive_file_path}\")\n",
+					"            \n",
+					"            if supplier != 'Marano':\n",
+					"                # Create archive directory if it does not exist\n",
+					"                archive_directory =  [f.name for f in mssparkutils.fs.ls(f\"abfss://{archive_container}@{datahub_storage}.dfs.core.windows.net/\")]\n",
+					"                if {archive_folder_path} not in archive_directory:\n",
+					"                    mssparkutils.fs.mkdirs(f\"abfss://{archive_container}@{datahub_storage}.dfs.core.windows.net/{archive_folder_path}\")\n",
+					"                        \n",
+					"            try:\n",
+					"                # run analyze_pdf_document function to extract pdf content\n",
+					"                result = analyze_pdf_document(source_file_path)\n",
+					"                \n",
+					"                # convert result to dictionary\n",
+					"                dictionary_result = result.as_dict()\n",
+					"\n",
+					"                # convert the dictionary to a JSON-formatted string\n",
+					"                json_string = json.dumps(dictionary_result)\n",
+					"\n",
+					"                # write json file to destination file path\n",
+					"                mssparkutils.fs.put(destination_file_path, json_string, overwrite=True)\n",
+					"    \n",
+					"\n",
+					"            except Exception as e:\n",
+					"                logger.error(f\"Error - Run analyze_pdf_document for: {source_file_path}: {str(e)}\")\n",
+					"                raise\n",
+					"            \n",
+					"            logger.info(f\"Deleted source file: {source_file_path}\")\n",
+					"            # Remove source pdf file when processed\n",
+					"            mssparkutils.fs.rm(source_file_path, recurse=False)\n",
+					"            \n",
+					"            if supplier != 'Marano':\n",
+					"                # append source and archive file paths to a list to be exported to adf  \n",
+					"                destination_containers.append(destination_container)           \n",
+					"                destination_file_names.append(destination_file_name)\n",
+					"                destination_file_paths.append(destination_folder_path)\n",
+					"                archive_file_names.append(archive_file_name)\n",
+					"                archive_file_paths.append(archive_folder_path)\n",
+					"\n",
+					"except Exception as e:\n",
+					"    logger.error(f\"Error - Process to extract JSON from PDF: {source_file_path}: {str(e)}\")\n",
+					"    raise\n",
+					"finally:\n",
+					"    logger.info(\"Completed - Process to extract JSON from PDF\")\n",
+					"\n",
+					"# Combine source and archive file parameters into a list of dictionaries\n",
+					"file_parameters = [\n",
+					"    {\"destination_container\": dst_container, \"destination_file_name\": dst_name, \"destination_file_path\": dst_path, \"archive_file_name\": tgt_name, \"archive_file_path\": tgt_path}\n",
+					"    for dst_container, dst_name, dst_path, tgt_name, tgt_path in zip(destination_containers, destination_file_names, destination_file_paths, archive_file_names, archive_file_paths)]\n",
+					"  \n",
+					"# Set the notebook output to the list of file parameters\n",
+					"mssparkutils.notebook.exit(json.dumps(file_parameters))\n",
+					""
+				],
+				"execution_count": 20
+			},
+			{
+				"cell_type": "markdown",
+				"metadata": {
+					"nteract": {
+						"transient": {
+							"deleting": false
+						}
+					}
+				},
+				"source": [
+					"#### Debug - for future use"
+				]
+			},
+			{
+				"cell_type": "code",
+				"source": [
+					"# Verify it can be parsed back\n",
+					"#json.loads(json_string)"
+				],
+				"execution_count": null
+			},
+			{
+				"cell_type": "code",
+				"source": [
+					"# source_file_path = 'abfss://archive@cqldevdatahubdata.dfs.core.windows.net/esg_sharepoint_files/origin/S12 Sample Origin Invoice NMI 31164972012 (Swanbank)_2025_05_02T00_00_11.pdf'\n",
+					"# archive_file_path = 'abfss://drop-zone@cqldevdatahubdata.dfs.core.windows.net/esg_sharepoint_files/origin/S12 Sample Origin Invoice NMI 31164972012 (Swanbank).pdf'\n",
+					"# mssparkutils.fs.mv(source_file_path, archive_file_path, overwrite=True)"
+				],
+				"execution_count": 10
+			},
+			{
+				"cell_type": "code",
+				"source": [
+					"#archive_file_path = 'abfss://drop-zone@cqldevdatahubdata.dfs.core.windows.net/esg_sharepoint_files/origin/s12_origin.pdf'\n",
+					"#mssparkutils.fs.rm(archive_file_path,recurse=True)"
+				],
+				"execution_count": 73
+			},
+			{
+				"cell_type": "code",
+				"source": [
+					"#file_path = 'abfss://drop-zone@cqldevdatahubdata.dfs.core.windows.net/esg_sharepoint_files/origin'\n",
+					"#mssparkutils.fs.mkdirs(file_path)"
+				],
+				"execution_count": 57
+			}
+		]
+	}
+}

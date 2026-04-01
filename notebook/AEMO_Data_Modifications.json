@@ -1,0 +1,183 @@
+{
+	"name": "AEMO_Data_Modifications",
+	"properties": {
+		"folder": {
+			"name": "DataHubBatchScripts/Utils"
+		},
+		"nbformat": 4,
+		"nbformat_minor": 2,
+		"bigDataPool": {
+			"referenceName": "JobSparkpool02",
+			"type": "BigDataPoolReference"
+		},
+		"sessionProperties": {
+			"driverMemory": "56g",
+			"driverCores": 8,
+			"executorMemory": "56g",
+			"executorCores": 8,
+			"numExecutors": 2,
+			"conf": {
+				"spark.dynamicAllocation.enabled": "false",
+				"spark.dynamicAllocation.minExecutors": "2",
+				"spark.dynamicAllocation.maxExecutors": "2",
+				"spark.autotune.trackingId": "214a9f40-ea52-4919-855a-cebf4898bd0a"
+			}
+		},
+		"metadata": {
+			"saveOutput": true,
+			"enableDebugMode": false,
+			"kernelspec": {
+				"name": "synapse_pyspark",
+				"display_name": "python"
+			},
+			"language_info": {
+				"name": "python"
+			},
+			"a365ComputeOptions": {
+				"id": "/subscriptions/2e9f823e-dc76-4e8e-b815-c8a4f22d05ff/resourceGroups/CQL-AZUR1-DEVDATAHUB01-RG/providers/Microsoft.Synapse/workspaces/cql-dev-datahub-synapse01/bigDataPools/JobSparkpool02",
+				"name": "JobSparkpool02",
+				"type": "Spark",
+				"endpoint": "https://cql-dev-datahub-synapse01.dev.azuresynapse.net/livyApi/versions/2019-11-01-preview/sparkPools/JobSparkpool02",
+				"auth": {
+					"type": "AAD",
+					"authResource": "https://dev.azuresynapse.net"
+				},
+				"sparkVersion": "3.4",
+				"nodeCount": 10,
+				"cores": 8,
+				"memory": 56
+			},
+			"sessionKeepAliveTimeout": 30
+		},
+		"cells": [
+			{
+				"cell_type": "code",
+				"metadata": {
+					"jupyter": {
+						"source_hidden": false,
+						"outputs_hidden": false
+					},
+					"nteract": {
+						"transient": {
+							"deleting": false
+						}
+					},
+					"tags": [
+						"parameters"
+					]
+				},
+				"source": [
+					"environment = \"prod\""
+				],
+				"execution_count": null
+			},
+			{
+				"cell_type": "code",
+				"metadata": {
+					"jupyter": {
+						"source_hidden": false,
+						"outputs_hidden": false
+					},
+					"nteract": {
+						"transient": {
+							"deleting": false
+						}
+					}
+				},
+				"source": [
+					"if environment == \"dev\":\n",
+					"    path = f'abfss://bronze@cqldevdatahubsynapse.dfs.core.windows.net/AEMO/NEM12/nem12_bronze' # Location of parquet files once we write the changes\n",
+					"elif environment == \"prod\":\n",
+					"    path = f'abfss://bronze@cqlproddatahubsynapse.dfs.core.windows.net/AEMO/NEM12/nem12_bronze' # Location of parquet files once we write the changes\n",
+					"\n",
+					""
+				],
+				"execution_count": null
+			},
+			{
+				"cell_type": "code",
+				"source": [
+					"# Add CreationDate Columns \n",
+					"spark.sql(f\"ALTER TABLE aemo_bronze.nem12_bronze ADD COLUMNS (CreationDate STRING);\")\n",
+					"\n",
+					"spark.sql(f\"ALTER TABLE aemo_silver.nem12_silver ADD COLUMNS (CreationDate STRING);\")\n",
+					"\n",
+					"spark.sql(f\"ALTER TABLE aemo_gold.factmeterconsumption ADD COLUMNS (CreationDate STRING);\")\n",
+					""
+				],
+				"execution_count": null
+			},
+			{
+				"cell_type": "code",
+				"metadata": {
+					"jupyter": {
+						"source_hidden": false,
+						"outputs_hidden": false
+					},
+					"nteract": {
+						"transient": {
+							"deleting": false
+						}
+					}
+				},
+				"source": [
+					"# Update AEMO HashDiff\n",
+					"COLUMNS_FOR_HASH_DIFF = ['NMI','RegisterID','NMIConfiguration','IntervalLength','UnitOfMeasurementId','Timestamp','IntervalDate','VersionHeader','FromParticipant','ToParticipant','NMISuffix','MDMDataStreamIdentifier','MeterSerialNumber','NextScheduledReadDate','FinalQualityMethodId','FinalReasonCodeId','MSATSLoadDateTime','QualityMethodId','ReasonCodeId','TransCodeId','RetServiceOrder','ReadDatetime','IndexRead','FileName']\n",
+					"\n",
+					"# Get data from Bronze\n",
+					"df = spark.read.table(\"aemo_bronze.nem12_bronze\")\n",
+					"\n",
+					"from pyspark.sql.functions import hash\n",
+					"from pyspark.sql import functions as fn\n",
+					"from pyspark.sql.functions import col, concat, lit, to_timestamp,current_timestamp,date_format\n",
+					"from pyspark.sql.functions import sha2, concat_ws\n",
+					"\n",
+					"df = df.withColumn(\"NewHashDiff\", sha2(concat_ws(\"||\",*COLUMNS_FOR_HASH_DIFF),256))\n",
+					"df = df.withColumn(\"OldHashDiff\",col(\"Nem12HashDiff\")) # Creating a backup to test changes\n",
+					"df = df.withColumn(\"Nem12HashDiff\",col(\"NewHashDiff\")) # Replacing HashDiff column with new HashDiff values"
+				],
+				"execution_count": null
+			},
+			{
+				"cell_type": "code",
+				"metadata": {
+					"jupyter": {
+						"source_hidden": false,
+						"outputs_hidden": false
+					},
+					"nteract": {
+						"transient": {
+							"deleting": false
+						}
+					}
+				},
+				"source": [
+					"# Cleanup Unnecessary Columns\n",
+					"cols_to_include = [c for c in df.columns if c not in [\"NewHashDiff\",\"OldHashDiff\",\"NewHashKey\",\"OldHashKey\"]]\n",
+					"df_with_necessary_cols = df.select(*cols_to_include)"
+				],
+				"execution_count": null
+			},
+			{
+				"cell_type": "code",
+				"metadata": {
+					"jupyter": {
+						"source_hidden": false,
+						"outputs_hidden": false
+					},
+					"nteract": {
+						"transient": {
+							"deleting": false
+						}
+					}
+				},
+				"source": [
+					"# Save changes \n",
+					"df_with_necessary_cols.write.format(\"delta\").mode(\"overwrite\").option(\"overwriteSchema\",\"true\").option(\"path\",path).saveAsTable(f\"aemo_bronze.nem12_bronze\")\n",
+					""
+				],
+				"execution_count": null
+			}
+		]
+	}
+}

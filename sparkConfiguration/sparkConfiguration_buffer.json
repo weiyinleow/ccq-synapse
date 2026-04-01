@@ -1,0 +1,14 @@
+{
+	"name": "sparkConfiguration_buffer",
+	"properties": {
+		"configs": {
+			"spark.kryoserializer.buffer.max": "1024m"
+		},
+		"created": "2024-06-19T15:05:22.2320000+10:00",
+		"createdBy": "Admin.Jay.Solanki@cleancoqld.com.au",
+		"annotations": [],
+		"configMergeRule": {
+			"artifact.currentOperation.spark.kryoserializer.buffer.max": "replace"
+		}
+	}
+}

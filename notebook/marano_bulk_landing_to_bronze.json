@@ -1,0 +1,1057 @@
+{
+	"name": "marano_bulk_landing_to_bronze",
+	"properties": {
+		"folder": {
+			"name": "DataHubBatchScripts/ESG_SHAREPOINT/PDF/MARANO"
+		},
+		"nbformat": 4,
+		"nbformat_minor": 2,
+		"bigDataPool": {
+			"referenceName": "Sparkpool01",
+			"type": "BigDataPoolReference"
+		},
+		"sessionProperties": {
+			"driverMemory": "56g",
+			"driverCores": 8,
+			"executorMemory": "56g",
+			"executorCores": 8,
+			"numExecutors": 2,
+			"conf": {
+				"spark.dynamicAllocation.enabled": "false",
+				"spark.dynamicAllocation.minExecutors": "2",
+				"spark.dynamicAllocation.maxExecutors": "2",
+				"spark.autotune.trackingId": "09f55182-07e0-4558-b4f1-f20643df49a2"
+			}
+		},
+		"metadata": {
+			"saveOutput": true,
+			"enableDebugMode": false,
+			"kernelspec": {
+				"name": "synapse_pyspark",
+				"display_name": "Synapse PySpark"
+			},
+			"language_info": {
+				"name": "python"
+			},
+			"a365ComputeOptions": {
+				"id": "/subscriptions/2e9f823e-dc76-4e8e-b815-c8a4f22d05ff/resourceGroups/CQL-AZUR1-DEVDATAHUB01-RG/providers/Microsoft.Synapse/workspaces/cql-dev-datahub-synapse01/bigDataPools/Sparkpool01",
+				"name": "Sparkpool01",
+				"type": "Spark",
+				"endpoint": "https://cql-dev-datahub-synapse01.dev.azuresynapse.net/livyApi/versions/2019-11-01-preview/sparkPools/Sparkpool01",
+				"auth": {
+					"type": "AAD",
+					"authResource": "https://dev.azuresynapse.net"
+				},
+				"sparkVersion": "3.4",
+				"nodeCount": 10,
+				"cores": 8,
+				"memory": 56,
+				"automaticScaleJobs": false
+			},
+			"sessionKeepAliveTimeout": 30
+		},
+		"cells": [
+			{
+				"cell_type": "markdown",
+				"metadata": {
+					"nteract": {
+						"transient": {
+							"deleting": false
+						}
+					}
+				},
+				"source": [
+					"#### Define parameters passed in from ADF"
+				]
+			},
+			{
+				"cell_type": "code",
+				"metadata": {
+					"tags": [
+						"parameters"
+					]
+				},
+				"source": [
+					"# Specifies the destination Azure Storage account and container where data will be retrieved.\n",
+					"datahub_storage = \"cqldevdatahubdata\"\n",
+					"synapse_storage = \"cqldevdatahubsynapse\"\n",
+					"source_container = \"landing\"\n",
+					"destination_folder_path = \"esg_sharepoint_files/marano_bulk\"\n",
+					"archive_container = \"archive\"\n",
+					"\n",
+					"pipeline_run_ID = \"b17adeb9-19e4-4cc0-bb16-e9022d886b93\"\n",
+					"pipeline_Name = \"Marano_Bulk_PDF_Ingest\"\n",
+					"  \n",
+					"# param_synapse_sql_linked_service_name is the name of the SQL linked service for Synapse\n",
+					"param_synapse_sql_linked_service_name = \"LS_SQL_ELTFrameworkDB\"\n",
+					"\n",
+					"#Set bronze container details\n",
+					"bronze_container = \"bronze\"\n",
+					"bronze_database_name= \"marano_bronze\"\n",
+					"bronze_folder_path = \"esg_sharepoint_bronze/marano\""
+				],
+				"execution_count": 19
+			},
+			{
+				"cell_type": "code",
+				"source": [
+					"#Set table names\n",
+					"bronze_tablename=\"marano_bulk_fuel_transactions\""
+				],
+				"execution_count": 20
+			},
+			{
+				"cell_type": "markdown",
+				"metadata": {
+					"nteract": {
+						"transient": {
+							"deleting": false
+						}
+					}
+				},
+				"source": [
+					"#### Import python libararies"
+				]
+			},
+			{
+				"cell_type": "code",
+				"source": [
+					"# - azure.ai.documentintelligence: for accessing Azure Document Intelligence APIs\n",
+					"# - IPython.display: for displaying objects in Jupyter Notebooks\n",
+					"# - sys: for accessing system-specific parameters and functions\n",
+					"# - hash: for computing a hash value for specified columns\n",
+					"# - functions: for column operations and transformations\n",
+					"# - col, concat, lit, to_timestamp,current_timestamp,date_format: for column reference, string concatenation, literal values, timestamp conversion, current timestamp, and date formatting\n",
+					"# - sha2, concat_ws, dense_rank: for SHA-2 hashing and concatenating strings with a separator\n",
+					"# - Window: perform window operations on DataFrames\n",
+					"# - types: for defining DataFrame schemas with structured fields and specific column types\n",
+					"# - datetime: for handling date and time operations\n",
+					"# - os: for interacting with the operating system (e.g., environment variables)\n",
+					"# - logging: for logging events or errors within the application\n",
+					"# - json: for encoding (serializing) Python objects to JSON and decoding (deserializing) JSON strings\n",
+					"# - pandas: for data manipulation and analysis (e.g., working with tabular data)\n",
+					"# - pytz: for handling timezone-aware datetime objects\n",
+					"from azure.ai.documentintelligence.models import AnalyzeResult, DocumentAnalysisFeature, AnalyzeDocumentRequest\n",
+					"from IPython.display import display\n",
+					"import sys\n",
+					"from pyspark.sql.functions import hash\n",
+					"from pyspark.sql import functions as fn\n",
+					"from pyspark.sql.functions import col, concat, lit, to_timestamp,current_timestamp,date_format\n",
+					"from pyspark.sql.functions import sha2, concat_ws, row_number\n",
+					"from pyspark.sql import Window\n",
+					"from pyspark.sql.types import StructType, StructField, StringType, IntegerType, BooleanType,DateType, DoubleType,TimestampType\n",
+					"from datetime import datetime\n",
+					"import os\n",
+					"import logging\n",
+					"import json\n",
+					"import pandas as pd\n",
+					"import pytz"
+				],
+				"execution_count": 21
+			},
+			{
+				"cell_type": "markdown",
+				"metadata": {
+					"nteract": {
+						"transient": {
+							"deleting": false
+						}
+					}
+				},
+				"source": [
+					"#### Configure logging"
+				]
+			},
+			{
+				"cell_type": "code",
+				"source": [
+					"# Configure logging\n",
+					"def setup_logger(notebook_name):\n",
+					"    # Get or create logger\n",
+					"    logger = logging.getLogger(notebook_name)\n",
+					"    logger.setLevel(logging.DEBUG)  # Set to DEBUG for detailed logs\n",
+					"\n",
+					"    # Remove any existing handlers to prevent duplicates\n",
+					"    logger.handlers.clear()\n",
+					"\n",
+					"    # Prevent propagation to root logger (avoids default handlers)\n",
+					"    logger.propagate = False\n",
+					"\n",
+					"    # Create console handler\n",
+					"    console_handler = logging.StreamHandler(sys.stdout)\n",
+					"    console_handler.setLevel(logging.DEBUG)\n",
+					"\n",
+					"    # Define log format (only the formatted line will appear)\n",
+					"    log_format = logging.Formatter('%(asctime)s - %(name)s - %(levelname)s - %(message)s')\n",
+					"    console_handler.setFormatter(log_format)\n",
+					"\n",
+					"    # Add handler to logger\n",
+					"    logger.addHandler(console_handler)\n",
+					"    \n",
+					"    return logger"
+				],
+				"execution_count": 22
+			},
+			{
+				"cell_type": "code",
+				"source": [
+					"# Set up logger for this notebook\n",
+					"logger = setup_logger(\"MARANO_BULK_Landing_To_Bronze\")"
+				],
+				"execution_count": 23
+			},
+			{
+				"cell_type": "markdown",
+				"metadata": {
+					"nteract": {
+						"transient": {
+							"deleting": false
+						}
+					}
+				},
+				"source": [
+					"#### Configure sql client connection"
+				]
+			},
+			{
+				"cell_type": "code",
+				"source": [
+					"# Retrieve and parse SQL linked service properties, extract server name, database name, and access token for database connection.\n",
+					"linkedServiceProperties = json.loads(mssparkutils.credentials.getPropertiesAll(param_synapse_sql_linked_service_name))\n",
+					"db_port = 1433\n",
+					"sql_server_name = linkedServiceProperties.get('Endpoint')\n",
+					"db_name = linkedServiceProperties.get('Database')\n",
+					"sql_access_token = mssparkutils.credentials.getConnectionStringOrCreds(param_synapse_sql_linked_service_name)"
+				],
+				"execution_count": 24
+			},
+			{
+				"cell_type": "markdown",
+				"metadata": {
+					"nteract": {
+						"transient": {
+							"deleting": false
+						}
+					}
+				},
+				"source": [
+					"#### Create bronze tables"
+				]
+			},
+			{
+				"cell_type": "code",
+				"source": [
+					"#Create marano_bulk_fuel_transactions Table\n",
+					"try:\n",
+					"    spark.sql(f\"\"\"CREATE DATABASE IF NOT EXISTS {bronze_database_name};\"\"\")\n",
+					"    spark.sql(f\"\"\"\n",
+					"    CREATE TABLE IF NOT EXISTS {bronze_database_name}.{bronze_tablename}\n",
+					"    (\n",
+					"        SourceFileID INT,\n",
+					"        SiteCode STRING,\n",
+					"        InvoiceNumber STRING,\n",
+					"        InvoiceDate STRING,\n",
+					"        CustomerOrderNumber STRING,\n",
+					"        SupplyPoint STRING,\n",
+					"        Product STRING,\n",
+					"        Quantity STRING,\n",
+					"        DocketNumber STRING,\n",
+					"        DeliveryAddress STRING,\n",
+					"        FileRowIndex INT,\n",
+					"        FileOverrideFlag BOOLEAN,\n",
+					"        CDCLoadDate TIMESTAMP,\n",
+					"        CDCStartDate TIMESTAMP,\n",
+					"        CDCEndDate TIMESTAMP,\n",
+					"        CDCOps INT,\n",
+					"        CDCCurrentFlag BOOLEAN,\n",
+					"        HashKey STRING,\n",
+					"        HashDiff STRING\n",
+					"    )\n",
+					"    USING delta\n",
+					"    LOCATION 'abfss://{bronze_container}@{synapse_storage}.dfs.core.windows.net/{bronze_folder_path}/{bronze_tablename}'\n",
+					"    \"\"\")\n",
+					"    \n",
+					"except Exception as e:\n",
+					"    logger.error(f\"Failed to create delta table:  {bronze_database_name}.{bronze_tablename}: {str(e)}\")\n",
+					"    raise"
+				],
+				"execution_count": 25
+			},
+			{
+				"cell_type": "markdown",
+				"metadata": {
+					"nteract": {
+						"transient": {
+							"deleting": false
+						}
+					}
+				},
+				"source": [
+					"#### Define python functions:"
+				]
+			},
+			{
+				"cell_type": "code",
+				"source": [
+					"def extract_paragraphs(result: AnalyzeResult) -> list:\n",
+					"    \"\"\"\n",
+					"    Extract all paragraphs from the document, including bounding regions and offsets.\n",
+					"\n",
+					"    Args:\n",
+					"        result (AnalyzeResult): The result object from the document analysis.\n",
+					"\n",
+					"    Returns:\n",
+					"        list: A list of paragraph texts.\n",
+					"    \"\"\"\n",
+					"    try:\n",
+					"        paragraphs = []\n",
+					"        if hasattr(result, \"paragraphs\") and result.paragraphs:\n",
+					"            for paragraph in result.paragraphs:\n",
+					"                paragraphs.append(paragraph.content)\n",
+					"\n",
+					"        logger.info(f\"extract_paragraphs: Extracted {len(paragraphs)} structured paragraphs\")\n",
+					"        return paragraphs\n",
+					"\n",
+					"    except Exception as e:\n",
+					"        logger.error(f\"extract_paragraphs - Failed to extract all paragraphs from the document: {str(e)}\")\n",
+					"        raise\n",
+					""
+				],
+				"execution_count": 26
+			},
+			{
+				"cell_type": "code",
+				"source": [
+					"def extract_key_value_pairs(result: AnalyzeResult) -> dict:\n",
+					"    \"\"\"\n",
+					"    Extract key-value pairs as a dictionary.\n",
+					"    \n",
+					"    Args:\n",
+					"        result (AnalyzeResult): The result object from the document analysis.\n",
+					"    \n",
+					"    Returns:\n",
+					"        dict: A dictionary with keys and values.\n",
+					"    \"\"\"\n",
+					"    try:\n",
+					"        kv_dict = {}\n",
+					"        if hasattr(result, \"key_value_pairs\") and result.key_value_pairs:\n",
+					"            for kv in result.key_value_pairs:\n",
+					"                key = kv.key.content if kv.key else \"Unknown Key\"\n",
+					"                value = kv.value.content if kv.value else \"Unknown Value\"\n",
+					"                kv_dict[key] = value\n",
+					"        logger.info(f\"extract_key_value_pairs: Extracted {len(kv_dict)} key-value pairs\")\n",
+					"\n",
+					"        return kv_dict\n",
+					"\n",
+					"    except Exception as e:\n",
+					"        logger.error(f\"extract_key_value_pairs - Failed to extract all key-value pairs from the document: {str(e)}\")\n",
+					"        raise"
+				],
+				"execution_count": 27
+			},
+			{
+				"cell_type": "code",
+				"source": [
+					"def extract_tables(result: AnalyzeResult) -> list:\n",
+					"    \"\"\"\n",
+					"    Extract structured tables from the analysis result, including cell content, coordinates, and page numbers.\n",
+					"    Assigns a unique table ID to each table.\n",
+					"\n",
+					"    Args:\n",
+					"        result (AnalyzeResult): The document analysis result.\n",
+					"\n",
+					"    Returns:\n",
+					"        list: A list of dictionaries, one per table, with structured rows, cell info, and bounding metadata, \n",
+					"            including a unique table ID.\n",
+					"    \"\"\"\n",
+					"    try:\n",
+					"        tables_data = []\n",
+					"        \n",
+					"        # Initialize a counter for unique table IDs\n",
+					"        table_id_counter = 1  \n",
+					"        if hasattr(result, \"tables\") and result.tables:\n",
+					"\n",
+					"            for table in result.tables:\n",
+					"                # Create table info dictionary\n",
+					"                table_info = {\n",
+					"                    \"table_id\": f\"table_{table_id_counter}\",  # Unique table ID\n",
+					"                    \"row_count\": table.row_count,\n",
+					"                    \"column_count\": table.column_count,\n",
+					"                    \"cells\": [],\n",
+					"                    \"pages\": [],\n",
+					"                    \"bounding_regions\": []\n",
+					"                }\n",
+					"\n",
+					"                # Capture page number and bounding region\n",
+					"                if table.bounding_regions:\n",
+					"                    for region in table.bounding_regions:\n",
+					"                        page = region.page_number\n",
+					"                        polygon_raw = region.polygon  # list of floats: [x1, y1, x2, y2, ...]\n",
+					"                        polygon = [(polygon_raw[i], polygon_raw[i + 1]) for i in range(0, len(polygon_raw), 2)] if polygon_raw else None\n",
+					"\n",
+					"                        table_info[\"pages\"].append(page)\n",
+					"                        table_info[\"bounding_regions\"].append({\n",
+					"                            \"page\": page,\n",
+					"                            \"polygon\": polygon\n",
+					"                        })\n",
+					"                else:\n",
+					"                    table_info[\"pages\"].append(None)\n",
+					"                    table_info[\"bounding_regions\"].append(None)\n",
+					"\n",
+					"                # Extract all cells\n",
+					"                for cell in table.cells:\n",
+					"                    cell_info = {\n",
+					"                        \"row_index\": cell.row_index,\n",
+					"                        \"column_index\": cell.column_index,\n",
+					"                        \"row_span\": cell.row_span,\n",
+					"                        \"column_span\": cell.column_span,\n",
+					"                        \"content\": cell.content.strip() if cell.content else \"\",\n",
+					"                        \"kind\": getattr(cell, \"kind\", None)  # header/data\n",
+					"                    }\n",
+					"                    table_info[\"cells\"].append(cell_info)\n",
+					"\n",
+					"                tables_data.append(table_info)\n",
+					"                # Increment the unique table ID counter\n",
+					"                table_id_counter += 1  \n",
+					"        \n",
+					"        logger.info(f\"extract_tables: Extracted {table_id_counter} tables\")\n",
+					"        return tables_data\n",
+					"\n",
+					"    except Exception as e:\n",
+					"        logger.error(f\"extract_tables - Failed to extract all tables from the document: {str(e)}\")\n",
+					"        raise\n",
+					""
+				],
+				"execution_count": 28
+			},
+			{
+				"cell_type": "code",
+				"source": [
+					"def extract_data_from_pdf(result) -> tuple:\n",
+					"    \"\"\"\n",
+					"    Extract paragraphs, key-value pairs, and tables from a single PDF analysis.\n",
+					"    \n",
+					"    Args:\n",
+					"        result: The analyzed result from a PDF document.\n",
+					"    \n",
+					"    Returns:\n",
+					"        tuple: A tuple of paragraphs (list), key-value pairs (dict), and tables (list).\n",
+					"    \"\"\"\n",
+					"    try:\n",
+					"        paragraphs = extract_paragraphs(result)\n",
+					"        kv_dict = extract_key_value_pairs(result)\n",
+					"        tables = extract_tables(result)\n",
+					"        return paragraphs, kv_dict, tables\n",
+					"\n",
+					"    except Exception as e:\n",
+					"        logger.error(f\"extract_data_from_pdf - Error extracting paragraphs, key-value pairs, and tables: {str(e)}\")\n",
+					"        return [], {}, []"
+				],
+				"execution_count": 29
+			},
+			{
+				"cell_type": "code",
+				"source": [
+					"def search_tables(tables_data: list, keywords: list) -> list:\n",
+					"    \"\"\"\n",
+					"    Search tables for specific keywords (case-sensitive) and return matching tables.\n",
+					"    \n",
+					"    Args:\n",
+					"        tables_data (list): List of DataFrames representing tables.\n",
+					"        keywords (list): List of keywords to search for.\n",
+					"    \n",
+					"    Returns:\n",
+					"        list: A list of DataFrames that match the keywords.\n",
+					"    \"\"\"\n",
+					"    try:\n",
+					"        matching_tables = []\n",
+					"\n",
+					"        for table in tables_data:\n",
+					"            header_cells = [\n",
+					"                cell[\"content\"].strip()\n",
+					"                for cell in table.get(\"cells\", [])\n",
+					"                if cell.get(\"kind\") == \"columnHeader\"\n",
+					"            ]\n",
+					"\n",
+					"            matched = [col for col in keywords if col in header_cells]\n",
+					"        \n",
+					"            if len(matched) >= 2:\n",
+					"                table[\"matched_columns\"] = matched\n",
+					"                table[\"match_count\"] = len(matched)\n",
+					"                matching_tables.append(table)\n",
+					"\n",
+					"        return matching_tables\n",
+					"\n",
+					"    except Exception as e:\n",
+					"        logger.error(f\"search_tables - Error searching tables for specific keywords: {str(e)}\")\n",
+					"        raise"
+				],
+				"execution_count": 30
+			},
+			{
+				"cell_type": "code",
+				"source": [
+					"def convert_table_dict_to_df(table_dict):\n",
+					"    \"\"\"\n",
+					"    Convert a table dictionary from Azure Document Intelligence into a pandas DataFrame.\n",
+					"\n",
+					"    Args:\n",
+					"        table_dict (dict): Table dictionary containing 'cells', 'row_count', and 'column_count'.\n",
+					"\n",
+					"    Returns:\n",
+					"        pd.DataFrame: The resulting DataFrame with appropriate rows and columns.\n",
+					"    \"\"\"\n",
+					"    try:\n",
+					"        # Initialize a 2D array (list of lists) with empty strings\n",
+					"        table_data = [[\"\" for _ in range(table_dict[\"column_count\"])] for _ in range(table_dict[\"row_count\"])]\n",
+					"\n",
+					"        for cell in table_dict[\"cells\"]:\n",
+					"            row_idx = cell[\"row_index\"]\n",
+					"            col_idx = cell[\"column_index\"]\n",
+					"            content = cell.get(\"content\", \"\")\n",
+					"\n",
+					"            # Insert content into the correct position\n",
+					"            table_data[row_idx][col_idx] = content.strip()\n",
+					"\n",
+					"        # Convert to DataFrame\n",
+					"        df = pd.DataFrame(table_data)\n",
+					"\n",
+					"        return df\n",
+					"\n",
+					"    except Exception as e:\n",
+					"        logger.error(f\"convert_table_dict_to_df - Error converting a table dictionary into a pandas DataFrame: {str(e)}\")\n",
+					"        raise"
+				],
+				"execution_count": 31
+			},
+			{
+				"cell_type": "code",
+				"source": [
+					"def combine_paragraphs_kv_and_tables(paragraphs: list, kv_pairs: dict, tables: list) -> tuple:\n",
+					"    \"\"\"\n",
+					"    Combine paragraphs, key-value pairs, and tables into a structured DataFrame:\n",
+					"    - bulk_fuel_details\n",
+					"\n",
+					"    Args:\n",
+					"        paragraphs (list): A list of extracted paragraph strings from the document.\n",
+					"        kv_pairs (dict): A dictionary of key-value pairs extracted from the document.\n",
+					"        tables (list): A list of tables extracted from the document to be processed.\n",
+					"    \n",
+					"    Returns:\n",
+					"        tuple: A tuple containing a pandas DataFrame:\n",
+					"            - bulk_fuel_details (pd.DataFrame)\n",
+					"    \"\"\"\n",
+					"    try:\n",
+					"        # Extract metadata\n",
+					"        metadata = {\n",
+					"            \"InvoiceNumber\": kv_pairs.get(\"Invoice No:\", \"\"), \n",
+					"            \"InvoiceDate\": kv_pairs.get(\"Invoice Date:\", \"\"), \n",
+					"            \"CustomerOrderNumber\": kv_pairs.get(\"Customer Order No:\", \"\"),\n",
+					"            \"SupplyPoint\": kv_pairs.get(\"Supply Point:\", \"\"),\n",
+					"            \"DeliveryAddress\": kv_pairs.get(\"DELIVERY ADDRESS:\", \"\")\n",
+					"        }\n",
+					"\n",
+					"        # Identify required columns from tables\n",
+					"        table_required_cols = [\"Description\", \"Quantity\", \"Docket #\"]\n",
+					"\n",
+					"        # Search for dependent tables and update metadata to include the required columns\n",
+					"        dependent_tables = search_tables(tables, table_required_cols)\n",
+					"        all_rows = []\n",
+					"\n",
+					"        # Loop through each table in dependent_tables\n",
+					"        for table in dependent_tables:            \n",
+					"            # Convert table to DataFrame\n",
+					"            table_df = convert_table_dict_to_df(table)\n",
+					"\n",
+					"            # First row contains field names\n",
+					"            field_names = table_df.iloc[0, :].astype(str)\n",
+					"            \n",
+					"            # Remaining rows contain values\n",
+					"            values = table_df.iloc[1:, :].copy()\n",
+					"            \n",
+					"            # Create a mapping from column indices to field names\n",
+					"            col_mapping = {i: field_names[i] for i in range(len(field_names))}\n",
+					"            \n",
+					"            # Rename columns in values DataFrame to field names\n",
+					"            values.columns = [col_mapping[i] for i in range(len(col_mapping))]\n",
+					"            \n",
+					"            # Select only the columns that are in table_required_cols\n",
+					"            selected_cols = [col for col in table_required_cols if col in values.columns]\n",
+					"            \n",
+					"            if selected_cols:\n",
+					"                # Extract the rows with selected columns\n",
+					"                selected_df = values[selected_cols].copy()\n",
+					"                \n",
+					"                # Clean rows by removing rows where all selected columns are empty\n",
+					"                selected_df = selected_df.dropna(how='all')\n",
+					"                \n",
+					"                # Append to the list of DataFrames\n",
+					"                if not selected_df.empty:\n",
+					"                    all_rows.append(selected_df)\n",
+					"\n",
+					"        # Concatenate all DataFrames into a single DataFrame\n",
+					"        if all_rows:\n",
+					"            bulk_fuel_details_df = pd.concat(all_rows, ignore_index=True)\n",
+					"        else:\n",
+					"            # If no rows were collected, create an empty DataFrame with required columns\n",
+					"            bulk_fuel_details_df = pd.DataFrame(columns=table_required_cols)\n",
+					"            \n",
+					"        # Append metadata as columns\n",
+					"        for key, value in metadata.items():\n",
+					"            bulk_fuel_details_df[key] = value\n",
+					"\n",
+					"        # Reset index for cleanliness \n",
+					"        bulk_fuel_details_df = bulk_fuel_details_df.reset_index(drop=True)\n",
+					"        \n",
+					"        return bulk_fuel_details_df \n",
+					"        \n",
+					"    except Exception as e:\n",
+					"        logger.error(f\"combine_paragraphs_kv_and_tables - Failed to combine paragraphs, key-value pairs, and tables into structured DataFrames: {str(e)}\")\n",
+					"        raise\n",
+					""
+				],
+				"execution_count": 32
+			},
+			{
+				"cell_type": "markdown",
+				"metadata": {
+					"nteract": {
+						"transient": {
+							"deleting": false
+						}
+					}
+				},
+				"source": [
+					"#### Retrieve Landing file list to process"
+				]
+			},
+			{
+				"cell_type": "code",
+				"metadata": {
+					"collapsed": false
+				},
+				"source": [
+					"db_query =\"SELECT [SP_SOURCE_ID], [TARGET_ROOT_FOLDER] ,[TARGET_FOLDER_PATH] ,[TARGET_FILE_NAME], [SITE_CODE] FROM [CTL].[ESG_SHAREPOINT_FILE_DETAILS] WHERE [FILE_TYPE] = 'PDF' AND TARGET_FOLDER_PATH = 'marano_bulk' AND ENABLED = 1\"\n",
+					"\n",
+					"# Extract the results of the SQL query into a dataframe\n",
+					"df = spark.read.format(\"jdbc\") \\\n",
+					"    .option(\"url\", \"jdbc:sqlserver://%s:%s\" % (sql_server_name, db_port)) \\\n",
+					"    .option(\"query\", db_query) \\\n",
+					"    .option(\"accessToken\", sql_access_token) \\\n",
+					"    .option(\"encrypt\", \"true\") \\\n",
+					"    .option(\"databaseName\", db_name) \\\n",
+					"    .option(\"hostNameInCertificate\", \"*.database.windows.net\") \\\n",
+					"    .load()\n",
+					""
+				],
+				"execution_count": 33
+			},
+			{
+				"cell_type": "markdown",
+				"metadata": {
+					"nteract": {
+						"transient": {
+							"deleting": false
+						}
+					}
+				},
+				"source": [
+					"#### Create failed folder path"
+				]
+			},
+			{
+				"cell_type": "code",
+				"source": [
+					"# Create failed directory if it does not exist\n",
+					"failed_directory =  [f.name for f in mssparkutils.fs.ls(f\"abfss://{source_container}@{datahub_storage}.dfs.core.windows.net/\")]\n",
+					"failed_folder_path = destination_folder_path + '/failed'\n",
+					"if {failed_folder_path} not in failed_directory:\n",
+					"    mssparkutils.fs.mkdirs(f\"abfss://{source_container}@{datahub_storage}.dfs.core.windows.net/{failed_folder_path}\")"
+				],
+				"execution_count": 34
+			},
+			{
+				"cell_type": "markdown",
+				"metadata": {
+					"nteract": {
+						"transient": {
+							"deleting": false
+						}
+					}
+				},
+				"source": [
+					"#### Extract data from JSON document"
+				]
+			},
+			{
+				"cell_type": "code",
+				"metadata": {
+					"collapsed": false
+				},
+				"source": [
+					"timezone = pytz.timezone(\"UTC\")\n",
+					"rows = df.collect()\n",
+					"\n",
+					"logger.info(\"Started - Process to extract data from JSON\")\n",
+					"\n",
+					"try:\n",
+					"    # Iterate and process each file\n",
+					"    for row in rows:\n",
+					"        site_code = row[\"SITE_CODE\"]\n",
+					"        source_file_id = row[\"SP_SOURCE_ID\"]\n",
+					"        source_root_path = row[\"TARGET_ROOT_FOLDER\"]\n",
+					"        source_path = row[\"TARGET_FOLDER_PATH\"]\n",
+					"        source_file_name = row[\"TARGET_FILE_NAME\"]\n",
+					"        source_folder_path = os.path.join(source_root_path, source_path)\n",
+					"        archive_folder_path = source_folder_path\n",
+					"        \n",
+					"        #Build source file path\n",
+					"        source_file_name = source_file_name.removesuffix('.pdf') + '.json'\n",
+					"        source_file_path = f\"abfss://{source_container}@{datahub_storage}.dfs.core.windows.net/{source_folder_path}/{source_file_name}\"\n",
+					"        \n",
+					"        #Check if the file exists in the source file path\n",
+					"        if mssparkutils.fs.exists(source_file_path):\n",
+					"            #Get Current Dates\n",
+					"            Date_Collection = spark.sql(\"select current_timestamp() AS Current,(current_timestamp() + interval '-1' second) AS EndDate\").collect()\n",
+					"            Bronze_LoadDate = Date_Collection[0]['Current']\n",
+					"            Bronze_UpdateEndDate = Date_Collection[0]['EndDate']\n",
+					"\n",
+					"            logger.debug(f\"source_file_path: {source_file_path}\")\n",
+					"\n",
+					"            # Get the current time with timezone\n",
+					"            current_time = datetime.now(timezone).strftime(\"%Y_%m_%dT%H_%M_%S\")            \n",
+					"            # Convert the timestamp to a datetime object\n",
+					"            timestamp_obj = datetime.strptime(current_time, \"%Y_%m_%dT%H_%M_%S\")\n",
+					"            # Create the filepath in YYYY/MM/DD format\n",
+					"            YYYYmmdd_filepath = timestamp_obj.strftime(\"%Y/%m/%d\")\n",
+					"\n",
+					"            #Build archive file path   \n",
+					"            archive_file_name = source_file_name.removesuffix('.json') + '_' +current_time + '.zip' \n",
+					"            archive_file_path = f\"abfss://{archive_container}@{datahub_storage}.dfs.core.windows.net/{archive_folder_path}/{YYYYmmdd_filepath}/{archive_file_name}\"\n",
+					"            archive_folder_path = f\"/{source_folder_path}/{YYYYmmdd_filepath}\" \n",
+					"            logger.debug(f\"archive_file_path: {archive_file_path}\")\n",
+					"\n",
+					"            # Create archive directory if it does not exist\n",
+					"            archive_directory =  [f.name for f in mssparkutils.fs.ls(f\"abfss://{archive_container}@{datahub_storage}.dfs.core.windows.net/\")]\n",
+					"            if {archive_folder_path} not in archive_directory:\n",
+					"                mssparkutils.fs.mkdirs(f\"abfss://{archive_container}@{datahub_storage}.dfs.core.windows.net/{archive_folder_path}\")\n",
+					"\n",
+					"            #Build failure file path\n",
+					"            failed_file_path = f\"abfss://{source_container}@{datahub_storage}.dfs.core.windows.net/{failed_folder_path}/{source_file_name}\"\n",
+					"            \n",
+					"            logger.info(\"Started - Extract and combine datasets from Json file\")\n",
+					"            try:\n",
+					"                # retrieve the results of the document intelligence pdf extracts content\n",
+					"                json_df = spark.read.text(source_file_path)\n",
+					"                json_string = \"\\n\".join(row['value'] for row in json_df.collect())\n",
+					"                dictionary_result = json.loads(json_string)   \n",
+					"\n",
+					"                # Convert dictionary back to AnalyzeResult object\n",
+					"                result = AnalyzeResult(dictionary_result)\n",
+					"                                            \n",
+					"                # Run functions to analyse and combine datasets\n",
+					"                paragraphs, kv_pairs, tables = extract_data_from_pdf(result)    \n",
+					"                bulk_fuel_details = combine_paragraphs_kv_and_tables(paragraphs, kv_pairs, tables)\n",
+					"                \n",
+					"                # Convert pandas dataframes to spark dataframes\n",
+					"                raw_bulk_fuel_details_df = spark.createDataFrame(bulk_fuel_details)\n",
+					"                raw_bulk_fuel_details_df = raw_bulk_fuel_details_df.withColumn(\"SourceFileID\",lit(source_file_id))\n",
+					"                raw_bulk_fuel_details_df = raw_bulk_fuel_details_df.withColumn(\"SiteCode\",lit(site_code))\n",
+					"                raw_bulk_fuel_details_df = raw_bulk_fuel_details_df.withColumnRenamed(\"Description\",\"Product\")\n",
+					"                raw_bulk_fuel_details_df = raw_bulk_fuel_details_df.withColumnRenamed(\"Docket #\",\"DocketNumber\")\n",
+					"\n",
+					"            except Exception as e:\n",
+					"                logger.error(f\"Error - Extract and combine datasets from Json file: {source_file_path}: {str(e)}\")\n",
+					"                logger.info(f\"Failed source file: {source_file_path} moved to: {failed_file_path}\")\n",
+					"                # Move source json file to failed folder when error occurs\n",
+					"                mssparkutils.fs.mv(source_file_path,failed_file_path, overwrite=True)\n",
+					"                raise\n",
+					"            finally:\n",
+					"                logger.info(\"Completed - Extract and combine datasets from Json file\")\n",
+					"\n",
+					"            logger.info(f\"Started - Write to bronze table: {bronze_tablename}\")\n",
+					"            try:\n",
+					"                # Table marano_bulk_fuel_transactions: START\n",
+					"                # -----------------------------------                \n",
+					"                # Define the window specification\n",
+					"                window_spec = Window.orderBy(\"SiteCode\",\"InvoiceNumber\",\"InvoiceDate\",\"DocketNumber\")\n",
+					"\n",
+					"                # Add a row index\n",
+					"                raw_bulk_fuel_details_df = raw_bulk_fuel_details_df.withColumn(\"FileRowIndex\", row_number().over(window_spec) - 1)\n",
+					"                raw_bulk_fuel_details_df = raw_bulk_fuel_details_df.withColumn(\"FileOverrideFlag\", lit(0))\n",
+					"\n",
+					"                # Add CDC columns\n",
+					"                raw_bulk_fuel_details_df = raw_bulk_fuel_details_df.withColumn(\"HashKey\", sha2(concat_ws(\"||\", \"SiteCode\",\"InvoiceNumber\",\"InvoiceDate\",\"DocketNumber\",\"FileRowIndex\"), 256))\n",
+					"                raw_bulk_fuel_details_df = raw_bulk_fuel_details_df.withColumn(\"HashDiff\", sha2(concat_ws(\"||\", \"CustomerOrderNumber\",\"SupplyPoint\",\"Product\",\"Quantity\",\"DeliveryAddress\",\"FileOverrideFlag\"), 256))\n",
+					"                raw_bulk_fuel_details_df = raw_bulk_fuel_details_df.withColumn(\"CDCLoadDate\", to_timestamp(lit(Bronze_LoadDate),'yyyy-MM-dd HH:mm:ss'))\n",
+					"                raw_bulk_fuel_details_df = raw_bulk_fuel_details_df.withColumn(\"CDCStartDate\", to_timestamp(lit(Bronze_LoadDate), 'yyyy-MM-dd HH:mm:ss'))\n",
+					"                raw_bulk_fuel_details_df = raw_bulk_fuel_details_df.withColumn(\"CDCEndDate\", to_timestamp(lit(\"9999-12-31 23:59:59\"), 'yyyy-MM-dd HH:mm:ss'))\n",
+					"                raw_bulk_fuel_details_df = raw_bulk_fuel_details_df.withColumn(\"CDCCurrentFlag\", lit(1))\n",
+					"                raw_bulk_fuel_details_df = raw_bulk_fuel_details_df.withColumn(\"CDCOps\", lit(1))\n",
+					"\n",
+					"                # Row count parameters\n",
+					"                Bronze_Insert_Pre=spark.sql(f\"\"\" SELECT COUNT(*) FROM {bronze_database_name}.{bronze_tablename} WHERE CDCOps = 1 \"\"\").collect()[0][0]\n",
+					"                Bronze_Update_Pre=spark.sql(f\"\"\" SELECT COUNT(*) FROM {bronze_database_name}.{bronze_tablename} WHERE CDCOps = 2 \"\"\").collect()[0][0]\n",
+					"                Bronze_Delete_Pre=spark.sql(f\"\"\" SELECT COUNT(*) FROM {bronze_database_name}.{bronze_tablename} WHERE CDCOps = 0 \"\"\").collect()[0][0]\n",
+					"\n",
+					"                # SCD2 logic\n",
+					"                # Create a temporary view of the dataframe\n",
+					"                raw_bulk_fuel_details_df.createOrReplaceTempView(\"temp_table\")\n",
+					"\n",
+					"                # Use the merge operation to update the target table\n",
+					"                spark.sql(f\"\"\"\n",
+					"                    MERGE INTO {bronze_database_name}.{bronze_tablename} t\n",
+					"                    USING temp_table s\n",
+					"                    ON t.HashKey = s.HashKey AND t.CDCCurrentFlag = 1\n",
+					"                    WHEN MATCHED AND t.HashDiff <> s.HashDiff THEN\n",
+					"                    UPDATE SET t.CDCEndDate = '{Bronze_UpdateEndDate}',\n",
+					"                                t.CDCCurrentFlag = 0,\n",
+					"                                t.CDCOps = s.CDCOps + 1\n",
+					"                    WHEN NOT MATCHED THEN\n",
+					"                    INSERT (SourceFileID, SiteCode, InvoiceNumber, InvoiceDate, CustomerOrderNumber, SupplyPoint, Product, Quantity, DocketNumber, DeliveryAddress, FileRowIndex, FileOverrideFlag, CDCLoadDate, CDCStartDate, CDCEndDate, CDCOps, CDCCurrentFlag, HashKey, HashDiff)\n",
+					"                    VALUES (s.SourceFileID, s.SiteCode, s.InvoiceNumber, s.InvoiceDate, s.CustomerOrderNumber, s.SupplyPoint, s.Product, s.Quantity, s.DocketNumber, s.DeliveryAddress, s.FileRowIndex, s.FileOverrideFlag, s.CDCLoadDate, s.CDCStartDate, s.CDCEndDate, 1, s.CDCCurrentFlag, s.HashKey, s.HashDiff)\n",
+					"                \"\"\")\n",
+					"\n",
+					"                # Use the merge operation to Insert updated record \n",
+					"                spark.sql(f\"\"\"\n",
+					"                    MERGE INTO {bronze_database_name}.{bronze_tablename} t\n",
+					"                    USING temp_table s\n",
+					"                    ON t.HashKey = s.HashKey AND t.CDCCurrentFlag = 1\n",
+					"                    WHEN MATCHED AND t.HashDiff <> s.HashDiff THEN\n",
+					"                    UPDATE SET t.CDCEndDate = '{Bronze_UpdateEndDate}',\n",
+					"                                t.CDCCurrentFlag = 0,\n",
+					"                                t.CDCOps = s.CDCOps + 1\n",
+					"                    WHEN NOT MATCHED THEN\n",
+					"                    INSERT (SourceFileID, SiteCode, InvoiceNumber, InvoiceDate, CustomerOrderNumber, SupplyPoint, Product, Quantity, DocketNumber, DeliveryAddress, FileRowIndex, FileOverrideFlag, CDCLoadDate, CDCStartDate, CDCEndDate, CDCOps, CDCCurrentFlag, HashKey, HashDiff)\n",
+					"                    VALUES (s.SourceFileID, s.SiteCode, s.InvoiceNumber, s.InvoiceDate, s.CustomerOrderNumber, s.SupplyPoint, s.Product, s.Quantity, s.DocketNumber, s.DeliveryAddress, s.FileRowIndex, s.FileOverrideFlag, s.CDCLoadDate, s.CDCStartDate, s.CDCEndDate, 1, s.CDCCurrentFlag, s.HashKey, s.HashDiff)\n",
+					"                \"\"\")\n",
+					"\n",
+					"                #Row count parameters\n",
+					"                Bronze_Insert_Post=spark.sql(f\"\"\" SELECT COUNT(*) FROM {bronze_database_name}.{bronze_tablename} WHERE CDCOps = 1 \"\"\").collect()[0][0]\n",
+					"                Bronze_Update_Post=spark.sql(f\"\"\" SELECT COUNT(*) FROM {bronze_database_name}.{bronze_tablename} WHERE CDCOps = 2 \"\"\").collect()[0][0]\n",
+					"                Bronze_Delete_Post=spark.sql(f\"\"\" SELECT COUNT(*) FROM {bronze_database_name}.{bronze_tablename} WHERE CDCOps = 0 \"\"\").collect()[0][0]\n",
+					"                Bronze_TotalRowCount_Post=spark.sql(f\"\"\" SELECT COUNT(*) FROM {bronze_database_name}.{bronze_tablename}\"\"\").collect()[0][0]\n",
+					"                Bronze_ActiveRecord_Post=spark.sql(f\"\"\" SELECT COUNT(*) FROM {bronze_database_name}.{bronze_tablename} WHERE CDCCurrentFlag = true \"\"\").collect()[0][0]\n",
+					"\n",
+					"                #Row calculation\n",
+					"                Bronze_Update = Bronze_Update_Post - Bronze_Update_Pre\n",
+					"                Bronze_Insert = (Bronze_Insert_Post - Bronze_Insert_Pre) + Bronze_Update\n",
+					"                Bronze_Delete = Bronze_Delete_Post - Bronze_Delete_Pre\n",
+					"                Bronze_ActiveRows = Bronze_ActiveRecord_Post \n",
+					"                Bronze_TotalRows = Bronze_TotalRowCount_Post\n",
+					"\n",
+					"                log_data = [(bronze_database_name,bronze_tablename,Bronze_LoadDate,Bronze_Insert,Bronze_Update,Bronze_Delete,Bronze_ActiveRows,Bronze_TotalRows)]\n",
+					"                log_columns = ['PIPELINE_NAME', 'TABLE_NAME', 'INGEST_DATETIME', 'INSERT','UPDATE','DELETE','ACTIVE_ROWS','TOTAL_ROWS']\n",
+					"                df_log = spark.createDataFrame(log_data, log_columns)\n",
+					"\n",
+					"                try:\n",
+					"                    df_log.write.format(\"jdbc\").option(\"url\", \"jdbc:sqlserver://%s:%s\" % (sql_server_name, db_port)).option(\"dbtable\", \"[CTL].[CFG_INGESTION_LOGS]\").option(\"accessToken\", sql_access_token) \\\n",
+					"                        .option(\"encrypt\", \"true\").option(\"databaseName\", db_name).option(\"hostNameInCertificate\", \"*.database.windows.net\").mode(\"append\").save()\n",
+					"                except ValueError as e :\n",
+					"                    logger.error(f\"Error - MSSQL Connector write failed: {str(e)}\")\n",
+					"\n",
+					"                # Table marano_bulk_fuel_transactions: END    \n",
+					"                # -----------------------------------              \n",
+					"\n",
+					"            except Exception as e:\n",
+					"                logger.error(f\"Error - Write to bronze table: {bronze_tablename}: {source_file_path}: {str(e)}\")\n",
+					"                logger.info(f\"Failed source file: {source_file_path} moved to: {failed_file_path}\")\n",
+					"                # Move source json file to failed folder when error occurs\n",
+					"                mssparkutils.fs.mv(source_file_path,failed_file_path, overwrite=True)\n",
+					"                raise\n",
+					"            finally:\n",
+					"                logger.info(f\"Completed - Write to bronze table: {bronze_tablename}\")\n",
+					"\n",
+					"                logger.info(f\"Deleted source file: {source_file_path}\")\n",
+					"                # Remove source json file when processed\n",
+					"                mssparkutils.fs.rm(source_file_path, recurse=False)\n",
+					"\n",
+					"                # PDF Validation: START    \n",
+					"                # -----------------------------------\n",
+					"\n",
+					"                # Disable Spark SQL's default behavior of dropping nulls in JSON serialization\n",
+					"                spark.conf.set(\"spark.sql.jsonGenerator.ignoreNullFields\", \"false\")\n",
+					"\n",
+					"                # Identify missing records from the bronze table\n",
+					"                missing_record_df = spark.sql(f\"\"\"\n",
+					"                    SELECT \n",
+					"                        SourceFileID,\n",
+					"                        'marano_bronze.marano_bulk_fuel_transactions' as TableName,\n",
+					"                        CDCLoadDate,\n",
+					"                        'Missing Records' as ValidationType,\n",
+					"                        to_json(struct(*)) AS RowData,\n",
+					"                        0 as NotificationSent\n",
+					"                    FROM \n",
+					"                        marano_bronze.marano_bulk_fuel_transactions\n",
+					"                    WHERE \n",
+					"                        Product in ('Diesel','Unleaded') and ((InvoiceNumber is null or InvoiceDate is null) and SupplyPoint is not null and Quantity is not null) \n",
+					"                        and CDCCurrentFlag = 1 and CDCLoadDate = '{Bronze_LoadDate}' \n",
+					"                    ORDER BY sourcefileid, filerowindex\n",
+					"                \"\"\")\n",
+					"\n",
+					"                # Capture missing record details in [CTL].[ESG_SHAREPOINT_PDF_VALIDATON_LOG] table\n",
+					"                try:\n",
+					"                    missing_record_df.write.format(\"jdbc\").option(\"url\", \"jdbc:sqlserver://%s:%s\" % (sql_server_name, db_port)).option(\"dbtable\", \"[CTL].[ESG_SHAREPOINT_PDF_VALIDATON_LOG]\").option(\"accessToken\", sql_access_token) \\\n",
+					"                        .option(\"encrypt\", \"true\").option(\"databaseName\", db_name).option(\"hostNameInCertificate\", \"*.database.windows.net\").mode(\"append\").save()\n",
+					"                except ValueError as e :\n",
+					"                    logger.error(f\"Error - MSSQL Connector write failed: {str(e)}\")\n",
+					"\n",
+					"                # Identify records from the bronze table where the sum of individual quantities do not equal the total quantity captured\n",
+					"                totals_mismatch_df = spark.sql(f\"\"\"\n",
+					"                    WITH InvalidRecords AS (\n",
+					"                        SELECT\n",
+					"                            *\n",
+					"                        FROM\n",
+					"                            marano_bronze.marano_bulk_fuel_transactions \n",
+					"                        WHERE \n",
+					"                            CDCCurrentFlag = 1 and CDCLoadDate = '{Bronze_LoadDate}' \n",
+					"                    ),\n",
+					"                    IndividualTotals AS (\n",
+					"                        SELECT \n",
+					"                            sourcefileid, CDCLoadDate, Product, InvoiceNumber, InvoiceDate, SUM(TRY_CAST(replace(Quantity,',','') AS DECIMAL(20,2))) AS SumOfQuantities\n",
+					"                        FROM \n",
+					"                            InvalidRecords\n",
+					"                        WHERE\n",
+					"                            (InvoiceNumber is not null and InvoiceDate is not null and CustomerOrderNumber is not null and SupplyPoint is not null and DocketNumber is not null and Quantity is not null)\n",
+					"                            and Product in ('Diesel','Unleaded')\n",
+					"                        GROUP BY sourcefileid, CDCLoadDate, Product, InvoiceNumber, InvoiceDate\n",
+					"                    ),\n",
+					"                    TotalRow AS (\n",
+					"                        SELECT \n",
+					"                            sourcefileid, CDCLoadDate, Product, InvoiceNumber, InvoiceDate, TRY_CAST(replace(Quantity,',','') AS DECIMAL(20,2)) AS TotalQuantity\n",
+					"                        FROM \n",
+					"                        InvalidRecords\n",
+					"                        WHERE Product in ('14 days past EOM')    \n",
+					"                    )\n",
+					"                    SELECT\n",
+					"                        SourceFileID,\n",
+					"                        'marano_bronze.marano_bulk_fuel_transactions' as TableName,\n",
+					"                        CDCLoadDate,\n",
+					"                        'Totals Mismatch' as ValidationType,\n",
+					"                        to_json(struct(*)) AS RowData,\n",
+					"                        0 as NotificationSent\n",
+					"                    FROM\n",
+					"                    (\n",
+					"                        SELECT \n",
+					"                            i.sourcefileid,\n",
+					"                            i.CDCLoadDate,\n",
+					"                            i.Product,\n",
+					"                            i.SumOfQuantities,\n",
+					"                            t.TotalQuantity,\n",
+					"                            CASE \n",
+					"                                WHEN i.SumOfQuantities = t.TotalQuantity THEN 'Totals Match'\n",
+					"                                ELSE 'Totals Do Not Match'\n",
+					"                            END AS ValidationResult\n",
+					"                        FROM IndividualTotals i\n",
+					"                        INNER JOIN TotalRow t\n",
+					"                            ON  i.sourcefileid = t.sourcefileid and i.CDCLoadDate = t.CDCLoadDate AND i.InvoiceNumber = t.InvoiceNumber and i.InvoiceDate = t.InvoiceDate\n",
+					"                        WHERE\n",
+					"                            CASE \n",
+					"                                WHEN i.SumOfQuantities = t.TotalQuantity THEN 'Totals Match'\n",
+					"                                ELSE 'Totals Do Not Match'\n",
+					"                            END = 'Totals Do Not Match'\n",
+					"                    ) a\n",
+					"                \"\"\")\n",
+					"\n",
+					"                # Capture total mismatches in [CTL].[ESG_SHAREPOINT_PDF_VALIDATON_LOG] table\n",
+					"                try:\n",
+					"                    totals_mismatch_df.write.format(\"jdbc\").option(\"url\", \"jdbc:sqlserver://%s:%s\" % (sql_server_name, db_port)).option(\"dbtable\", \"[CTL].[ESG_SHAREPOINT_PDF_VALIDATON_LOG]\").option(\"accessToken\", sql_access_token) \\\n",
+					"                        .option(\"encrypt\", \"true\").option(\"databaseName\", db_name).option(\"hostNameInCertificate\", \"*.database.windows.net\").mode(\"append\").save()\n",
+					"                except ValueError as e :\n",
+					"                    logger.error(f\"Error - MSSQL Connector write failed: {str(e)}\")\n",
+					"\n",
+					"                # Enable Spark SQL's default behavior of dropping nulls in JSON serialization\n",
+					"                spark.conf.set(\"spark.sql.jsonGenerator.ignoreNullFields\", \"true\")\n",
+					"\n",
+					"                # PDF Validation: END    \n",
+					"                # -----------------------------------\n",
+					"\n",
+					"except Exception as e:\n",
+					"    logger.error(f\"Error - Process to extract data from JSON: {source_file_path}: {str(e)}\")\n",
+					"    logger.info(f\"Failed source file: {source_file_path} moved to: {failed_file_path}\")\n",
+					"    # Move source json file to failed folder when error occurs\n",
+					"    mssparkutils.fs.mv(source_file_path,failed_file_path, overwrite=True)\n",
+					"    raise\n",
+					"finally:\n",
+					"    logger.info(\"Completed - Process to extract data from JSON\")\n",
+					""
+				],
+				"execution_count": 35
+			},
+			{
+				"cell_type": "code",
+				"source": [
+					""
+				],
+				"execution_count": null
+			},
+			{
+				"cell_type": "code",
+				"source": [
+					""
+				],
+				"execution_count": null
+			},
+			{
+				"cell_type": "markdown",
+				"metadata": {
+					"nteract": {
+						"transient": {
+							"deleting": false
+						}
+					}
+				},
+				"source": [
+					"#### Debug - for future use"
+				]
+			},
+			{
+				"cell_type": "code",
+				"source": [
+					"# Verify it can be parsed back\n",
+					"#json.loads(json_string)"
+				],
+				"execution_count": null
+			},
+			{
+				"cell_type": "code",
+				"source": [
+					"#source_file_path = 'abfss://landing@cqldevdatahubdata.dfs.core.windows.net/esg_sharepoint_files/marano_bulk/failed/s07_marano_bulk.json'\n",
+					"#archive_file_path = 'abfss://landing@cqldevdatahubdata.dfs.core.windows.net/esg_sharepoint_files/marano_bulk/s07_marano_bulk.json'\n",
+					"#mssparkutils.fs.mv(source_file_path, archive_file_path, overwrite=True)"
+				],
+				"execution_count": null
+			},
+			{
+				"cell_type": "code",
+				"source": [
+					"#archive_file_path = 'abfss://bronze@cqldevdatahubsynapse.dfs.core.windows.net/esg_sharepoint_bronze/marano/marano_bulk_fuel_transactions'\n",
+					"#mssparkutils.fs.rm(archive_file_path, recurse=True)"
+				],
+				"execution_count": null
+			},
+			{
+				"cell_type": "code",
+				"source": [
+					"#ile_path = 'abfss://bronze@cqldevdatahubsynapse.dfs.core.windows.net/esg_sharepoint_bronze/marano/marano_bulk_fuel_transactions'\n",
+					"#mssparkutils.fs.mkdirs(file_path)"
+				],
+				"execution_count": null
+			},
+			{
+				"cell_type": "code",
+				"source": [
+					"#spark.sql(f\"\"\"DROP table {bronze_database_name}.{bronze_tablename};\"\"\")"
+				],
+				"execution_count": null
+			},
+			{
+				"cell_type": "code",
+				"source": [
+					"#spark.sql(f\"\"\"DROP SCHEMA {bronze_database_name} CASCADE;\"\"\")"
+				],
+				"execution_count": null
+			}
+		]
+	}
+}

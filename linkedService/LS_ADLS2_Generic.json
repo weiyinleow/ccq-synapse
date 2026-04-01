@@ -1,0 +1,20 @@
+{
+	"name": "LS_ADLS2_Generic",
+	"properties": {
+		"parameters": {
+			"ls_param_endpoint": {
+				"type": "string",
+				"defaultValue": "https://cqldevdatahubsynapse.dfs.core.windows.net"
+			}
+		},
+		"annotations": [],
+		"type": "AzureBlobFS",
+		"typeProperties": {
+			"url": "@{linkedService().ls_param_endpoint}"
+		},
+		"connectVia": {
+			"referenceName": "AutoResolveIntegrationRuntime",
+			"type": "IntegrationRuntimeReference"
+		}
+	}
+}

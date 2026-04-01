@@ -1,0 +1,1028 @@
+{
+	"name": "20877_ESG_SHAREPOINT_SourceFileID_Update",
+	"properties": {
+		"folder": {
+			"name": "DataHubBatchScripts/ESG_SHAREPOINT/ESG_SHAREPOINT_Hotfix"
+		},
+		"nbformat": 4,
+		"nbformat_minor": 2,
+		"bigDataPool": {
+			"referenceName": "Sparkpool01",
+			"type": "BigDataPoolReference"
+		},
+		"sessionProperties": {
+			"driverMemory": "56g",
+			"driverCores": 8,
+			"executorMemory": "56g",
+			"executorCores": 8,
+			"numExecutors": 2,
+			"conf": {
+				"spark.dynamicAllocation.enabled": "false",
+				"spark.dynamicAllocation.minExecutors": "2",
+				"spark.dynamicAllocation.maxExecutors": "2",
+				"spark.autotune.trackingId": "8b55eab2-32b7-4788-af50-c4035ef0bd6a"
+			}
+		},
+		"metadata": {
+			"saveOutput": true,
+			"enableDebugMode": false,
+			"kernelspec": {
+				"name": "synapse_pyspark",
+				"display_name": "Synapse PySpark"
+			},
+			"language_info": {
+				"name": "python"
+			},
+			"a365ComputeOptions": {
+				"id": "/subscriptions/2e9f823e-dc76-4e8e-b815-c8a4f22d05ff/resourceGroups/CQL-AZUR1-DEVDATAHUB01-RG/providers/Microsoft.Synapse/workspaces/cql-dev-datahub-synapse01/bigDataPools/Sparkpool01",
+				"name": "Sparkpool01",
+				"type": "Spark",
+				"endpoint": "https://cql-dev-datahub-synapse01.dev.azuresynapse.net/livyApi/versions/2019-11-01-preview/sparkPools/Sparkpool01",
+				"auth": {
+					"type": "AAD",
+					"authResource": "https://dev.azuresynapse.net"
+				},
+				"sparkVersion": "3.4",
+				"nodeCount": 10,
+				"cores": 8,
+				"memory": 56,
+				"automaticScaleJobs": false
+			},
+			"sessionKeepAliveTimeout": 30
+		},
+		"cells": [
+			{
+				"cell_type": "markdown",
+				"metadata": {
+					"nteract": {
+						"transient": {
+							"deleting": false
+						}
+					}
+				},
+				"source": [
+					"#### Setup Config Parameters"
+				]
+			},
+			{
+				"cell_type": "code",
+				"metadata": {
+					"editable": true,
+					"run_control": {
+						"frozen": false
+					}
+				},
+				"source": [
+					"from pyspark.sql import Window\n",
+					"from pyspark.sql.functions import col, row_number, when, sha2, concat_ws\n",
+					"\n",
+					"# Environment Parameter\n",
+					"env = 'prod'\n",
+					"\n",
+					"# Config for updating keys in Bronze\n",
+					"bronze_tables_config = [\n",
+					"    {\n",
+					"        \"table_detail\": \"marano_bronze.marano_bulk_fuel_transactions\",\n",
+					"        \"table_detail_bkup\": \"marano_bronze.marano_bulk_fuel_transactions_bkup\",\n",
+					"        \"table_name\": \"marano_bulk_fuel_transactions\",\n",
+					"        \"path\": f\"abfss://bronze@cql{env}datahubsynapse.dfs.core.windows.net/esg_sharepoint_bronze/marano/marano_bulk_fuel_transactions\",\n",
+					"        \"bkup_path\": f\"abfss://bronze@cql{env}datahubsynapse.dfs.core.windows.net/esg_sharepoint_bronze/marano/marano_bulk_fuel_transactions_bkup\",\n",
+					"        \"format\": \"delta\",\n",
+					"        \"hash_columns\": [\"SiteCode\",\"InvoiceNumber\",\"InvoiceDate\",\"DocketNumber\",\"FileRowIndex\"],\n",
+					"        \"old_hash_column\": \"HashKey\",\n",
+					"        \"drop_old_hashkey\": \"OLD_HashKey\"\n",
+					"    }, \n",
+					"    {   \n",
+					"        \"table_detail\": \"marano_bronze.marano_fuel_transactions\",\n",
+					"        \"table_detail_bkup\": \"marano_bronze.marano_fuel_transactions_bkup\",\n",
+					"        \"table_name\": \"marano_fuel_transactions\",\n",
+					"        \"path\": f\"abfss://bronze@cql{env}datahubsynapse.dfs.core.windows.net/esg_sharepoint_bronze/marano/marano_fuel_transactions\",\n",
+					"        \"bkup_path\": f\"abfss://bronze@cql{env}datahubsynapse.dfs.core.windows.net/esg_sharepoint_bronze/marano/marano_fuel_transactions_bkup\",\n",
+					"        \"format\": \"delta\", \n",
+					"        \"hash_columns\": [\"SiteCode\",\"InvoiceDate\",\"InvoiceNumber\",\"SupplyPoint\",\"TransactionDate\",\"Product\", \"Quantity\",\"FileRowIndex\"],\n",
+					"        \"old_hash_column\": \"HashKey\",\n",
+					"        \"drop_old_hashkey\": \"OLD_HashKey\"\n",
+					"    },\n",
+					"    {\n",
+					"        \"table_detail\": \"ergon_bronze.ergon_invoice_details\",\n",
+					"        \"table_detail_bkup\": \"ergon_bronze.ergon_invoice_details_bkup\",\n",
+					"        \"table_name\": \"ergon_invoice_details\",\n",
+					"        \"path\": f\"abfss://bronze@cql{env}datahubsynapse.dfs.core.windows.net/esg_sharepoint_bronze/ergon/ergon_invoice_details\",\n",
+					"        \"bkup_path\": f\"abfss://bronze@cql{env}datahubsynapse.dfs.core.windows.net/esg_sharepoint_bronze/ergon/ergon_invoice_details_bkup\",\n",
+					"        \"format\": \"delta\",\n",
+					"        \"hash_columns\": [\"SiteCode\",\"InvoiceNumber\",\"InvoiceDate\",\"FileRowIndex\"],\n",
+					"        \"old_hash_column\": \"HashKey\",\n",
+					"        \"drop_old_hashkey\": \"OLD_HashKey\"\n",
+					"    }, \n",
+					"    {\n",
+					"        \"table_detail\": \"ergon_bronze.ergon_charge_details\",\n",
+					"        \"table_detail_bkup\": \"ergon_bronze.ergon_charge_details_bkup\",\n",
+					"        \"table_name\": \"ergon_charge_details\",\n",
+					"        \"path\": f\"abfss://bronze@cql{env}datahubsynapse.dfs.core.windows.net/esg_sharepoint_bronze/ergon/ergon_charge_details\",\n",
+					"        \"bkup_path\": f\"abfss://bronze@cql{env}datahubsynapse.dfs.core.windows.net/esg_sharepoint_bronze/ergon/ergon_charge_details_bkup\",\n",
+					"        \"format\": \"delta\",\n",
+					"        \"hash_columns\": [\"SiteCode\",\"InvoiceNumber\",\"InvoiceDate\",\"BillingPeriod\",\"ChargeType\",\"FileRowIndex\",\"NumberOfBillingDays\",\"QuantityKWH\"],\n",
+					"        \"old_hash_column\": \"HashKey\",\n",
+					"        \"drop_old_hashkey\": \"OLD_HashKey\"\n",
+					"    }, \n",
+					"    {\n",
+					"        \"table_detail\": \"origin_bronze.origin_invoice_details\",\n",
+					"        \"table_detail_bkup\": \"origin_bronze.origin_invoice_details_bkup\",\n",
+					"        \"table_name\": \"origin_invoice_details\",\n",
+					"        \"path\": f\"abfss://bronze@cql{env}datahubsynapse.dfs.core.windows.net/esg_sharepoint_bronze/origin/origin_invoice_details\",\n",
+					"        \"bkup_path\": f\"abfss://bronze@cql{env}datahubsynapse.dfs.core.windows.net/esg_sharepoint_bronze/origin/origin_invoice_details_bkup\",\n",
+					"        \"format\": \"delta\",\n",
+					"        \"hash_columns\": [\"SiteCode\",\"InvoiceNumber\",\"InvoiceDate\",\"FileRowIndex\"],\n",
+					"        \"old_hash_column\": \"HashKey\",\n",
+					"        \"drop_old_hashkey\": \"OLD_HashKey\"\n",
+					"    }, \n",
+					"    {\n",
+					"        \"table_detail\": \"origin_bronze.origin_charge_details\",\n",
+					"        \"table_detail_bkup\": \"origin_bronze.origin_charge_details_bkup\",\n",
+					"        \"table_name\": \"origin_charge_details\",\n",
+					"        \"path\": f\"abfss://bronze@cql{env}datahubsynapse.dfs.core.windows.net/esg_sharepoint_bronze/origin/origin_charge_details\",\n",
+					"        \"bkup_path\": f\"abfss://bronze@cql{env}datahubsynapse.dfs.core.windows.net/esg_sharepoint_bronze/origin/origin_charge_details_bkup\",\n",
+					"        \"format\": \"delta\",\n",
+					"        \"hash_columns\": [\"SiteCode\",\"InvoiceNumber\",\"InvoiceDate\",\"BillingPeriod\",\"ChargeType\",\"QuantityKWH\",\"FileRowIndex\"],\n",
+					"        \"old_hash_column\": \"HashKey\",\n",
+					"        \"drop_old_hashkey\": \"OLD_HashKey\"\n",
+					"    }, \n",
+					"    {\n",
+					"         \"table_detail\": \"origin_bronze.origin_meter_details\",\n",
+					"         \"table_detail_bkup\": \"origin_bronze.origin_meter_details_bkup\",\n",
+					"         \"table_name\": \"origin_meter_details\",\n",
+					"         \"path\": f\"abfss://bronze@cql{env}datahubsynapse.dfs.core.windows.net/esg_sharepoint_bronze/origin/origin_meter_details\",\n",
+					"         \"bkup_path\": f\"abfss://bronze@cql{env}datahubsynapse.dfs.core.windows.net/esg_sharepoint_bronze/origin/origin_meter_details_bkup\",\n",
+					"         \"format\": \"delta\",\n",
+					"         \"hash_columns\": [\"SiteCode\",\"InvoiceNumber\",\"InvoiceDate\",\"MeterNumber\",\"StartRead\",\"FileRowIndex\"],\n",
+					"         \"old_hash_column\": \"HashKey\",\n",
+					"         \"drop_old_hashkey\": \"OLD_HashKey\"\n",
+					"    }, \n",
+					"    {\n",
+					"         \"table_detail\": \"cbre_bronze.cbre_meter_details\",\n",
+					"         \"table_detail_bkup\": \"cbre_bronze.cbre_meter_details_bkup\",\n",
+					"         \"table_name\": \"cbre_meter_details\",\n",
+					"         \"path\": f\"abfss://bronze@cql{env}datahubsynapse.dfs.core.windows.net/esg_sharepoint_bronze/cbre/cbre_meter_details\",\n",
+					"         \"bkup_path\": f\"abfss://bronze@cql{env}datahubsynapse.dfs.core.windows.net/esg_sharepoint_bronze/cbre/cbre_meter_details_bkup\",\n",
+					"         \"format\": \"delta\",\n",
+					"         \"hash_columns\": [\"SiteCode\",\"LocationIdentifier\",\"LineNumber\",\"TenantDetails\",\"PreviousReadDate\",\"CurrentReadDate\",\"FileRowIndex\"],\n",
+					"         \"old_hash_column\": \"HashKey\",\n",
+					"         \"drop_old_hashkey\": \"OLD_HashKey\"\n",
+					"    }\n",
+					"]\n",
+					"\n",
+					"# Config for Silver Backup\n",
+					"silver_tables_config = [\n",
+					"    {\n",
+					"        \"table_detail\": \"silver.fuel_transactions\",\n",
+					"        \"table_detail_bkup\": \"silver.fuel_transactions_bkup\",\n",
+					"        \"table_name\": \"fuel_transactions\",\n",
+					"        \"path\": f\"abfss://silver@cql{env}datahubsynapse.dfs.core.windows.net/fuel_transactions/fuel_transactions\",\n",
+					"        \"bkup_path\": f\"abfss://silver@cql{env}datahubsynapse.dfs.core.windows.net/fuel_transactions_bkup/fuel_transactions_bkup\",\n",
+					"        \"format\": \"delta\"\n",
+					"    }, \n",
+					"    {\n",
+					"        \"table_detail\": \"silver.retail_electricity_charge_details\",\n",
+					"        \"table_detail_bkup\": \"silver.retail_electricity_charge_details_bkup\",\n",
+					"        \"table_name\": \"retail_electricity_charge_details\",\n",
+					"        \"path\": f\"abfss://silver@cql{env}datahubsynapse.dfs.core.windows.net/retail_electricity_charge_details/retail_electricity_charge_details\",\n",
+					"        \"bkup_path\": f\"abfss://silver@cql{env}datahubsynapse.dfs.core.windows.net/retail_electricity_charge_details_bkup/retail_electricity_charge_details_bkup\",\n",
+					"        \"format\": \"delta\"\n",
+					"    }\n",
+					"]"
+				],
+				"execution_count": 1
+			},
+			{
+				"cell_type": "markdown",
+				"metadata": {
+					"nteract": {
+						"transient": {
+							"deleting": false
+						}
+					}
+				},
+				"source": [
+					"#### Create Backup Tables (Frozen Cells)"
+				]
+			},
+			{
+				"cell_type": "code",
+				"metadata": {
+					"editable": false,
+					"run_control": {
+						"frozen": true
+					}
+				},
+				"source": [
+					"#Create backups (bronze)\n",
+					"for config in bronze_tables_config:\n",
+					"    df = spark.read.table(config[\"table_detail\"])\n",
+					"    df.write.format(config[\"format\"]).mode(\"overwrite\").saveAsTable(config[\"table_detail_bkup\"])\n",
+					"    print(f\"Backup created for: {config['table_name']}\")"
+				],
+				"execution_count": null
+			},
+			{
+				"cell_type": "code",
+				"metadata": {
+					"editable": false,
+					"run_control": {
+						"frozen": true
+					}
+				},
+				"source": [
+					"#Create backups (silver)\n",
+					"for config in silver_tables_config:\n",
+					"    df = spark.read.table(config[\"table_detail\"])\n",
+					"    df.write.format(config[\"format\"]).mode(\"overwrite\").saveAsTable(config[\"table_detail_bkup\"])\n",
+					"    print(f\"Backup created for: {config['table_name']}\")"
+				],
+				"execution_count": 31
+			},
+			{
+				"cell_type": "markdown",
+				"metadata": {
+					"nteract": {
+						"transient": {
+							"deleting": false
+						}
+					}
+				},
+				"source": [
+					"#### Restore From Backup Tables (Frozen Cells)"
+				]
+			},
+			{
+				"cell_type": "code",
+				"metadata": {
+					"editable": false,
+					"run_control": {
+						"frozen": true
+					}
+				},
+				"source": [
+					"#Restore backups (bronze)\n",
+					"for config in bronze_tables_config:\n",
+					"    df = spark.read.table(config[\"table_detail_bkup\"])\n",
+					"    df.write.format(config[\"format\"]).mode(\"overwrite\").saveAsTable(config[\"table_detail\"])\n",
+					"    print(f\"Backup restored for: {config['table_name']}\")"
+				],
+				"execution_count": 17
+			},
+			{
+				"cell_type": "code",
+				"metadata": {
+					"editable": false,
+					"run_control": {
+						"frozen": true
+					}
+				},
+				"source": [
+					"#Restore backups (silver)\n",
+					"for config in silver_tables_config:\n",
+					"    df = spark.read.table(config[\"table_detail_bkup\"])\n",
+					"    df.write.format(config[\"format\"]).mode(\"overwrite\").saveAsTable(config[\"table_detail\"])\n",
+					"    print(f\"Backup restored for: {config['table_name']}\")"
+				],
+				"execution_count": 3
+			},
+			{
+				"cell_type": "markdown",
+				"metadata": {
+					"nteract": {
+						"transient": {
+							"deleting": false
+						}
+					}
+				},
+				"source": [
+					"#### Validation Queries - Before Updates\n",
+					""
+				]
+			},
+			{
+				"cell_type": "code",
+				"metadata": {
+					"editable": true,
+					"run_control": {
+						"frozen": false
+					},
+					"collapsed": false
+				},
+				"source": [
+					"# ERGON Validation\n",
+					"validation_query = \"\"\"\n",
+					"SELECT \n",
+					"    count(1),\n",
+					"    InvoiceNumber,\n",
+					"    InvoiceDate,\n",
+					"    NationalMeteringIdentifier,\n",
+					"    CDCCurrentFlag\n",
+					"FROM ergon_bronze.ergon_invoice_details\n",
+					"WHERE\n",
+					"    CDCCurrentFlag = 1\n",
+					"GROUP BY\n",
+					"    InvoiceNumber,\n",
+					"    InvoiceDate,\n",
+					"    NationalMeteringIdentifier,\n",
+					"    CDCCurrentFlag  \n",
+					"HAVING count(1) > 1 \n",
+					"order by InvoiceNumber\n",
+					"\"\"\"\n",
+					"validation_df = spark.sql(validation_query)\n",
+					"validation_df.show()\n",
+					"\n",
+					"#Detailed check\n",
+					"validation_query_detail = \"\"\"\n",
+					"SELECT SourceFileID, InvoiceNumber, InvoiceDate, NationalMeteringIdentifier, HashKey, CDCCurrentFlag\n",
+					"      FROM ergon_bronze.ergon_invoice_details\n",
+					"WHERE\n",
+					"    CDCCurrentFlag = 1\n",
+					"order by InvoiceNumber\n",
+					"\"\"\"\n",
+					"validation_df_detail = spark.sql(validation_query_detail)\n",
+					"display(validation_df_detail)"
+				],
+				"execution_count": 18
+			},
+			{
+				"cell_type": "code",
+				"metadata": {
+					"editable": true,
+					"run_control": {
+						"frozen": false
+					},
+					"collapsed": false
+				},
+				"source": [
+					"# Origin Validation\n",
+					"validation_query = \"\"\"\n",
+					"SELECT \n",
+					"    count(1),\n",
+					"    InvoiceNumber,\n",
+					"    InvoiceDate,\n",
+					"    NationalMeteringIdentifier,\n",
+					"    CDCCurrentFlag\n",
+					"FROM origin_bronze.origin_invoice_details\n",
+					"WHERE\n",
+					"    CDCCurrentFlag = 1\n",
+					"GROUP BY \n",
+					"    InvoiceNumber,\n",
+					"    InvoiceDate,\n",
+					"    NationalMeteringIdentifier,\n",
+					"    CDCCurrentFlag\n",
+					"HAVING count(1) > 1 \n",
+					"ORDER BY InvoiceNumber \n",
+					"\"\"\"\n",
+					"validation_df = spark.sql(validation_query)\n",
+					"validation_df.show()\n",
+					"\n",
+					"#Detailed check\n",
+					"validation_query_detail = \"\"\"\n",
+					"SELECT *\n",
+					"      FROM origin_bronze.origin_invoice_details\n",
+					"WHERE\n",
+					"    CDCCurrentFlag = 1\n",
+					"ORDER BY InvoiceNumber \n",
+					"\"\"\"\n",
+					"validation_df_detail = spark.sql(validation_query_detail)\n",
+					"display(validation_df_detail)"
+				],
+				"execution_count": 57
+			},
+			{
+				"cell_type": "code",
+				"metadata": {
+					"editable": true,
+					"run_control": {
+						"frozen": false
+					},
+					"collapsed": false
+				},
+				"source": [
+					"# CBRE Validation\n",
+					"validation_query = \"\"\"\n",
+					"SELECT \n",
+					"    count(distinct SourceFileID),\n",
+					"    LocationIdentifier,\n",
+					"    PreviousReadDate,\n",
+					"    CurrentReadDate,\n",
+					"    CDCCurrentFlag\n",
+					"FROM cbre_bronze.cbre_meter_details\n",
+					"WHERE\n",
+					"    CDCCurrentFlag = 1\n",
+					"GROUP BY\n",
+					"    LocationIdentifier,\n",
+					"    PreviousReadDate,\n",
+					"    CurrentReadDate,\n",
+					"    CDCCurrentFlag\n",
+					"HAVING count(distinct SourceFileID) > 1 \n",
+					"ORDER BY CurrentReadDate desc\n",
+					"\"\"\"\n",
+					"validation_df = spark.sql(validation_query)\n",
+					"validation_df.show()\n",
+					"\n",
+					"#Detailed check\n",
+					"validation_query_detail = \"\"\"\n",
+					"SELECT *\n",
+					"      FROM cbre_bronze.cbre_meter_details\n",
+					"WHERE\n",
+					"    CDCCurrentFlag = 1\n",
+					"ORDER BY CurrentReadDate desc\n",
+					"\"\"\"\n",
+					"validation_df_detail = spark.sql(validation_query_detail)\n",
+					"display(validation_df_detail)"
+				],
+				"execution_count": 58
+			},
+			{
+				"cell_type": "code",
+				"metadata": {
+					"editable": true,
+					"run_control": {
+						"frozen": false
+					},
+					"collapsed": false
+				},
+				"source": [
+					"# Marano Validation\n",
+					"validation_query = \"\"\"\n",
+					"SELECT \n",
+					"    count(distinct SourceFileID),\n",
+					"    InvoiceDate,\n",
+					"    CDCCurrentFlag\n",
+					"FROM marano_bronze.marano_fuel_transactions\n",
+					"WHERE\n",
+					"    CDCCurrentFlag = 1\n",
+					"GROUP BY\n",
+					"    InvoiceDate,\n",
+					"    CDCCurrentFlag\n",
+					"HAVING count(distinct SourceFileID) > 1 \n",
+					"\n",
+					"\"\"\"\n",
+					"validation_df = spark.sql(validation_query)\n",
+					"validation_df.show()\n",
+					"\n",
+					"#Detailed check\n",
+					"validation_query_detail = \"\"\"\n",
+					"SELECT *\n",
+					"FROM marano_bronze.marano_fuel_transactions\n",
+					"WHERE\n",
+					"    CDCCurrentFlag = 1\n",
+					"ORDER BY Quantity desc\n",
+					"\n",
+					"\"\"\"\n",
+					"validation_df_detail = spark.sql(validation_query_detail)\n",
+					"display(validation_df_detail)"
+				],
+				"execution_count": 59
+			},
+			{
+				"cell_type": "code",
+				"metadata": {
+					"editable": true,
+					"run_control": {
+						"frozen": false
+					},
+					"collapsed": false
+				},
+				"source": [
+					"# Marano Bulk Validation\n",
+					"validation_query = \"\"\"\n",
+					"SELECT \n",
+					"    count(distinct SourceFileID),\n",
+					"    InvoiceDate,\n",
+					"    CDCCurrentFlag\n",
+					"FROM marano_bronze.marano_bulk_fuel_transactions\n",
+					"GROUP BY\n",
+					"    InvoiceDate,\n",
+					"    CDCCurrentFlag\n",
+					"    having count(distinct SourceFileID) > 1\n",
+					"\"\"\"\n",
+					"validation_df = spark.sql(validation_query)\n",
+					"validation_df.show()\n",
+					"\n",
+					"#Detailed check\n",
+					"validation_query_detail = \"\"\"\n",
+					"SELECT *\n",
+					"FROM marano_bronze.marano_bulk_fuel_transactions\n",
+					"WHERE\n",
+					"    CDCCurrentFlag = 1\n",
+					"ORDER BY Quantity desc\n",
+					"\n",
+					"\"\"\"\n",
+					"validation_df_detail = spark.sql(validation_query_detail)\n",
+					"display(validation_df_detail)"
+				],
+				"execution_count": 74
+			},
+			{
+				"cell_type": "code",
+				"metadata": {
+					"collapsed": false
+				},
+				"source": [
+					"#Silver Validation Ergon and Origin\n",
+					"spark.conf.set(\"spark.sql.legacy.timeParserPolicy\", \"LEGACY\")\n",
+					"validation_query = \"\"\"\n",
+					"select\n",
+					"s.* \n",
+					"from\n",
+					"silver.retail_electricity_charge_details s\n",
+					"join\n",
+					"(\n",
+					"SELECT distinct\n",
+					"    InvoiceNumber\n",
+					"FROM origin_bronze.origin_invoice_details_bkup\n",
+					"WHERE\n",
+					"    CDCCurrentFlag = 1\n",
+					"GROUP BY \n",
+					"    InvoiceNumber,\n",
+					"    InvoiceDate,\n",
+					"    NationalMeteringIdentifier,\n",
+					"    CDCCurrentFlag\n",
+					"HAVING count(1) > 1  \n",
+					"union\n",
+					"SELECT distinct\n",
+					"    InvoiceNumber\n",
+					"FROM ergon_bronze.ergon_invoice_details_bkup\n",
+					"WHERE\n",
+					"    CDCCurrentFlag = 1\n",
+					"GROUP BY \n",
+					"    InvoiceNumber,\n",
+					"    InvoiceDate,\n",
+					"    NationalMeteringIdentifier,\n",
+					"    CDCCurrentFlag\n",
+					"HAVING count(1) > 1  \n",
+					") b on b.InvoiceNumber = s.InvoiceNumber\n",
+					"order by \n",
+					"s.InvoiceNumber\n",
+					"\"\"\"\n",
+					"validation_df = spark.sql(validation_query)\n",
+					"display(validation_df)"
+				],
+				"execution_count": 83
+			},
+			{
+				"cell_type": "code",
+				"metadata": {
+					"collapsed": false
+				},
+				"source": [
+					"#Silver Validation CBRE\n",
+					"spark.conf.set(\"spark.sql.legacy.timeParserPolicy\", \"LEGACY\")\n",
+					"validation_query = \"\"\"\n",
+					"select\n",
+					"s.* \n",
+					"from\n",
+					"silver.retail_electricity_charge_details s\n",
+					"join\n",
+					"(\n",
+					"SELECT \n",
+					"    LocationIdentifier,\n",
+					"    date_format(to_date(PreviousReadDate, 'dd/MM/yyyy'), 'yyyy-MM-dd') AS PreviousReadDate,\n",
+					"    date_format(to_date(CurrentReadDate, 'dd/MM/yyyy'), 'yyyy-MM-dd') AS CurrentReadDate\n",
+					"FROM cbre_bronze.cbre_meter_details_bkup\n",
+					"WHERE\n",
+					"    CDCCurrentFlag = 1\n",
+					"GROUP BY\n",
+					"    LocationIdentifier,\n",
+					"    PreviousReadDate,\n",
+					"    CurrentReadDate\n",
+					"HAVING count(distinct SourceFileID) > 1 \n",
+					") b on b.LocationIdentifier = s.LocationIdentifier and b.PreviousReadDate = s.BillingPeriodStartDate and b.CurrentReadDate = s.BillingPeriodEndDate\n",
+					"order by \n",
+					"s.LocationIdentifier,\n",
+					"s.BillingPeriodStartDate,\n",
+					"s.BillingPeriodEndDate\n",
+					"\"\"\"\n",
+					"validation_df = spark.sql(validation_query)\n",
+					"display(validation_df)"
+				],
+				"execution_count": 82
+			},
+			{
+				"cell_type": "markdown",
+				"metadata": {
+					"nteract": {
+						"transient": {
+							"deleting": false
+						}
+					}
+				},
+				"source": [
+					"#### Perform Table Updates"
+				]
+			},
+			{
+				"cell_type": "code",
+				"source": [
+					"# START\n",
+					"for config in bronze_tables_config:\n",
+					"\n",
+					"    df = spark.read.format(config[\"format\"]).load(config[\"path\"])\n",
+					"\n",
+					"    # Rename old hash key column\n",
+					"    df = df.withColumnRenamed(config[\"old_hash_column\"], \"OLD_HashKey\")\n",
+					"\n",
+					"    # Generate new hash key column \n",
+					"    df = df.withColumn(\"HashKey\", sha2(concat_ws(\"||\", *[df[col] for col in config[\"hash_columns\"]]), 256))\n",
+					"\n",
+					"    # Window spec: partition by new hashkey, order by descending SourceFileID\n",
+					"    window_spec = Window.partitionBy(\"HashKey\").orderBy(col(\"SourceFileId\").desc())\n",
+					"\n",
+					"    # Apply logic to CDCCurrentFlag as FALSE for the duplicate records in Bronze (FLAG OPTION)\n",
+					"    #df = (df.withColumn(\"row_num\", row_number().over(window_spec)).withColumn(\"CDCCurrentFlag\", when(col(\"row_num\") == 1, True).otherwise(False)).drop(\"row_num\"))\n",
+					"\n",
+					"    # Delete duplicate records before overwriting table (DELETE OPTION)\n",
+					"    df = (df.withColumn(\"row_num\", row_number().over(window_spec)).withColumn(\"CDCOps\", when(col(\"row_num\") != 1, \"3\").otherwise(col(\"CDCOps\"))).drop(\"row_num\"))\n",
+					"    df = df.filter(df[\"CDCOps\"] != '3')\n",
+					"\n",
+					"    # Drop old hashkey column\n",
+					"    df = df.drop(config[\"drop_old_hashkey\"])\n",
+					"\n",
+					"    #Check for any duplicate HashKeys before overwriting table\n",
+					"    duplicate_hash_df = (df.where(col(\"CDCCurrentFlag\") == True).groupBy(\"HashKey\").count().filter(\"count > 1\").orderBy(\"count\", ascending=False))\n",
+					"\n",
+					"    if duplicate_hash_df.count() > 0:\n",
+					"        raise ValueError(f\"Loop failed: HashKey (New) duplicates count = {duplicate_hash_df} for: {config['table_name']}\")\n",
+					"    \n",
+					"    else: \n",
+					"        print(f\"No duplicates found, proceeding with overwrite for: {config['table_name']}\")\n",
+					"        df.write.format(config[\"format\"]).mode(\"overwrite\").option(\"overwriteSchema\", \"true\").save(config[\"path\"])\n",
+					"        print(f\"Overwrite complete\")\n",
+					"\n",
+					"# END"
+				],
+				"execution_count": null
+			},
+			{
+				"cell_type": "markdown",
+				"metadata": {
+					"nteract": {
+						"transient": {
+							"deleting": false
+						}
+					}
+				},
+				"source": [
+					"#### Drop Silver Tables"
+				]
+			},
+			{
+				"cell_type": "code",
+				"metadata": {
+					"editable": false,
+					"run_control": {
+						"frozen": true
+					}
+				},
+				"source": [
+					"#file_path = f'abfss://silver@cql{env}datahubsynapse.dfs.core.windows.net/fuel_transactions/fuel_transactions'\n",
+					"#mssparkutils.fs.rm(file_path, recurse=True) \n",
+					"#mssparkutils.fs.mkdirs(file_path)\n",
+					"spark.sql(f\"\"\"DROP TABLE silver.fuel_transactions;\"\"\")\n",
+					"\n",
+					"#file_path = f'abfss://silver@cql{env}datahubsynapse.dfs.core.windows.net/retail_electricity_charge_details/retail_electricity_charge_details'\n",
+					"#mssparkutils.fs.rm(file_path, recurse=True)\n",
+					"#mssparkutils.fs.mkdirs(file_path)\n",
+					"spark.sql(f\"\"\"DROP TABLE silver.retail_electricity_charge_details;\"\"\")"
+				],
+				"execution_count": null
+			},
+			{
+				"cell_type": "markdown",
+				"metadata": {
+					"nteract": {
+						"transient": {
+							"deleting": false
+						}
+					}
+				},
+				"source": [
+					"#### Drop Gold Tables"
+				]
+			},
+			{
+				"cell_type": "code",
+				"metadata": {
+					"editable": false,
+					"run_control": {
+						"frozen": true
+					}
+				},
+				"source": [
+					"#file_path = f'abfss://gold@cql{env}datahubsynapse.dfs.core.windows.net/fact_fuel_consumption/fact_fuel_consumption'\n",
+					"#mssparkutils.fs.rm(file_path, recurse=True)\n",
+					"#mssparkutils.fs.mkdirs(file_path)\n",
+					"spark.sql(f\"\"\"DROP TABLE gold.fact_fuel_consumption;\"\"\")\n",
+					"\n",
+					"#file_path = f'abfss://gold@cql{env}datahubsynapse.dfs.core.windows.net/fact_retail_electricity_consumption/fact_retail_electricity_consumption'\n",
+					"#mssparkutils.fs.rm(file_path, recurse=True)\n",
+					"#mssparkutils.fs.mkdirs(file_path)\n",
+					"spark.sql(f\"\"\"DROP TABLE gold.fact_retail_electricity_consumption;\"\"\")"
+				],
+				"execution_count": 1
+			},
+			{
+				"cell_type": "markdown",
+				"metadata": {
+					"nteract": {
+						"transient": {
+							"deleting": false
+						}
+					}
+				},
+				"source": [
+					"#### Validation Queries - After Updates\n",
+					""
+				]
+			},
+			{
+				"cell_type": "code",
+				"source": [
+					"# ERGON Validation\n",
+					"validation_query = \"\"\"\n",
+					"SELECT \n",
+					"    count(1),\n",
+					"    InvoiceNumber,\n",
+					"    InvoiceDate,\n",
+					"    NationalMeteringIdentifier,\n",
+					"    CDCCurrentFlag\n",
+					"FROM ergon_bronze.ergon_invoice_details\n",
+					"WHERE\n",
+					"    CDCCurrentFlag = 1\n",
+					"GROUP BY\n",
+					"    InvoiceNumber,\n",
+					"    InvoiceDate,\n",
+					"    NationalMeteringIdentifier,\n",
+					"    CDCCurrentFlag  \n",
+					"HAVING count(1) > 1 \n",
+					"order by InvoiceNumber\n",
+					"\"\"\"\n",
+					"validation_df = spark.sql(validation_query)\n",
+					"validation_df.show()\n",
+					"\n",
+					"#Detailed check\n",
+					"validation_query_detail = \"\"\"\n",
+					"SELECT SourceFileID, InvoiceNumber, InvoiceDate, NationalMeteringIdentifier, HashKey, CDCCurrentFlag\n",
+					"      FROM ergon_bronze.ergon_invoice_details\n",
+					"WHERE\n",
+					"    CDCCurrentFlag = 1\n",
+					"order by InvoiceNumber\n",
+					"\"\"\"\n",
+					"validation_df_detail = spark.sql(validation_query_detail)\n",
+					"display(validation_df_detail)\n",
+					""
+				],
+				"execution_count": null
+			},
+			{
+				"cell_type": "code",
+				"source": [
+					"# Origin Validation\n",
+					"validation_query = \"\"\"\n",
+					"SELECT \n",
+					"    count(1),\n",
+					"    InvoiceNumber,\n",
+					"    InvoiceDate,\n",
+					"    NationalMeteringIdentifier,\n",
+					"    CDCCurrentFlag\n",
+					"FROM origin_bronze.origin_invoice_details\n",
+					"WHERE\n",
+					"    CDCCurrentFlag = 1\n",
+					"GROUP BY \n",
+					"    InvoiceNumber,\n",
+					"    InvoiceDate,\n",
+					"    NationalMeteringIdentifier,\n",
+					"    CDCCurrentFlag\n",
+					"HAVING count(1) > 1 \n",
+					"ORDER BY InvoiceNumber \n",
+					"\"\"\"\n",
+					"validation_df = spark.sql(validation_query)\n",
+					"validation_df.show()\n",
+					"\n",
+					"#Detailed check\n",
+					"validation_query_detail = \"\"\"\n",
+					"SELECT *\n",
+					"      FROM origin_bronze.origin_invoice_details\n",
+					"WHERE\n",
+					"    CDCCurrentFlag = 1\n",
+					"ORDER BY InvoiceNumber \n",
+					"\"\"\"\n",
+					"validation_df_detail = spark.sql(validation_query_detail)\n",
+					"display(validation_df_detail)\n",
+					""
+				],
+				"execution_count": null
+			},
+			{
+				"cell_type": "code",
+				"source": [
+					"# CBRE Validation\n",
+					"validation_query = \"\"\"\n",
+					"SELECT \n",
+					"    count(distinct SourceFileID),\n",
+					"    LocationIdentifier,\n",
+					"    PreviousReadDate,\n",
+					"    CurrentReadDate,\n",
+					"    CDCCurrentFlag\n",
+					"FROM cbre_bronze.cbre_meter_details\n",
+					"WHERE\n",
+					"    CDCCurrentFlag = 1\n",
+					"GROUP BY\n",
+					"    LocationIdentifier,\n",
+					"    PreviousReadDate,\n",
+					"    CurrentReadDate,\n",
+					"    CDCCurrentFlag\n",
+					"HAVING count(distinct SourceFileID) > 1 \n",
+					"ORDER BY CurrentReadDate desc\n",
+					"\"\"\"\n",
+					"validation_df = spark.sql(validation_query)\n",
+					"validation_df.show()\n",
+					"\n",
+					"#Detailed check\n",
+					"validation_query_detail = \"\"\"\n",
+					"SELECT *\n",
+					"      FROM cbre_bronze.cbre_meter_details\n",
+					"WHERE\n",
+					"    CDCCurrentFlag = 1\n",
+					"ORDER BY CurrentReadDate desc\n",
+					"\"\"\"\n",
+					"validation_df_detail = spark.sql(validation_query_detail)\n",
+					"display(validation_df_detail)\n",
+					""
+				],
+				"execution_count": null
+			},
+			{
+				"cell_type": "code",
+				"source": [
+					"# Marano Validation\n",
+					"validation_query = \"\"\"\n",
+					"SELECT \n",
+					"    count(distinct SourceFileID),\n",
+					"    InvoiceDate,\n",
+					"    CDCCurrentFlag\n",
+					"FROM marano_bronze.marano_fuel_transactions\n",
+					"WHERE\n",
+					"    CDCCurrentFlag = 1\n",
+					"GROUP BY\n",
+					"    InvoiceDate,\n",
+					"    CDCCurrentFlag\n",
+					"HAVING count(distinct SourceFileID) > 1 \n",
+					"\n",
+					"\"\"\"\n",
+					"validation_df = spark.sql(validation_query)\n",
+					"validation_df.show()\n",
+					"\n",
+					"#Detailed check\n",
+					"validation_query_detail = \"\"\"\n",
+					"SELECT *\n",
+					"FROM marano_bronze.marano_fuel_transactions\n",
+					"WHERE\n",
+					"    CDCCurrentFlag = 1\n",
+					"ORDER BY Quantity desc\n",
+					"\n",
+					"\"\"\"\n",
+					"validation_df_detail = spark.sql(validation_query_detail)\n",
+					"display(validation_df_detail)\n",
+					"\n",
+					""
+				],
+				"execution_count": null
+			},
+			{
+				"cell_type": "code",
+				"source": [
+					"# Marano Bulk Validation\n",
+					"validation_query = \"\"\"\n",
+					"SELECT \n",
+					"    count(distinct SourceFileID),\n",
+					"    InvoiceDate,\n",
+					"    CDCCurrentFlag\n",
+					"FROM marano_bronze.marano_bulk_fuel_transactions\n",
+					"GROUP BY\n",
+					"    InvoiceDate,\n",
+					"    CDCCurrentFlag\n",
+					"    having count(distinct SourceFileID) > 1\n",
+					"\"\"\"\n",
+					"validation_df = spark.sql(validation_query)\n",
+					"validation_df.show()\n",
+					"\n",
+					"#Detailed check\n",
+					"validation_query_detail = \"\"\"\n",
+					"SELECT *\n",
+					"FROM marano_bronze.marano_bulk_fuel_transactions\n",
+					"WHERE\n",
+					"    CDCCurrentFlag = 1\n",
+					"ORDER BY Quantity desc\n",
+					"\n",
+					"\"\"\"\n",
+					"validation_df_detail = spark.sql(validation_query_detail)\n",
+					"display(validation_df_detail)"
+				],
+				"execution_count": null
+			},
+			{
+				"cell_type": "code",
+				"metadata": {
+					"editable": true,
+					"run_control": {
+						"frozen": false
+					}
+				},
+				"source": [
+					"#Silver Validation Ergon and Origin\n",
+					"spark.conf.set(\"spark.sql.legacy.timeParserPolicy\", \"LEGACY\")\n",
+					"validation_query = \"\"\"\n",
+					"select\n",
+					"s.* \n",
+					"from\n",
+					"silver.retail_electricity_charge_details s\n",
+					"join\n",
+					"(\n",
+					"SELECT distinct\n",
+					"    InvoiceNumber\n",
+					"FROM origin_bronze.origin_invoice_details_bkup\n",
+					"WHERE\n",
+					"    CDCCurrentFlag = 1\n",
+					"GROUP BY \n",
+					"    InvoiceNumber,\n",
+					"    InvoiceDate,\n",
+					"    NationalMeteringIdentifier,\n",
+					"    CDCCurrentFlag\n",
+					"HAVING count(1) > 1  \n",
+					"union\n",
+					"SELECT distinct\n",
+					"    InvoiceNumber\n",
+					"FROM ergon_bronze.ergon_invoice_details_bkup\n",
+					"WHERE\n",
+					"    CDCCurrentFlag = 1\n",
+					"GROUP BY \n",
+					"    InvoiceNumber,\n",
+					"    InvoiceDate,\n",
+					"    NationalMeteringIdentifier,\n",
+					"    CDCCurrentFlag\n",
+					"HAVING count(1) > 1  \n",
+					") b on b.InvoiceNumber = s.InvoiceNumber\n",
+					"order by \n",
+					"s.InvoiceNumber\n",
+					"\"\"\"\n",
+					"validation_df = spark.sql(validation_query)\n",
+					"display(validation_df)"
+				],
+				"execution_count": null
+			},
+			{
+				"cell_type": "code",
+				"metadata": {
+					"editable": true,
+					"run_control": {
+						"frozen": false
+					}
+				},
+				"source": [
+					"#Silver Validation CBRE\n",
+					"spark.conf.set(\"spark.sql.legacy.timeParserPolicy\", \"LEGACY\")\n",
+					"validation_query = \"\"\"\n",
+					"select\n",
+					"s.* \n",
+					"from\n",
+					"silver.retail_electricity_charge_details s\n",
+					"join\n",
+					"(\n",
+					"SELECT \n",
+					"    LocationIdentifier,\n",
+					"    date_format(to_date(PreviousReadDate, 'dd/MM/yyyy'), 'yyyy-MM-dd') AS PreviousReadDate,\n",
+					"    date_format(to_date(CurrentReadDate, 'dd/MM/yyyy'), 'yyyy-MM-dd') AS CurrentReadDate\n",
+					"FROM cbre_bronze.cbre_meter_details_bkup\n",
+					"WHERE\n",
+					"    CDCCurrentFlag = 1\n",
+					"GROUP BY\n",
+					"    LocationIdentifier,\n",
+					"    PreviousReadDate,\n",
+					"    CurrentReadDate\n",
+					"HAVING count(distinct SourceFileID) > 1 \n",
+					") b on b.LocationIdentifier = s.LocationIdentifier and b.PreviousReadDate = s.BillingPeriodStartDate and b.CurrentReadDate = s.BillingPeriodEndDate\n",
+					"order by \n",
+					"s.LocationIdentifier,\n",
+					"s.BillingPeriodStartDate,\n",
+					"s.BillingPeriodEndDate\n",
+					"\"\"\"\n",
+					"validation_df = spark.sql(validation_query)\n",
+					"display(validation_df)"
+				],
+				"execution_count": null
+			},
+			{
+				"cell_type": "code",
+				"source": [
+					""
+				],
+				"execution_count": null
+			}
+		]
+	}
+}

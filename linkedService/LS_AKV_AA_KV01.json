@@ -1,0 +1,10 @@
+{
+	"name": "LS_AKV_AA_KV01",
+	"properties": {
+		"annotations": [],
+		"type": "AzureKeyVault",
+		"typeProperties": {
+			"baseUrl": "https://cql-dev-datahub-key.vault.azure.net/"
+		}
+	}
+}

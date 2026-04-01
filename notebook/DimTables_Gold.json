@@ -1,0 +1,1107 @@
+{
+	"name": "DimTables_Gold",
+	"properties": {
+		"folder": {
+			"name": "DataHubBatchScripts/DimTables"
+		},
+		"nbformat": 4,
+		"nbformat_minor": 2,
+		"bigDataPool": {
+			"referenceName": "Sparkpool01",
+			"type": "BigDataPoolReference"
+		},
+		"sessionProperties": {
+			"driverMemory": "56g",
+			"driverCores": 8,
+			"executorMemory": "56g",
+			"executorCores": 8,
+			"numExecutors": 2,
+			"conf": {
+				"spark.dynamicAllocation.enabled": "false",
+				"spark.dynamicAllocation.minExecutors": "2",
+				"spark.dynamicAllocation.maxExecutors": "2",
+				"spark.autotune.trackingId": "3902d16a-cc6d-4426-856d-525c7ef2f715"
+			}
+		},
+		"metadata": {
+			"saveOutput": true,
+			"enableDebugMode": false,
+			"kernelspec": {
+				"name": "synapse_pyspark",
+				"display_name": "Synapse PySpark"
+			},
+			"language_info": {
+				"name": "python"
+			},
+			"a365ComputeOptions": {
+				"id": "/subscriptions/2e9f823e-dc76-4e8e-b815-c8a4f22d05ff/resourceGroups/CQL-AZUR1-DEVDATAHUB01-RG/providers/Microsoft.Synapse/workspaces/cql-dev-datahub-synapse01/bigDataPools/Sparkpool01",
+				"name": "Sparkpool01",
+				"type": "Spark",
+				"endpoint": "https://cql-dev-datahub-synapse01.dev.azuresynapse.net/livyApi/versions/2019-11-01-preview/sparkPools/Sparkpool01",
+				"auth": {
+					"type": "AAD",
+					"authResource": "https://dev.azuresynapse.net"
+				},
+				"sparkVersion": "3.3",
+				"nodeCount": 10,
+				"cores": 8,
+				"memory": 56
+			},
+			"sessionKeepAliveTimeout": 30
+		},
+		"cells": [
+			{
+				"cell_type": "code",
+				"metadata": {
+					"jupyter": {
+						"source_hidden": false,
+						"outputs_hidden": false
+					},
+					"nteract": {
+						"transient": {
+							"deleting": false
+						}
+					}
+				},
+				"source": [
+					"#Get Parameter from controldb\r\n",
+					"import json\r\n",
+					"db_port = 1433\r\n",
+					"linked_service_name = \"LS_SQL_ELTFrameworkDB\"\r\n",
+					"db_notebookname= \"DimTables_Gold\"\r\n",
+					"linkedServiceProperties = json.loads(mssparkutils.credentials.getPropertiesAll(linked_service_name))\r\n",
+					"sql_server_name = linkedServiceProperties.get('Endpoint')\r\n",
+					"db_name = linkedServiceProperties.get('Database')\r\n",
+					"#print(linkedServiceProperties)\r\n",
+					"access_token = mssparkutils.credentials.getConnectionStringOrCreds(linked_service_name)\r\n",
+					"\r\n",
+					"db_query =\"SELECT A.*,B.NotebookParameterId,B.ParameterType,B.Value  FROM [CTL].[CFG_NOTEBOOK] A LEFT JOIN [CTL].[CFG_NOTEBOOK_PARAMETER] B ON A.NotebookId = B.NotebookId\"\r\n",
+					"\r\n",
+					"df = spark.read.format(\"jdbc\") \\\r\n",
+					"    .option(\"url\", \"jdbc:sqlserver://%s:%s\" % (sql_server_name, db_port)) \\\r\n",
+					"    .option(\"query\", db_query) \\\r\n",
+					"    .option(\"accessToken\", access_token) \\\r\n",
+					"    .option(\"encrypt\", \"true\") \\\r\n",
+					"    .option(\"databaseName\", db_name) \\\r\n",
+					"    .option(\"hostNameInCertificate\", \"*.database.windows.net\") \\\r\n",
+					"    .load()\r\n",
+					"\r\n",
+					"df2 = df.where(df.NotebookPath==db_notebookname) "
+				],
+				"execution_count": 41
+			},
+			{
+				"cell_type": "code",
+				"metadata": {
+					"jupyter": {
+						"source_hidden": false,
+						"outputs_hidden": false
+					},
+					"nteract": {
+						"transient": {
+							"deleting": false
+						}
+					}
+				},
+				"source": [
+					"#Source DataLake storage details\r\n",
+					"source_storage = df2.where(df2.ParameterType=='source_storage').collect()[0][\"Value\"] #Storage name\r\n",
+					"source_container = df2.where(df2.ParameterType=='source_container').collect()[0][\"Value\"] #Storage container detail\r\n",
+					"source_path = df2.where(df2.ParameterType=='source_path').collect()[0][\"Value\"] #internal folder location in container \"demodata/demo_aemo\"\r\n",
+					"#source_file = '' #CUSTOMER__full_32a72bd2-bd94-467f-9030-6b9f20dad676_20240204_100201\r\n",
+					"\r\n",
+					"#Destination DataLake storage details\r\n",
+					"destination_storage = df2.where(df2.ParameterType=='destination_storage').collect()[0][\"Value\"] #Storage name\r\n",
+					"destination_container = df2.where(df2.ParameterType=='destination_container').collect()[0][\"Value\"] #raw storage container details\r\n",
+					"destination_path = df2.where(df2.ParameterType=='destination_path').collect()[0][\"Value\"] #raw delta file patch\r\n",
+					"\r\n",
+					"#Get Current Date\r\n",
+					"Gold_LoadDate=spark.sql(\"select current_timestamp()\").collect()[0][0]\r\n",
+					"\r\n",
+					"#Synapse Dedicated Server detials\r\n",
+					"SynapseDedicatedServer = df2.where(df2.ParameterType=='destination_storage').collect()[0]['SynapseDedicatedServer'] \r\n",
+					"TempFolder = df2.where(df2.ParameterType=='destination_storage').collect()[0]['TempFolder']\r\n",
+					"SynapseDedicatedDatabase = df2.where(df2.ParameterType=='destination_storage').collect()[0]['SynapseDedicatedDatabase']"
+				],
+				"execution_count": 42
+			},
+			{
+				"cell_type": "code",
+				"metadata": {
+					"jupyter": {
+						"source_hidden": false,
+						"outputs_hidden": false
+					},
+					"nteract": {
+						"transient": {
+							"deleting": false
+						}
+					}
+				},
+				"source": [
+					"# Display values\r\n",
+					"print(source_storage)\r\n",
+					"print(source_container)\r\n",
+					"print(source_path)\r\n",
+					"print(destination_storage)\r\n",
+					"print(destination_container)\r\n",
+					"print(destination_path)\r\n",
+					"print(SynapseDedicatedServer)\r\n",
+					"print(TempFolder)\r\n",
+					"print(SynapseDedicatedDatabase)"
+				],
+				"execution_count": null
+			},
+			{
+				"cell_type": "markdown",
+				"metadata": {
+					"nteract": {
+						"transient": {
+							"deleting": false
+						}
+					}
+				},
+				"source": [
+					"# Table DimDate: START"
+				]
+			},
+			{
+				"cell_type": "code",
+				"metadata": {
+					"jupyter": {
+						"source_hidden": false,
+						"outputs_hidden": false
+					},
+					"nteract": {
+						"transient": {
+							"deleting": false
+						}
+					}
+				},
+				"source": [
+					"#Set table name\r\n",
+					"db_tablename=\"DimDate\""
+				],
+				"execution_count": 43
+			},
+			{
+				"cell_type": "code",
+				"metadata": {
+					"jupyter": {
+						"source_hidden": false,
+						"outputs_hidden": false
+					},
+					"nteract": {
+						"transient": {
+							"deleting": false
+						}
+					}
+				},
+				"source": [
+					"# Drop table and storage folder if exists\r\n",
+					"from py4j.protocol import Py4JJavaError\r\n",
+					"\r\n",
+					"spark.sql(f\"\"\"DROP TABLE IF EXISTS {db_notebookname}.{db_tablename}\"\"\")\r\n",
+					"\r\n",
+					"try:\r\n",
+					"    raw_output_path = f\"abfss://{destination_container}@{destination_storage}.dfs.core.windows.net/{destination_path}/{db_tablename}\"\r\n",
+					"    mssparkutils.fs.rm(raw_output_path,recurse=True)\r\n",
+					"\r\n",
+					"    print(\"Delete successful\")\r\n",
+					"\r\n",
+					"except Py4JJavaError as error :\r\n",
+					"    if 'org.apache.hadoop.fs.PathNotFoundException' in str (error.java_exception):\r\n",
+					"        print(\"No such file or directory\")\r\n",
+					""
+				],
+				"execution_count": 44
+			},
+			{
+				"cell_type": "code",
+				"metadata": {
+					"jupyter": {
+						"source_hidden": false,
+						"outputs_hidden": false
+					},
+					"nteract": {
+						"transient": {
+							"deleting": false
+						}
+					}
+				},
+				"source": [
+					"#Create Gold Table\r\n",
+					"spark.sql(f\"\"\"CREATE DATABASE IF NOT EXISTS {db_notebookname};\"\"\")\r\n",
+					"spark.sql(f\"\"\"\r\n",
+					"CREATE TABLE IF NOT EXISTS {db_notebookname}.{db_tablename}\r\n",
+					"(\r\n",
+					"    Date DATE,\r\n",
+					"    DateId INT,\r\n",
+					"    DateHashId STRING,\r\n",
+					"    Year INT,\r\n",
+					"    Quarter INT,\r\n",
+					"    Month INT,\r\n",
+					"    Day INT,\r\n",
+					"    Week INT,\r\n",
+					"    QuarterNameLong STRING,\r\n",
+					"    QuarterNameShort STRING,\r\n",
+					"    QuarterNumberString STRING,\r\n",
+					"    MonthNameLong STRING,\r\n",
+					"    MonthNameShort STRING,\r\n",
+					"    MonthNumberString STRING,\r\n",
+					"    DayNumberString STRING,\r\n",
+					"    WeekNameLong STRING,\r\n",
+					"    WeekNameShort STRING,\r\n",
+					"    WeekNumberString STRING,\r\n",
+					"    DayOfWeek INT,\r\n",
+					"    YearMonthString STRING,\r\n",
+					"    DayOfWeekNameLong STRING,\r\n",
+					"    DayOfWeekNameShort STRING,\r\n",
+					"    DayOfMonth INT,\r\n",
+					"    DayOfYear INT\r\n",
+					")\r\n",
+					"USING delta\r\n",
+					"LOCATION 'abfss://{destination_container}@{destination_storage}.dfs.core.windows.net/{destination_path}/{db_tablename}'\r\n",
+					"\"\"\")"
+				],
+				"execution_count": 45
+			},
+			{
+				"cell_type": "code",
+				"metadata": {
+					"jupyter": {
+						"source_hidden": false,
+						"outputs_hidden": false
+					},
+					"nteract": {
+						"transient": {
+							"deleting": false
+						}
+					}
+				},
+				"source": [
+					"# Row count parameters\r\n",
+					"Gold_Insert_Pre=spark.sql(f\"\"\" SELECT COUNT(*) FROM {db_notebookname}.{db_tablename} \"\"\").collect()[0][0]"
+				],
+				"execution_count": 46
+			},
+			{
+				"cell_type": "markdown",
+				"metadata": {
+					"nteract": {
+						"transient": {
+							"deleting": false
+						}
+					}
+				},
+				"source": [
+					"# Display\r\n",
+					"print(Gold_Insert_Pre)"
+				]
+			},
+			{
+				"cell_type": "code",
+				"metadata": {
+					"collapsed": false
+				},
+				"source": [
+					"# load packages\r\n",
+					"from pyspark.sql.functions import *\r\n",
+					"from datetime import datetime, timedelta\r\n",
+					"\r\n",
+					"# COMMAND ----------\r\n",
+					"\r\n",
+					"# define boundaries\r\n",
+					"startdate = datetime.strptime('1900-01-01','%Y-%m-%d')\r\n",
+					"enddate   = datetime.strptime('2101-01-01','%Y-%m-%d')  # (datetime.now() + timedelta(days=365 * 200)).replace(month=12, day=31)  1900 - 2100\r\n",
+					"\r\n",
+					"# COMMAND ----------\r\n",
+					"\r\n",
+					"# define column names and its transformation rules on the Date column\r\n",
+					"column_rule_df = spark.createDataFrame([\r\n",
+					"    (\"DateId\",              \"cast(date_format(date, 'yyyyMMdd') as int)\"),     # 20230101\r\n",
+					"    (\"Year\",                \"year(date)\"),                                     # 2023\r\n",
+					"    (\"Quarter\",             \"quarter(date)\"),                                  # 1\r\n",
+					"    (\"Month\",               \"month(date)\"),                                    # 1\r\n",
+					"    (\"Day\",                 \"day(date)\"),                                      # 1\r\n",
+					"    (\"Week\",                \"weekofyear(date)\"),                               # 1\r\n",
+					"    (\"QuarterNameLong\",     \"date_format(date, 'QQQQ')\"),                      # 1st qaurter\r\n",
+					"    (\"QuarterNameShort\",    \"date_format(date, 'QQQ')\"),                       # Q1\r\n",
+					"    (\"QuarterNumberString\", \"date_format(date, 'QQ')\"),                        # 01\r\n",
+					"    (\"MonthNameLong\",       \"date_format(date, 'MMMM')\"),                      # January\r\n",
+					"    (\"MonthNameShort\",      \"date_format(date, 'MMM')\"),                       # Jan\r\n",
+					"    (\"MonthNumberString\",   \"date_format(date, 'MM')\"),                        # 01\r\n",
+					"    (\"DayNumberString\",     \"date_format(date, 'dd')\"),                        # 01\r\n",
+					"    (\"WeekNameLong\",        \"concat('week', lpad(weekofyear(date), 2, '0'))\"), # week 01\r\n",
+					"    (\"WeekNameShort\",       \"concat('w', lpad(weekofyear(date), 2, '0'))\"),    # w01\r\n",
+					"    (\"WeekNumberString\",    \"lpad(weekofyear(date), 2, '0')\"),                 # 01\r\n",
+					"    (\"DayOfWeek\",           \"dayofweek(date)\"),                                # 1\r\n",
+					"    (\"YearMonthString\",     \"date_format(date, 'yyyy/MM')\"),                   # 2023/01\r\n",
+					"    (\"DayOfWeekNameLong\",   \"date_format(date, 'EEEE')\"),                      # Sunday\r\n",
+					"    (\"DayOfWeekNameShort\",  \"date_format(date, 'EEE')\"),                       # Sun\r\n",
+					"    (\"DayOfMonth\",          \"cast(date_format(date, 'd') as int)\"),            # 1\r\n",
+					"    (\"DayOfYear\",           \"cast(date_format(date, 'D') as int)\"),            # 1\r\n",
+					"], [\"new_column_name\", \"expression\"])\r\n",
+					"\r\n",
+					"\r\n",
+					"# COMMAND ----------\r\n",
+					"\r\n",
+					"# explode dates between the defined boundaries into one column\r\n",
+					"start = int(startdate.timestamp())\r\n",
+					"stop  = int(enddate.timestamp())\r\n",
+					"df_daterange = spark.range(start, stop, 60*60*24).select(col(\"id\").cast(\"timestamp\").cast(\"date\").alias(\"Date\"))\r\n",
+					"#display(df_daterange)\r\n",
+					"\r\n",
+					"df_new = spark.createDataFrame([('9999-12-30',),('9999-12-31',)], ['Date'])\r\n",
+					"#display(df_new)\r\n",
+					"df_daterange = df_daterange.unionAll(df_new)\r\n",
+					"#display(df_daterange)\r\n",
+					"\r\n",
+					"\r\n",
+					"# COMMAND ----------\r\n",
+					"\r\n",
+					"# this loops over all rules defined in column_rule_df adding the new columns\r\n",
+					"for row in column_rule_df.collect():\r\n",
+					"    new_column_name = row[\"new_column_name\"]\r\n",
+					"    expression = expr(row[\"expression\"])\r\n",
+					"    df_daterange = df_daterange.withColumn(new_column_name, expression)\r\n",
+					"#display(df_daterange)\r\n",
+					"\r\n",
+					"# COMMAND ----------\r\n",
+					"\r\n",
+					"# display(df.withColumn(\"Playground\", expr(\"date_format(date, 'yyyyMMDD')\")))\r\n",
+					""
+				],
+				"execution_count": 47
+			},
+			{
+				"cell_type": "code",
+				"metadata": {
+					"jupyter": {
+						"source_hidden": false,
+						"outputs_hidden": false
+					},
+					"nteract": {
+						"transient": {
+							"deleting": false
+						}
+					}
+				},
+				"source": [
+					"# Add Hash columns\r\n",
+					"from pyspark.sql.functions import col, concat, lit, to_timestamp, to_date, when\r\n",
+					"from pyspark.sql.functions import sha2, concat_ws, regexp_replace\r\n",
+					"\r\n",
+					"df_gold = df_daterange.withColumn(\"DateHashId\", sha2(concat_ws(\"||\", \"DateID\"), 256))"
+				],
+				"execution_count": 48
+			},
+			{
+				"cell_type": "markdown",
+				"metadata": {
+					"nteract": {
+						"transient": {
+							"deleting": false
+						}
+					}
+				},
+				"source": [
+					"# Display datafram and schema\r\n",
+					"df_gold.printSchema()\r\n",
+					"display(df_gold)"
+				]
+			},
+			{
+				"cell_type": "code",
+				"metadata": {
+					"jupyter": {
+						"source_hidden": false,
+						"outputs_hidden": false
+					},
+					"nteract": {
+						"transient": {
+							"deleting": false
+						}
+					}
+				},
+				"source": [
+					"# Create a temporary view of the dataframe\r\n",
+					"df_gold.createOrReplaceTempView(f\"\"\"Gold_temp_{db_tablename}\"\"\")\r\n",
+					"\r\n",
+					"# Use insert operation to update the target table\r\n",
+					"spark.sql(f\"\"\"\r\n",
+					"            INSERT INTO {db_notebookname}.{db_tablename}\r\n",
+					"            SELECT Date,DateId,DateHashId,Year,Quarter,Month,Day,Week,QuarterNameLong,QuarterNameShort,QuarterNumberString,MonthNameLong,MonthNameShort,MonthNumberString,DayNumberString,WeekNameLong,WeekNameShort,WeekNumberString,DayOfWeek,YearMonthString,DayOfWeekNameLong,DayOfWeekNameShort,DayOfMonth,DayOfYear\r\n",
+					"            FROM Gold_temp_{db_tablename}\r\n",
+					"        \"\"\")\r\n",
+					"\r\n",
+					"spark.sql(f\"\"\"\r\n",
+					"            DROP VIEW IF EXISTS Gold_temp_{db_tablename}\r\n",
+					"        \"\"\")\r\n",
+					""
+				],
+				"execution_count": 49
+			},
+			{
+				"cell_type": "code",
+				"metadata": {
+					"jupyter": {
+						"source_hidden": false,
+						"outputs_hidden": false
+					},
+					"nteract": {
+						"transient": {
+							"deleting": false
+						}
+					}
+				},
+				"source": [
+					"# Duplication count\r\n",
+					"Gold_duplicate_count= spark.sql(f\"\"\"\r\n",
+					"                                        SELECT sum(dCount)\r\n",
+					"                                        FROM (\r\n",
+					"                                                SELECT COUNT(DateHashId) AS dCount FROM {db_notebookname}.{db_tablename}\r\n",
+					"                                                GROUP by DateHashId\r\n",
+					"                                                HAVING COUNT(DateHashId)>1 ) as subtb\r\n",
+					"                                    \r\n",
+					"                            \"\"\").collect()[0][0]\r\n",
+					"assert Gold_duplicate_count == None\r\n",
+					"print(Gold_duplicate_count)"
+				],
+				"execution_count": 50
+			},
+			{
+				"cell_type": "code",
+				"metadata": {
+					"jupyter": {
+						"source_hidden": false,
+						"outputs_hidden": false
+					},
+					"nteract": {
+						"transient": {
+							"deleting": false
+						}
+					}
+				},
+				"source": [
+					"# Write using AAD Auth to internal table\r\n",
+					"# Add required imports\r\n",
+					"import com.microsoft.spark.sqlanalytics\r\n",
+					"from com.microsoft.spark.sqlanalytics.Constants import Constants\r\n",
+					"\r\n",
+					"df_gold=spark.sql(f\"\"\"\r\n",
+					"                    SELECT Date,DateId,DateHashId,Year,Quarter,Month,Day,Week,QuarterNameLong,QuarterNameShort,QuarterNumberString,MonthNameLong,MonthNameShort,MonthNumberString,DayNumberString,WeekNameLong,WeekNameShort,WeekNumberString,DayOfWeek,YearMonthString,DayOfWeekNameLong,DayOfWeekNameShort,DayOfMonth,DayOfYear\r\n",
+					"                    FROM {db_notebookname}.{db_tablename}\r\n",
+					"                \"\"\")\r\n",
+					"\r\n",
+					"#order columns for Azure Synapse insert should match synapse table creation order.\r\n",
+					"\r\n",
+					"df_gold=df_gold.select(\"Date\", \"DateId\", \"DateHashId\", \"Year\", \"Quarter\", \"Month\", \"Day\", \"Week\", \"QuarterNameLong\", \"QuarterNameShort\", \"QuarterNumberString\", \"MonthNameLong\", \"MonthNameShort\", \"MonthNumberString\", \"DayNumberString\", \"WeekNameLong\", \"WeekNameShort\", \"WeekNumberString\", \"DayOfWeek\", \"YearMonthString\", \"DayOfWeekNameLong\", \"DayOfWeekNameShort\", \"DayOfMonth\", \"DayOfYear\")\r\n",
+					"\r\n",
+					"# Configure and submit the request to write to Synapse Dedicated SQL Pool\r\n",
+					"# Sample below is using AAD-based authentication approach; See further examples to leverage SQL Basic auth.\r\n",
+					"(df_gold.write\r\n",
+					" # If `Constants.SERVER` is not provided, the `<database_name>` from the three-part table name argument\r\n",
+					" # to `synapsesql` method is used to infer the Synapse Dedicated SQL End Point.\r\n",
+					" .option(Constants.SERVER, f\"\"\"{SynapseDedicatedServer}\"\"\")\r\n",
+					" # Like-wise, if `Constants.TEMP_FOLDER` is not provided, the connector will use the runtime staging directory config (see section on Configuration Options for details).\r\n",
+					" .option(Constants.TEMP_FOLDER, (f\"\"\"abfss://temp@{TempFolder}/{db_tablename}\"\"\"))\r\n",
+					" # Choose a save mode that is apt for your use case.\r\n",
+					" # Options for save modes are \"error\" or \"errorifexists\" (default), \"overwrite\", \"append\", \"ignore\".\r\n",
+					" # refer to https://spark.apache.org/docs/latest/sql-data-sources-load-save-functions.html#save-modes\r\n",
+					" .mode(\"overwrite\")\r\n",
+					" # Required parameter - Three-part table name to which data will be written\r\n",
+					" .synapsesql(f\"\"\"{SynapseDedicatedDatabase}.dbo.{db_tablename}\"\"\"))"
+				],
+				"execution_count": 51
+			},
+			{
+				"cell_type": "code",
+				"metadata": {
+					"jupyter": {
+						"source_hidden": false,
+						"outputs_hidden": false
+					},
+					"nteract": {
+						"transient": {
+							"deleting": false
+						}
+					}
+				},
+				"source": [
+					"#Row count parameters\r\n",
+					"Gold_TotalRowCount_Post=spark.sql(f\"\"\" SELECT COUNT(*) FROM {db_notebookname}.{db_tablename}\"\"\").collect()[0][0]"
+				],
+				"execution_count": 52
+			},
+			{
+				"cell_type": "code",
+				"metadata": {
+					"jupyter": {
+						"source_hidden": false,
+						"outputs_hidden": false
+					},
+					"nteract": {
+						"transient": {
+							"deleting": false
+						}
+					}
+				},
+				"source": [
+					"#Row calculation\r\n",
+					"Gold_TotalRows = Gold_TotalRowCount_Post"
+				],
+				"execution_count": 53
+			},
+			{
+				"cell_type": "markdown",
+				"metadata": {
+					"nteract": {
+						"transient": {
+							"deleting": false
+						}
+					}
+				},
+				"source": [
+					"# Display\r\n",
+					"print(Gold_TotalRows)"
+				]
+			},
+			{
+				"cell_type": "code",
+				"metadata": {
+					"jupyter": {
+						"source_hidden": false,
+						"outputs_hidden": false
+					},
+					"nteract": {
+						"transient": {
+							"deleting": false
+						}
+					}
+				},
+				"source": [
+					"from pyspark.sql.types import StructType, StructField, StringType, IntegerType, BooleanType,DateType, DoubleType,TimestampType\r\n",
+					"\r\n",
+					"log_data = [(db_notebookname,db_tablename,Gold_LoadDate,Gold_TotalRows,0,0,Gold_TotalRows,Gold_TotalRows)]\r\n",
+					"print(log_data)\r\n",
+					"log_columns = ['PIPELINE_NAME', 'TABLE_NAME', 'INGEST_DATETIME', 'INSERT','UPDATE','DELETE','ACTIVE_ROWS','TOTAL_ROWS']\r\n",
+					"df_log = spark.createDataFrame(log_data, log_columns)\r\n",
+					"#display(df_test)"
+				],
+				"execution_count": 54
+			},
+			{
+				"cell_type": "code",
+				"metadata": {
+					"jupyter": {
+						"source_hidden": false,
+						"outputs_hidden": false
+					},
+					"nteract": {
+						"transient": {
+							"deleting": false
+						}
+					}
+				},
+				"source": [
+					"#Write to controldb\r\n",
+					"import json\r\n",
+					"db_port = 1433\r\n",
+					"linked_service_name = \"LS_SQL_ELTFrameworkDB\"\r\n",
+					"linkedServiceProperties = json.loads(mssparkutils.credentials.getPropertiesAll(linked_service_name))\r\n",
+					"sql_server_name = linkedServiceProperties.get('Endpoint')\r\n",
+					"db_name = linkedServiceProperties.get('Database')\r\n",
+					"access_token = mssparkutils.credentials.getConnectionStringOrCreds(linked_service_name)\r\n",
+					"write_table_name = \"[CTL].[CFG_INGESTION_LOGS]\"\r\n",
+					"\r\n",
+					"try:\r\n",
+					"    df_log.write.format(\"jdbc\") \\\r\n",
+					"        .option(\"url\", \"jdbc:sqlserver://%s:%s\" % (sql_server_name, db_port)) \\\r\n",
+					"        .option(\"dbtable\", write_table_name) \\\r\n",
+					"        .option(\"accessToken\", access_token) \\\r\n",
+					"        .option(\"encrypt\", \"true\") \\\r\n",
+					"        .option(\"databaseName\", db_name) \\\r\n",
+					"        .option(\"hostNameInCertificate\", \"*.database.windows.net\") \\\r\n",
+					"        .mode(\"append\") \\\r\n",
+					"        .save()\r\n",
+					"except ValueError as error :\r\n",
+					"    print(\"MSSQL Connector write failed\", error)\r\n",
+					"\r\n",
+					"print(\"MSSQL Connector write(append) succeeded  \")"
+				],
+				"execution_count": 55
+			},
+			{
+				"cell_type": "markdown",
+				"metadata": {
+					"nteract": {
+						"transient": {
+							"deleting": false
+						}
+					}
+				},
+				"source": [
+					"# Table DimDate: END"
+				]
+			},
+			{
+				"cell_type": "markdown",
+				"metadata": {
+					"nteract": {
+						"transient": {
+							"deleting": false
+						}
+					}
+				},
+				"source": [
+					"# Table DimTime: START"
+				]
+			},
+			{
+				"cell_type": "code",
+				"metadata": {
+					"jupyter": {
+						"source_hidden": false,
+						"outputs_hidden": false
+					},
+					"nteract": {
+						"transient": {
+							"deleting": false
+						}
+					}
+				},
+				"source": [
+					"#Set table name\r\n",
+					"db_tablename=\"DimTime\""
+				],
+				"execution_count": 56
+			},
+			{
+				"cell_type": "code",
+				"metadata": {
+					"jupyter": {
+						"source_hidden": false,
+						"outputs_hidden": false
+					},
+					"nteract": {
+						"transient": {
+							"deleting": false
+						}
+					}
+				},
+				"source": [
+					"# Drop table and storage folder if exists\r\n",
+					"from py4j.protocol import Py4JJavaError\r\n",
+					"\r\n",
+					"spark.sql(f\"\"\"DROP TABLE IF EXISTS {db_notebookname}.{db_tablename}\"\"\")\r\n",
+					"\r\n",
+					"try:\r\n",
+					"    raw_output_path = f\"abfss://{destination_container}@{destination_storage}.dfs.core.windows.net/{destination_path}/{db_tablename}\"\r\n",
+					"    mssparkutils.fs.rm(raw_output_path,recurse=True)\r\n",
+					"\r\n",
+					"    print(\"Delete successful\")\r\n",
+					"\r\n",
+					"except Py4JJavaError as error :\r\n",
+					"    if 'org.apache.hadoop.fs.PathNotFoundException' in str (error.java_exception):\r\n",
+					"        print(\"No such file or directory\")\r\n",
+					""
+				],
+				"execution_count": 57
+			},
+			{
+				"cell_type": "code",
+				"metadata": {
+					"jupyter": {
+						"source_hidden": false,
+						"outputs_hidden": false
+					},
+					"nteract": {
+						"transient": {
+							"deleting": false
+						}
+					}
+				},
+				"source": [
+					"#Create Gold Table\r\n",
+					"spark.sql(f\"\"\"CREATE DATABASE IF NOT EXISTS {db_notebookname};\"\"\")\r\n",
+					"spark.sql(f\"\"\"\r\n",
+					"CREATE TABLE IF NOT EXISTS {db_notebookname}.{db_tablename}\r\n",
+					"(\r\n",
+					"    Time STRING,\r\n",
+					"    TimeId INT,\r\n",
+					"    TimeHashId STRING,\r\n",
+					"    Hour INT,\r\n",
+					"    Time24 STRING,\r\n",
+					"    Hour24 INT,\r\n",
+					"    AmPm STRING\r\n",
+					")\r\n",
+					"USING delta\r\n",
+					"LOCATION 'abfss://{destination_container}@{destination_storage}.dfs.core.windows.net/{destination_path}/{db_tablename}'\r\n",
+					"\"\"\")"
+				],
+				"execution_count": 58
+			},
+			{
+				"cell_type": "code",
+				"metadata": {
+					"jupyter": {
+						"source_hidden": false,
+						"outputs_hidden": false
+					},
+					"nteract": {
+						"transient": {
+							"deleting": false
+						}
+					}
+				},
+				"source": [
+					"# Row count parameters\r\n",
+					"Gold_Insert_Pre=spark.sql(f\"\"\" SELECT COUNT(*) FROM {db_notebookname}.{db_tablename} \"\"\").collect()[0][0]"
+				],
+				"execution_count": 59
+			},
+			{
+				"cell_type": "code",
+				"metadata": {
+					"jupyter": {
+						"source_hidden": false,
+						"outputs_hidden": false
+					},
+					"nteract": {
+						"transient": {
+							"deleting": false
+						}
+					}
+				},
+				"source": [
+					"# Display\r\n",
+					"print(Gold_Insert_Pre)"
+				],
+				"execution_count": 60
+			},
+			{
+				"cell_type": "code",
+				"metadata": {
+					"jupyter": {
+						"source_hidden": false,
+						"outputs_hidden": false
+					},
+					"nteract": {
+						"transient": {
+							"deleting": false
+						}
+					},
+					"collapsed": false
+				},
+				"source": [
+					"# load packages\r\n",
+					"from pyspark.sql.functions import *\r\n",
+					"from datetime import datetime, timedelta\r\n",
+					"\r\n",
+					"# COMMAND ----------\r\n",
+					"\r\n",
+					"# define column names and its transformation rules on the Date column\r\n",
+					"column_rule_df = spark.createDataFrame([\r\n",
+					"    (\"TimeId\",              \"cast(date_format(t, 'HHmm') as int)\"),     # 1111\r\n",
+					"    (\"Time\",                \"date_format(t, 'hh:mm a')\"),                                     # 11:11\r\n",
+					"    (\"Hour\",             \"date_format(t, 'hh')\"),                                  # 11\r\n",
+					"    (\"Time24\",               \"date_format(t, 'HH:mm')\"),                                    # 11:11\r\n",
+					"    (\"Hour24\",                 \"date_format(t, 'kk')\"),                                      # 11\r\n",
+					"    (\"AmPm\",                \"date_format(t, 'a')\"),                               # AmPm\r\n",
+					"], [\"new_column_name\", \"expression\"])\r\n",
+					"\r\n",
+					"\r\n",
+					"# COMMAND ----------\r\n",
+					"\r\n",
+					"# explode dates between the defined boundaries into one column\r\n",
+					"df_timerange = spark.sql(f\"\"\"\r\n",
+					"            SELECT explode(sequence(to_timestamp('1900-01-01 00:00'), to_timestamp('1900-01-01 23:59'), interval 1 minute)) as t\"\"\"\r\n",
+					"            )\r\n",
+					"#display(df_timerange)\r\n",
+					"\r\n",
+					"# COMMAND ----------\r\n",
+					"\r\n",
+					"# this loops over all rules defined in column_rule_df adding the new columns\r\n",
+					"for row in column_rule_df.collect():\r\n",
+					"    new_column_name = row[\"new_column_name\"]\r\n",
+					"    expression = expr(row[\"expression\"])\r\n",
+					"    df_timerange = df_timerange.withColumn(new_column_name, expression)\r\n",
+					"#display(df_timerange)\r\n",
+					"\r\n",
+					"# COMMAND ----------\r\n",
+					"\r\n",
+					"# display(df.withColumn(\"Playground\", expr(\"date_format(date, 'yyyyMMDD')\")))"
+				],
+				"execution_count": 61
+			},
+			{
+				"cell_type": "code",
+				"metadata": {
+					"jupyter": {
+						"source_hidden": false,
+						"outputs_hidden": false
+					},
+					"nteract": {
+						"transient": {
+							"deleting": false
+						}
+					}
+				},
+				"source": [
+					"# Display temp view\r\n",
+					"# Add Hash columns\r\n",
+					"from pyspark.sql.functions import col, concat, lit, to_timestamp, to_date, when\r\n",
+					"from pyspark.sql.functions import sha2, concat_ws, regexp_replace\r\n",
+					"\r\n",
+					"df_gold = df_timerange.withColumn(\"TimeHashId\", sha2(concat_ws(\"||\", \"TimeId\"), 256))"
+				],
+				"execution_count": 62
+			},
+			{
+				"cell_type": "markdown",
+				"metadata": {
+					"nteract": {
+						"transient": {
+							"deleting": false
+						}
+					}
+				},
+				"source": [
+					"# Display datafram and schema\r\n",
+					"df_gold.printSchema()\r\n",
+					"display(df_gold)"
+				]
+			},
+			{
+				"cell_type": "code",
+				"metadata": {
+					"jupyter": {
+						"source_hidden": false,
+						"outputs_hidden": false
+					},
+					"nteract": {
+						"transient": {
+							"deleting": false
+						}
+					}
+				},
+				"source": [
+					"# Create a temporary view of the dataframe\r\n",
+					"df_gold.createOrReplaceTempView(f\"\"\"Gold_temp_{db_tablename}\"\"\")\r\n",
+					"\r\n",
+					"# Use insert operation to update the target table\r\n",
+					"spark.sql(f\"\"\"\r\n",
+					"            INSERT INTO {db_notebookname}.{db_tablename}\r\n",
+					"            SELECT Time, TimeId, TimeHashId, Hour, Time24, Hour24, AmPm\r\n",
+					"            FROM Gold_temp_{db_tablename}\r\n",
+					"        \"\"\")\r\n",
+					"\r\n",
+					"spark.sql(f\"\"\"\r\n",
+					"            DROP VIEW IF EXISTS Gold_temp_{db_tablename}\r\n",
+					"        \"\"\")"
+				],
+				"execution_count": 63
+			},
+			{
+				"cell_type": "code",
+				"metadata": {
+					"jupyter": {
+						"source_hidden": false,
+						"outputs_hidden": false
+					},
+					"nteract": {
+						"transient": {
+							"deleting": false
+						}
+					}
+				},
+				"source": [
+					"# Duplication count\r\n",
+					"Gold_duplicate_count= spark.sql(f\"\"\"\r\n",
+					"                                        SELECT sum(dCount)\r\n",
+					"                                        FROM (\r\n",
+					"                                                SELECT COUNT(TimeHashId) AS dCount FROM {db_notebookname}.{db_tablename}\r\n",
+					"                                                GROUP by TimeHashId\r\n",
+					"                                                HAVING COUNT(TimeHashId)>1 ) as subtb\r\n",
+					"                                    \r\n",
+					"                            \"\"\").collect()[0][0]\r\n",
+					"assert Gold_duplicate_count == None\r\n",
+					"print(Gold_duplicate_count)"
+				],
+				"execution_count": 64
+			},
+			{
+				"cell_type": "code",
+				"metadata": {
+					"jupyter": {
+						"source_hidden": false,
+						"outputs_hidden": false
+					},
+					"nteract": {
+						"transient": {
+							"deleting": false
+						}
+					}
+				},
+				"source": [
+					"# Write using AAD Auth to internal table\r\n",
+					"# Add required imports\r\n",
+					"import com.microsoft.spark.sqlanalytics\r\n",
+					"from com.microsoft.spark.sqlanalytics.Constants import Constants\r\n",
+					"\r\n",
+					"df_gold= spark.sql(f\"\"\"SELECT Time, TimeId, TimeHashId, Hour, Time24, Hour24, AmPm FROM {db_notebookname}.{db_tablename}\"\"\")\r\n",
+					"\r\n",
+					"#order columns for Azure Synapse insert should match synapse table creation order.\r\n",
+					"df_gold=df_gold.select(\"Time\", \"TimeId\", \"TimeHashId\", \"Hour\", \"Time24\", \"Hour24\", \"AmPm\")\r\n",
+					"\r\n",
+					"# Configure and submit the request to write to Synapse Dedicated SQL Pool\r\n",
+					"# Sample below is using AAD-based authentication approach; See further examples to leverage SQL Basic auth.\r\n",
+					"(df_gold.write\r\n",
+					" # If `Constants.SERVER` is not provided, the `<database_name>` from the three-part table name argument\r\n",
+					" # to `synapsesql` method is used to infer the Synapse Dedicated SQL End Point.\r\n",
+					" .option(Constants.SERVER, f\"\"\"{SynapseDedicatedServer}\"\"\")\r\n",
+					" # Like-wise, if `Constants.TEMP_FOLDER` is not provided, the connector will use the runtime staging directory config (see section on Configuration Options for details).\r\n",
+					" .option(Constants.TEMP_FOLDER, (f\"\"\"abfss://temp@{TempFolder}/{db_tablename}\"\"\"))\r\n",
+					" # Choose a save mode that is apt for your use case.\r\n",
+					" # Options for save modes are \"error\" or \"errorifexists\" (default), \"overwrite\", \"append\", \"ignore\".\r\n",
+					" # refer to https://spark.apache.org/docs/latest/sql-data-sources-load-save-functions.html#save-modes\r\n",
+					" .mode(\"overwrite\")\r\n",
+					" # Required parameter - Three-part table name to which data will be written\r\n",
+					" .synapsesql(f\"\"\"{SynapseDedicatedDatabase}.dbo.{db_tablename}\"\"\"))"
+				],
+				"execution_count": 65
+			},
+			{
+				"cell_type": "code",
+				"metadata": {
+					"jupyter": {
+						"source_hidden": false,
+						"outputs_hidden": false
+					},
+					"nteract": {
+						"transient": {
+							"deleting": false
+						}
+					}
+				},
+				"source": [
+					"#Row count parameters\r\n",
+					"Gold_TotalRowCount_Post=spark.sql(f\"\"\" SELECT COUNT(*) FROM {db_notebookname}.{db_tablename}\"\"\").collect()[0][0]"
+				],
+				"execution_count": 66
+			},
+			{
+				"cell_type": "code",
+				"metadata": {
+					"jupyter": {
+						"source_hidden": false,
+						"outputs_hidden": false
+					},
+					"nteract": {
+						"transient": {
+							"deleting": false
+						}
+					}
+				},
+				"source": [
+					"#Row calculation\r\n",
+					"Gold_TotalRows = Gold_TotalRowCount_Post"
+				],
+				"execution_count": 67
+			},
+			{
+				"cell_type": "markdown",
+				"metadata": {
+					"nteract": {
+						"transient": {
+							"deleting": false
+						}
+					}
+				},
+				"source": [
+					"# Display\r\n",
+					"print(Gold_TotalRows)"
+				]
+			},
+			{
+				"cell_type": "code",
+				"metadata": {
+					"jupyter": {
+						"source_hidden": false,
+						"outputs_hidden": false
+					},
+					"nteract": {
+						"transient": {
+							"deleting": false
+						}
+					}
+				},
+				"source": [
+					"from pyspark.sql.types import StructType, StructField, StringType, IntegerType, BooleanType,DateType, DoubleType,TimestampType\r\n",
+					"\r\n",
+					"log_data = [(db_notebookname,db_tablename,Gold_LoadDate,Gold_TotalRows,0,0,Gold_TotalRows,Gold_TotalRows)]\r\n",
+					"print(log_data)\r\n",
+					"log_columns = ['PIPELINE_NAME', 'TABLE_NAME', 'INGEST_DATETIME', 'INSERT','UPDATE','DELETE','ACTIVE_ROWS','TOTAL_ROWS']\r\n",
+					"df_log = spark.createDataFrame(log_data, log_columns)\r\n",
+					"#display(df_test)"
+				],
+				"execution_count": 68
+			},
+			{
+				"cell_type": "code",
+				"metadata": {
+					"jupyter": {
+						"source_hidden": false,
+						"outputs_hidden": false
+					},
+					"nteract": {
+						"transient": {
+							"deleting": false
+						}
+					}
+				},
+				"source": [
+					"#Write to controldb\r\n",
+					"import json\r\n",
+					"db_port = 1433\r\n",
+					"linked_service_name = \"LS_SQL_ELTFrameworkDB\"\r\n",
+					"linkedServiceProperties = json.loads(mssparkutils.credentials.getPropertiesAll(linked_service_name))\r\n",
+					"sql_server_name = linkedServiceProperties.get('Endpoint')\r\n",
+					"db_name = linkedServiceProperties.get('Database')\r\n",
+					"access_token = mssparkutils.credentials.getConnectionStringOrCreds(linked_service_name)\r\n",
+					"write_table_name = \"[CTL].[CFG_INGESTION_LOGS]\"\r\n",
+					"\r\n",
+					"try:\r\n",
+					"    df_log.write.format(\"jdbc\") \\\r\n",
+					"        .option(\"url\", \"jdbc:sqlserver://%s:%s\" % (sql_server_name, db_port)) \\\r\n",
+					"        .option(\"dbtable\", write_table_name) \\\r\n",
+					"        .option(\"accessToken\", access_token) \\\r\n",
+					"        .option(\"encrypt\", \"true\") \\\r\n",
+					"        .option(\"databaseName\", db_name) \\\r\n",
+					"        .option(\"hostNameInCertificate\", \"*.database.windows.net\") \\\r\n",
+					"        .mode(\"append\") \\\r\n",
+					"        .save()\r\n",
+					"except ValueError as error :\r\n",
+					"    print(\"MSSQL Connector write failed\", error)\r\n",
+					"\r\n",
+					"print(\"MSSQL Connector write(append) succeeded  \")"
+				],
+				"execution_count": 69
+			},
+			{
+				"cell_type": "markdown",
+				"metadata": {
+					"nteract": {
+						"transient": {
+							"deleting": false
+						}
+					}
+				},
+				"source": [
+					"# Table DimTime: END"
+				]
+			}
+		]
+	}
+}

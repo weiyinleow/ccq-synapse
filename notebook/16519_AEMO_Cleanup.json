@@ -1,0 +1,226 @@
+{
+	"name": "16519_AEMO_Cleanup",
+	"properties": {
+		"folder": {
+			"name": "DataHubBatchScripts/AEMO/AEMO_16519"
+		},
+		"nbformat": 4,
+		"nbformat_minor": 2,
+		"sessionProperties": {
+			"driverMemory": "28g",
+			"driverCores": 4,
+			"executorMemory": "28g",
+			"executorCores": 4,
+			"numExecutors": 2,
+			"conf": {
+				"spark.dynamicAllocation.enabled": "false",
+				"spark.dynamicAllocation.minExecutors": "2",
+				"spark.dynamicAllocation.maxExecutors": "2",
+				"spark.autotune.trackingId": "6b80a325-cac3-45ca-b789-95017368de02"
+			}
+		},
+		"metadata": {
+			"saveOutput": true,
+			"enableDebugMode": false,
+			"kernelspec": {
+				"name": "synapse_pyspark",
+				"display_name": "python"
+			},
+			"language_info": {
+				"name": "python"
+			},
+			"sessionKeepAliveTimeout": 30
+		},
+		"cells": [
+			{
+				"cell_type": "code",
+				"source": [
+					"import json\r\n",
+					"db_port = 1433\r\n",
+					"linked_service_name = \"LS_SQL_ELTFrameworkDB\"\r\n",
+					"db_notebookname= \"AEMO_Bronze\"\r\n",
+					"linkedServiceProperties = json.loads(mssparkutils.credentials.getPropertiesAll(linked_service_name))\r\n",
+					"sql_server_name = linkedServiceProperties.get('Endpoint')\r\n",
+					"db_name = linkedServiceProperties.get('Database')\r\n",
+					"#print(linkedServiceProperties)\r\n",
+					"access_token = mssparkutils.credentials.getConnectionStringOrCreds(linked_service_name)\r\n",
+					"\r\n",
+					"db_query =\"SELECT A.*,B.NotebookParameterId,B.ParameterType,B.Value  FROM [CTL].[CFG_NOTEBOOK] A LEFT JOIN [CTL].[CFG_NOTEBOOK_PARAMETER] B ON A.NotebookId = B.NotebookId\"\r\n",
+					"\r\n",
+					"df = spark.read.format(\"jdbc\") \\\r\n",
+					"    .option(\"url\", \"jdbc:sqlserver://%s:%s\" % (sql_server_name, db_port)) \\\r\n",
+					"    .option(\"query\", db_query) \\\r\n",
+					"    .option(\"accessToken\", access_token) \\\r\n",
+					"    .option(\"encrypt\", \"true\") \\\r\n",
+					"    .option(\"databaseName\", db_name) \\\r\n",
+					"    .option(\"hostNameInCertificate\", \"*.database.windows.net\") \\\r\n",
+					"    .load()\r\n",
+					"\r\n",
+					"df2 = df.where(df.NotebookPath==db_notebookname)"
+				],
+				"execution_count": null
+			},
+			{
+				"cell_type": "code",
+				"metadata": {
+					"jupyter": {
+						"source_hidden": false,
+						"outputs_hidden": false
+					},
+					"nteract": {
+						"transient": {
+							"deleting": false
+						}
+					}
+				},
+				"source": [
+					"#Source DataLake storage details\r\n",
+					"source_storage = df2.where(df2.ParameterType=='source_storage').collect()[0][\"Value\"] #Storage name\r\n",
+					"source_container = df2.where(df2.ParameterType=='source_container').collect()[0][\"Value\"] #Storage container detail\r\n",
+					"source_path = df2.where(df2.ParameterType=='source_path').collect()[0][\"Value\"] #internal folder location in container \"demodata/demo_aemo\"\r\n",
+					"\r\n",
+					"#Destination DataLake storage details\r\n",
+					"destination_storage = df2.where(df2.ParameterType=='destination_storage').collect()[0][\"Value\"] #Storage name\r\n",
+					"destination_container = df2.where(df2.ParameterType=='destination_container').collect()[0][\"Value\"] #raw storage container details\r\n",
+					"destination_path = df2.where(df2.ParameterType=='destination_path').collect()[0][\"Value\"] #raw delta file patch"
+				],
+				"execution_count": null
+			},
+			{
+				"cell_type": "code",
+				"metadata": {
+					"jupyter": {
+						"source_hidden": false,
+						"outputs_hidden": false
+					},
+					"nteract": {
+						"transient": {
+							"deleting": false
+						}
+					}
+				},
+				"source": [
+					"# Display values\r\n",
+					"print(source_storage)\r\n",
+					"print(source_container)\r\n",
+					"print(source_path)\r\n",
+					"print(destination_storage)\r\n",
+					"print(destination_container)\r\n",
+					"print(destination_path)"
+				],
+				"execution_count": null
+			},
+			{
+				"cell_type": "code",
+				"metadata": {
+					"jupyter": {
+						"source_hidden": false,
+						"outputs_hidden": false
+					},
+					"nteract": {
+						"transient": {
+							"deleting": false
+						}
+					}
+				},
+				"source": [
+					"databasename = \"aemo_bronze\"\r\n",
+					"tablename = \"nem12_bronze\"\r\n",
+					"tablename_temp = \"nem12_bronze_temp\"\r\n",
+					"backup_tablename = \"nem12_bronze_16519\""
+				],
+				"execution_count": null
+			},
+			{
+				"cell_type": "markdown",
+				"metadata": {
+					"nteract": {
+						"transient": {
+							"deleting": false
+						}
+					}
+				},
+				"source": [
+					"# Delete nem12_bronze_16519"
+				]
+			},
+			{
+				"cell_type": "code",
+				"metadata": {
+					"jupyter": {
+						"source_hidden": false,
+						"outputs_hidden": false
+					},
+					"nteract": {
+						"transient": {
+							"deleting": false
+						}
+					}
+				},
+				"source": [
+					"# Only execute when you want to delete backup\r\n",
+					"#Drop table and storage folder if exists \r\n",
+					"from py4j.protocol import Py4JJavaError\r\n",
+					"\r\n",
+					"spark.sql(f\"\"\"DROP TABLE IF EXISTS {databasename}.{backup_tablename}\"\"\")\r\n",
+					"\r\n",
+					"try:\r\n",
+					"    raw_output_path = f\"\"\"abfss://{destination_container}@{destination_storage}.dfs.core.windows.net/{destination_path}/{backup_tablename}\"\"\"\r\n",
+					"    mssparkutils.fs.rm(raw_output_path,recurse=True)\r\n",
+					"\r\n",
+					"    print(\"Delete successful\")\r\n",
+					"\r\n",
+					"except Py4JJavaError as error :\r\n",
+					"    if 'org.apache.hadoop.fs.PathNotFoundException' in str (error.java_exception):\r\n",
+					"        print(\"No such file or directory\")"
+				],
+				"execution_count": null
+			},
+			{
+				"cell_type": "markdown",
+				"metadata": {
+					"nteract": {
+						"transient": {
+							"deleting": false
+						}
+					}
+				},
+				"source": [
+					"# Delete nem12_bronze_temp"
+				]
+			},
+			{
+				"cell_type": "code",
+				"metadata": {
+					"jupyter": {
+						"source_hidden": false,
+						"outputs_hidden": false
+					},
+					"nteract": {
+						"transient": {
+							"deleting": false
+						}
+					}
+				},
+				"source": [
+					"# Only execute when you want to delete backup\r\n",
+					"#Drop table and storage folder if exists \r\n",
+					"from py4j.protocol import Py4JJavaError\r\n",
+					"\r\n",
+					"spark.sql(f\"\"\"DROP TABLE IF EXISTS {databasename}.{tablename_temp}\"\"\")\r\n",
+					"\r\n",
+					"try:\r\n",
+					"    raw_output_path = f\"\"\"abfss://{destination_container}@{destination_storage}.dfs.core.windows.net/{destination_path}/{tablename_temp}\"\"\"\r\n",
+					"    mssparkutils.fs.rm(raw_output_path,recurse=True)\r\n",
+					"\r\n",
+					"    print(\"Delete successful\")\r\n",
+					"\r\n",
+					"except Py4JJavaError as error :\r\n",
+					"    if 'org.apache.hadoop.fs.PathNotFoundException' in str (error.java_exception):\r\n",
+					"        print(\"No such file or directory\")"
+				],
+				"execution_count": null
+			}
+		]
+	}
+}

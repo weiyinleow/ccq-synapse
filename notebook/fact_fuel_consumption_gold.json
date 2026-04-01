@@ -1,0 +1,494 @@
+{
+	"name": "fact_fuel_consumption_gold",
+	"properties": {
+		"folder": {
+			"name": "DataHubBatchScripts/GOLD/SustainabilityUseCase"
+		},
+		"nbformat": 4,
+		"nbformat_minor": 2,
+		"bigDataPool": {
+			"referenceName": "JobSparkpool02",
+			"type": "BigDataPoolReference"
+		},
+		"sessionProperties": {
+			"driverMemory": "56g",
+			"driverCores": 8,
+			"executorMemory": "56g",
+			"executorCores": 8,
+			"numExecutors": 2,
+			"conf": {
+				"spark.dynamicAllocation.enabled": "false",
+				"spark.dynamicAllocation.minExecutors": "2",
+				"spark.dynamicAllocation.maxExecutors": "2",
+				"spark.autotune.trackingId": "d2476d53-faf7-4cb6-acb7-b86b30a8509b"
+			}
+		},
+		"metadata": {
+			"saveOutput": true,
+			"enableDebugMode": false,
+			"kernelspec": {
+				"name": "synapse_pyspark",
+				"display_name": "Synapse PySpark"
+			},
+			"language_info": {
+				"name": "python"
+			},
+			"a365ComputeOptions": {
+				"id": "/subscriptions/2e9f823e-dc76-4e8e-b815-c8a4f22d05ff/resourceGroups/CQL-AZUR1-DEVDATAHUB01-RG/providers/Microsoft.Synapse/workspaces/cql-dev-datahub-synapse01/bigDataPools/JobSparkpool02",
+				"name": "JobSparkpool02",
+				"type": "Spark",
+				"endpoint": "https://cql-dev-datahub-synapse01.dev.azuresynapse.net/livyApi/versions/2019-11-01-preview/sparkPools/JobSparkpool02",
+				"auth": {
+					"type": "AAD",
+					"authResource": "https://dev.azuresynapse.net"
+				},
+				"sparkVersion": "3.4",
+				"nodeCount": 10,
+				"cores": 8,
+				"memory": 56,
+				"automaticScaleJobs": false
+			},
+			"sessionKeepAliveTimeout": 30
+		},
+		"cells": [
+			{
+				"cell_type": "code",
+				"source": [
+					"#Imports\n",
+					"import json\n",
+					"\n",
+					"from pyspark.sql.functions import hash\n",
+					"from pyspark.sql import functions as fn\n",
+					"from pyspark.sql.functions import col, concat, lit, to_timestamp,current_timestamp,date_format\n",
+					"from pyspark.sql.functions import sha2, concat_ws\n",
+					"\n",
+					"from pyspark.sql.types import StructType, StructField, StringType, IntegerType, BooleanType,DateType, DoubleType,TimestampType\n",
+					"\n",
+					"from py4j.protocol import Py4JJavaError\n",
+					"\n",
+					"import com.microsoft.spark.sqlanalytics\n",
+					"from com.microsoft.spark.sqlanalytics.Constants import Constants"
+				],
+				"execution_count": 38
+			},
+			{
+				"cell_type": "code",
+				"metadata": {
+					"collapsed": false
+				},
+				"source": [
+					"#Get Parameter from controldb\n",
+					"db_port = 1433\n",
+					"linked_service_name = \"LS_SQL_ELTFrameworkDB\"\n",
+					"lake_db_name = \"gold\"\n",
+					"db_notebookname= \"fact_fuel_consumption_gold\"\n",
+					"linkedServiceProperties = json.loads(mssparkutils.credentials.getPropertiesAll(linked_service_name))\n",
+					"sql_server_name = linkedServiceProperties.get('Endpoint')\n",
+					"db_name = linkedServiceProperties.get('Database')\n",
+					"#print(linkedServiceProperties)\n",
+					"access_token = mssparkutils.credentials.getConnectionStringOrCreds(linked_service_name)\n",
+					"\n",
+					"db_query =\"SELECT A.*,B.NotebookParameterId,B.ParameterType,B.Value  FROM [CTL].[CFG_NOTEBOOK] A LEFT JOIN [CTL].[CFG_NOTEBOOK_PARAMETER] B ON A.NotebookId = B.NotebookId\"\n",
+					"\n",
+					"df = spark.read.format(\"jdbc\") \\\n",
+					"    .option(\"url\", \"jdbc:sqlserver://%s:%s\" % (sql_server_name, db_port)) \\\n",
+					"    .option(\"query\", db_query) \\\n",
+					"    .option(\"accessToken\", access_token) \\\n",
+					"    .option(\"encrypt\", \"true\") \\\n",
+					"    .option(\"databaseName\", db_name) \\\n",
+					"    .option(\"hostNameInCertificate\", \"*.database.windows.net\") \\\n",
+					"    .load()\n",
+					"\n",
+					"df2 = df.where(df.NotebookPath==db_notebookname)\n",
+					"#display(df2)"
+				],
+				"execution_count": 39
+			},
+			{
+				"cell_type": "code",
+				"source": [
+					"#Destination DataLake Storage Details\n",
+					"destination_storage = df2.where(df2.ParameterType=='destination_storage').collect()[0][\"Value\"]\n",
+					"destination_container = df2.where(df2.ParameterType=='destination_container').collect()[0][\"Value\"]\n",
+					"destination_path = df2.where(df2.ParameterType=='destination_path').collect()[0][\"Value\"]\n",
+					"\n",
+					"#Get Current Date\n",
+					"Date_Collection = spark.sql(\"select current_timestamp() AS Current,(current_timestamp() + interval '-1' second) AS EndDate\").collect()\n",
+					"Gold_LoadDate = Date_Collection[0]['Current']\n",
+					"Gold_UpdateEndDate = Date_Collection[0]['EndDate']\n",
+					"\n",
+					"#Synapse Dedicated Server detials\n",
+					"SynapseDedicatedServer = df2.where(df2.ParameterType=='destination_storage').collect()[0]['SynapseDedicatedServer'] \n",
+					"TempFolder = df2.where(df2.ParameterType=='destination_storage').collect()[0]['TempFolder']\n",
+					"SynapseDedicatedDatabase = df2.where(df2.ParameterType=='destination_storage').collect()[0]['SynapseDedicatedDatabase']"
+				],
+				"execution_count": 40
+			},
+			{
+				"cell_type": "markdown",
+				"metadata": {
+					"nteract": {
+						"transient": {
+							"deleting": false
+						}
+					}
+				},
+				"source": [
+					"# Table: FactFuelConsumption: START"
+				]
+			},
+			{
+				"cell_type": "code",
+				"source": [
+					"#UTILS: Set table name\n",
+					"\n",
+					"#drop_tablename=\"fact_fuel_consumption\"\n",
+					"\n",
+					"#UTILS: Drop table\n",
+					"\n",
+					"#spark.sql(f\"\"\"DROP TABLE IF EXISTS {lake_db_name}.{drop_tablename}\"\"\")\n",
+					"#raw_output_path = f\"abfss://{destination_container}@{destination_storage}.dfs.core.windows.net/{destination_path}/{drop_tablename}\"\n",
+					"#mssparkutils.fs.rm(raw_output_path,recurse=True)"
+				],
+				"execution_count": 41
+			},
+			{
+				"cell_type": "code",
+				"source": [
+					"#Set table name\n",
+					"db_tablename=\"fact_fuel_consumption\"\n",
+					"tablename=\"FactFuelConsumption\""
+				],
+				"execution_count": 42
+			},
+			{
+				"cell_type": "code",
+				"source": [
+					"#Create Gold Table\n",
+					"spark.sql(f\"\"\"CREATE DATABASE IF NOT EXISTS {lake_db_name};\"\"\")\n",
+					"spark.sql(f\"\"\"\n",
+					"CREATE TABLE IF NOT EXISTS {lake_db_name}.{db_tablename}\n",
+					"(\n",
+					"\tFactFuelConsumptionKey STRING,\n",
+					"\tDimMonthStartDateKey INT,\n",
+					"\tDimSiteKey STRING,\n",
+					"\tDimUsageCategoryKey STRING,\n",
+					"\tDimEmissionScopeKey STRING,\n",
+					"\tDieselTransportationConsumptionVolumeLitre DECIMAL(20,6),\n",
+					"\tDieselStationaryConsumptionVolumeLitre DECIMAL(20,6),\n",
+					"\tPetrolTransportationConsumptionVolumeLitre DECIMAL(20,6),\n",
+					"\tPetrolStationaryConsumptionVolumeLitre DECIMAL(20,6),\n",
+					"\tDieselTransportationEmissionsTCO2e DECIMAL(20,6),\n",
+					"\tDieselStationaryEmissionsTCO2e DECIMAL(20,6),\n",
+					"\tPetrolTransportationEmissionsTCO2e DECIMAL(20,6),\n",
+					"\tPetrolStationaryEmissionsTCO2e DECIMAL(20,6),\n",
+					"\tCDCLoadDate TIMESTAMP,\n",
+					"\tCDCStartDate TIMESTAMP,\n",
+					"\tCDCEndDate TIMESTAMP,\n",
+					"\tCDCOps INT,\n",
+					"\tCDCCurrentFlag BOOLEAN,\n",
+					"\tHashDiff STRING\n",
+					")\n",
+					"USING delta\n",
+					"LOCATION 'abfss://{destination_container}@{destination_storage}.dfs.core.windows.net/{destination_path}/{db_tablename}'\n",
+					"\"\"\")"
+				],
+				"execution_count": 43
+			},
+			{
+				"cell_type": "code",
+				"source": [
+					"# Collect emission factors from reference_data\n",
+					"df_emission_factors = spark.sql(f\"\"\"\n",
+					"                        SELECT  \n",
+					"                            ref.Code AS Code,\n",
+					"                            ref.NumericValue AS NumericValue\n",
+					"                        FROM silver.reference_data ref\n",
+					"                        WHERE ref.CDCCurrentFlag = 1 AND Dataset = 'EmissionFactor'\n",
+					"                    \"\"\")\n",
+					"\n",
+					"emission_factor_stationary_petrol = df_emission_factors.where(df_emission_factors.Code=='EF2').collect()[0][\"NumericValue\"]\n",
+					"emission_factor_stationary_diesel = df_emission_factors.where(df_emission_factors.Code=='EF3').collect()[0][\"NumericValue\"]\n",
+					"emission_factor_transportation_petrol = df_emission_factors.where(df_emission_factors.Code=='EF5').collect()[0][\"NumericValue\"]\n",
+					"emission_factor_transportation_diesel = df_emission_factors.where(df_emission_factors.Code=='EF6').collect()[0][\"NumericValue\"]\n",
+					"#print(emission_factor_stationary_petrol)\n",
+					"#print(emission_factor_stationary_diesel)\n",
+					"#print(emission_factor_transportation_petrol)\n",
+					"#print(emission_factor_transportation_diesel)"
+				],
+				"execution_count": 44
+			},
+			{
+				"cell_type": "code",
+				"metadata": {
+					"collapsed": false
+				},
+				"source": [
+					"# Get & combine records\n",
+					"source_sql_df = spark.sql(f\"\"\"  \n",
+					"                        SELECT\n",
+					"                            DimMonthStartDateKey,\n",
+					"                            DimSiteKey,\n",
+					"                            DimUsageCategoryKey,\n",
+					"                            DimEmissionScopeKey,\n",
+					"                            DieselTransportationConsumptionVolumeLitre, \n",
+					"                            DieselStationaryConsumptionVolumeLitre, \n",
+					"                            PetrolTransportationConsumptionVolumeLitre, \n",
+					"                            PetrolStationaryConsumptionVolumeLitre,\n",
+					"                            ((DieselTransportationConsumptionVolumeLitre / 1000) * ({emission_factor_transportation_diesel} * 38.6 / 1000)) AS DieselTransportationEmissionsTCO2e,\n",
+					"                            ((DieselStationaryConsumptionVolumeLitre / 1000) * ({emission_factor_stationary_diesel} * 38.6 / 1000))  AS DieselStationaryEmissionsTCO2e,\n",
+					"                            ((PetrolTransportationConsumptionVolumeLitre / 1000) * ({emission_factor_transportation_petrol} * 34.2 / 1000)) AS PetrolTransportationEmissionsTCO2e,\n",
+					"                            ((PetrolStationaryConsumptionVolumeLitre / 1000) * ({emission_factor_stationary_petrol} * 34.2 / 1000))  AS PetrolStationaryEmissionsTCO2e\n",
+					"\n",
+					"                        FROM\n",
+					"                        (SELECT\n",
+					"                            CONCAT(CAST(CAST(d.DateId / 100 AS INT) AS VARCHAR(6)), '01') AS DimMonthStartDateKey,\n",
+					"                            s.DimSiteKey AS DimSiteKey,\n",
+					"                            u.DimUsageCategoryKey AS DimUsageCategoryKey,\n",
+					"                            e.DimEmissionScopeKey AS DimEmissionScopeKey,\n",
+					"                            SUM(CASE WHEN p.StandardisedProduct = 'Diesel' AND p.UsageCategory = 'Transportation' THEN p.Quantity ELSE 0 END) AS DieselTransportationConsumptionVolumeLitre, \n",
+					"                            SUM(CASE WHEN p.StandardisedProduct = 'Diesel' AND p.UsageCategory = 'Stationary' THEN p.Quantity ELSE 0 END) AS DieselStationaryConsumptionVolumeLitre, \n",
+					"                            SUM(CASE WHEN p.StandardisedProduct = 'Unleaded Petrol' AND p.UsageCategory = 'Transportation' THEN p.Quantity ELSE 0 END) AS PetrolTransportationConsumptionVolumeLitre, \n",
+					"                            SUM(CASE WHEN p.StandardisedProduct = 'Unleaded Petrol' AND p.UsageCategory = 'Stationary' THEN p.Quantity ELSE 0 END) AS PetrolStationaryConsumptionVolumeLitre\n",
+					"                        FROM\n",
+					"                        (SELECT \n",
+					"                            'Scope 1' AS EmissionScope,\n",
+					"                            TransactionEffectiveDate AS TransactionEffectiveDate,\n",
+					"                            CASE WHEN SiteCode IS NULL THEN 'UNK' ELSE SiteCode END AS SiteCode,\n",
+					"                            StandardisedProduct AS StandardisedProduct,\n",
+					"                            SUM(Quantity) AS Quantity,\n",
+					"                            UsageCategory AS UsageCategory\n",
+					"\n",
+					"                        FROM silver.fuel_transactions \n",
+					"\n",
+					"                        WHERE CDCCurrentFlag = 1\n",
+					"\n",
+					"                        GROUP BY\n",
+					"                            TransactionEffectiveDate,\n",
+					"                            SiteCode,\n",
+					"                            StandardisedProduct,\n",
+					"                            UsageCategory\n",
+					"                        ) p\n",
+					"\n",
+					"                        JOIN gold.dim_site s ON s.SiteCode = p.SiteCode\n",
+					"                        JOIN dimtables_gold.dimdate d ON d.Date = p.TransactionEffectiveDate\n",
+					"                        JOIN gold.dim_usage_category u ON u.UsageCategoryName = p.UsageCategory\n",
+					"                        JOIN gold.dim_emission_scope e ON e.EmissionScopeDescription = p.EmissionScope\n",
+					"                        \n",
+					"                        GROUP BY \n",
+					"                            DimMonthStartDateKey,\n",
+					"                            DimSiteKey,\n",
+					"                            DimUsageCategoryKey,\n",
+					"                            DimEmissionScopeKey)\n",
+					"                    \"\"\")\n",
+					"#display(source_sql_df)"
+				],
+				"execution_count": 45
+			},
+			{
+				"cell_type": "code",
+				"metadata": {
+					"collapsed": false
+				},
+				"source": [
+					"# Convert columns to STRING before creating HashDiff\n",
+					"source_sql_df = source_sql_df.withColumn(\"CleanDieselTransportationConsumptionVolumeLitre\", col(\"DieselTransportationConsumptionVolumeLitre\").cast(\"string\"))\n",
+					"source_sql_df = source_sql_df.withColumn(\"CleanDieselStationaryConsumptionVolumeLitre\", col(\"DieselStationaryConsumptionVolumeLitre\").cast(\"string\"))\n",
+					"source_sql_df = source_sql_df.withColumn(\"CleanPetrolTransportationConsumptionVolumeLitre\", col(\"PetrolTransportationConsumptionVolumeLitre\").cast(\"string\"))\n",
+					"source_sql_df = source_sql_df.withColumn(\"CleanPetrolStationaryConsumptionVolumeLitre\", col(\"PetrolStationaryConsumptionVolumeLitre\").cast(\"string\"))\n",
+					"source_sql_df = source_sql_df.withColumn(\"CleanDieselTransportationEmissionsTCO2e\", col(\"DieselTransportationEmissionsTCO2e\").cast(\"string\"))\n",
+					"source_sql_df = source_sql_df.withColumn(\"CleanDieselStationaryEmissionsTCO2e\", col(\"DieselStationaryEmissionsTCO2e\").cast(\"string\"))\n",
+					"source_sql_df = source_sql_df.withColumn(\"CleanPetrolTransportationEmissionsTCO2e\", col(\"PetrolTransportationEmissionsTCO2e\").cast(\"string\"))\n",
+					"source_sql_df = source_sql_df.withColumn(\"CleanPetrolStationaryEmissionsTCO2e\", col(\"PetrolStationaryEmissionsTCO2e\").cast(\"string\"))\n",
+					"\n",
+					"\n",
+					"source_sql_df = source_sql_df.withColumn(\"FactFuelConsumptionKey\", sha2(concat_ws(\"||\", \"DimSiteKey\", \"DimMonthStartDateKey\", \"DimUsageCategoryKey\", \"DimEmissionScopeKey\"), 256))\n",
+					"source_sql_df = source_sql_df.withColumn(\"HashDiff\", sha2(concat_ws(\"||\", \"CleanDieselTransportationConsumptionVolumeLitre\", \"CleanDieselStationaryConsumptionVolumeLitre\", \"CleanPetrolTransportationConsumptionVolumeLitre\", \"CleanPetrolStationaryConsumptionVolumeLitre\", \"CleanDieselTransportationEmissionsTCO2e\", \"CleanDieselStationaryEmissionsTCO2e\", \"CleanPetrolTransportationEmissionsTCO2e\", \"CleanPetrolStationaryEmissionsTCO2e\"), 256))\n",
+					"\n",
+					"# Add CDC columns\n",
+					"source_sql_df = source_sql_df.withColumn(\"CDCLoadDate\", to_timestamp(lit(Gold_LoadDate),'yyyy-MM-dd HH:mm:ss'))\n",
+					"source_sql_df = source_sql_df.withColumn(\"CDCStartDate\", to_timestamp(lit(Gold_LoadDate), 'yyyy-MM-dd HH:mm:ss'))\n",
+					"source_sql_df = source_sql_df.withColumn(\"CDCEndDate\", to_timestamp(lit(\"9999-12-31 23:59:59\"), 'yyyy-MM-dd HH:mm:ss'))\n",
+					"source_sql_df = source_sql_df.withColumn(\"CDCCurrentFlag\", lit(1))\n",
+					"source_sql_df = source_sql_df.withColumn(\"CDCOps\", lit(1))\n",
+					"\n",
+					"#display(source_sql_df)"
+				],
+				"execution_count": 46
+			},
+			{
+				"cell_type": "code",
+				"source": [
+					"# Row count parameters\n",
+					"Gold_Insert_Pre=spark.sql(f\"\"\" SELECT COUNT(*) FROM {lake_db_name}.{db_tablename} WHERE CDCOps = 1 \"\"\").collect()[0][0]\n",
+					"Gold_Update_Pre=spark.sql(f\"\"\" SELECT COUNT(*) FROM {lake_db_name}.{db_tablename} WHERE CDCOps = 2 \"\"\").collect()[0][0]\n",
+					"Gold_Delete_Pre=spark.sql(f\"\"\" SELECT COUNT(*) FROM {lake_db_name}.{db_tablename} WHERE CDCOps = 0 \"\"\").collect()[0][0]"
+				],
+				"execution_count": 47
+			},
+			{
+				"cell_type": "code",
+				"source": [
+					"# Create a temporary view of the dataframe\n",
+					"source_sql_df.createOrReplaceTempView(\"temp_view\")"
+				],
+				"execution_count": 48
+			},
+			{
+				"cell_type": "code",
+				"source": [
+					"# SCD2 logic\n",
+					"# Use the merge operation to update the target table\n",
+					"spark.sql(f\"\"\"\n",
+					"    MERGE INTO {lake_db_name}.{db_tablename} t\n",
+					"    USING temp_view s\n",
+					"    ON t.FactFuelConsumptionKey = s.FactFuelConsumptionKey AND t.CDCCurrentFlag == true\n",
+					"    WHEN MATCHED AND t.HashDiff <> s.HashDiff THEN\n",
+					"      UPDATE SET t.CDCEndDate = '{Gold_UpdateEndDate}',\n",
+					"                 t.CDCCurrentFlag = false,\n",
+					"                 t.CDCOps = s.CDCOps + 1\n",
+					"    WHEN NOT MATCHED THEN\n",
+					"      INSERT (FactFuelConsumptionKey, DimSiteKey, DimMonthStartDateKey, DimUsageCategoryKey, DimEmissionScopeKey, DieselTransportationConsumptionVolumeLitre, DieselStationaryConsumptionVolumeLitre, PetrolTransportationConsumptionVolumeLitre, PetrolStationaryConsumptionVolumeLitre, DieselTransportationEmissionsTCO2e, DieselStationaryEmissionsTCO2e, PetrolTransportationEmissionsTCO2e, PetrolStationaryEmissionsTCO2e, CDCLoadDate, CDCStartDate, CDCEndDate, CDCOps, CDCCurrentFlag, HashDiff)\n",
+					"      VALUES (s.FactFuelConsumptionKey, s.DimSiteKey, s.DimMonthStartDateKey, s.DimUsageCategoryKey, s.DimEmissionScopeKey, s.DieselTransportationConsumptionVolumeLitre, s.DieselStationaryConsumptionVolumeLitre, s.PetrolTransportationConsumptionVolumeLitre, s.PetrolStationaryConsumptionVolumeLitre, s.DieselTransportationEmissionsTCO2e, s.DieselStationaryEmissionsTCO2e, s.PetrolTransportationEmissionsTCO2e, s.PetrolStationaryEmissionsTCO2e, s.CDCLoadDate, s.CDCStartDate, s.CDCEndDate, s.CDCOps, s.CDCCurrentFlag, s.HashDiff)\n",
+					"\"\"\")\n",
+					"\n",
+					"# Use the merge operation to Insert updated record \n",
+					"spark.sql(f\"\"\"\n",
+					"    MERGE INTO {lake_db_name}.{db_tablename} t\n",
+					"    USING temp_view s\n",
+					"    ON t.FactFuelConsumptionKey = s.FactFuelConsumptionKey AND t.CDCCurrentFlag == true\n",
+					"    WHEN MATCHED AND t.HashDiff <> s.HashDiff THEN\n",
+					"      UPDATE SET t.CDCEndDate = '{Gold_UpdateEndDate}',\n",
+					"                 t.CDCCurrentFlag = false,\n",
+					"                 t.CDCOps = s.CDCOps + 1\n",
+					"    WHEN NOT MATCHED THEN\n",
+					"      INSERT (FactFuelConsumptionKey, DimSiteKey, DimMonthStartDateKey, DimUsageCategoryKey, DimEmissionScopeKey, DieselTransportationConsumptionVolumeLitre, DieselStationaryConsumptionVolumeLitre, PetrolTransportationConsumptionVolumeLitre, PetrolStationaryConsumptionVolumeLitre, DieselTransportationEmissionsTCO2e, DieselStationaryEmissionsTCO2e, PetrolTransportationEmissionsTCO2e, PetrolStationaryEmissionsTCO2e, CDCLoadDate, CDCStartDate, CDCEndDate, CDCOps, CDCCurrentFlag, HashDiff)\n",
+					"      VALUES (s.FactFuelConsumptionKey, s.DimSiteKey, s.DimMonthStartDateKey, s.DimUsageCategoryKey, s.DimEmissionScopeKey, s.DieselTransportationConsumptionVolumeLitre, s.DieselStationaryConsumptionVolumeLitre, s.PetrolTransportationConsumptionVolumeLitre, s.PetrolStationaryConsumptionVolumeLitre, s.DieselTransportationEmissionsTCO2e, s.DieselStationaryEmissionsTCO2e, s.PetrolTransportationEmissionsTCO2e, s.PetrolStationaryEmissionsTCO2e, s.CDCLoadDate, s.CDCStartDate, s.CDCEndDate, s.CDCOps, s.CDCCurrentFlag, s.HashDiff)\n",
+					"\"\"\")"
+				],
+				"execution_count": 49
+			},
+			{
+				"cell_type": "code",
+				"source": [
+					"#Row count parameters\n",
+					"Gold_Insert_Post=spark.sql(f\"\"\" SELECT COUNT(*) FROM {lake_db_name}.{db_tablename} WHERE CDCOps = 1 \"\"\").collect()[0][0]\n",
+					"Gold_Update_Post=spark.sql(f\"\"\" SELECT COUNT(*) FROM {lake_db_name}.{db_tablename} WHERE CDCOps = 2 \"\"\").collect()[0][0]\n",
+					"Gold_Delete_Post=spark.sql(f\"\"\" SELECT COUNT(*) FROM {lake_db_name}.{db_tablename} WHERE CDCOps = 0 \"\"\").collect()[0][0]\n",
+					"Gold_TotalRowCount_Post=spark.sql(f\"\"\" SELECT COUNT(*) FROM {lake_db_name}.{db_tablename}\"\"\").collect()[0][0]\n",
+					"Gold_ActiveRecord_Post=spark.sql(f\"\"\" SELECT COUNT(*) FROM {lake_db_name}.{db_tablename} WHERE CDCCurrentFlag = true \"\"\").collect()[0][0]"
+				],
+				"execution_count": 50
+			},
+			{
+				"cell_type": "code",
+				"source": [
+					"#Row calculation\n",
+					"Gold_Update = Gold_Update_Post - Gold_Update_Pre\n",
+					"Gold_Insert = (Gold_Insert_Post - Gold_Insert_Pre) + Gold_Update\n",
+					"Gold_Delete = Gold_Delete_Post - Gold_Delete_Pre\n",
+					"Gold_ActiveRows = Gold_ActiveRecord_Post \n",
+					"Gold_TotalRows = Gold_TotalRowCount_Post"
+				],
+				"execution_count": 51
+			},
+			{
+				"cell_type": "code",
+				"source": [
+					"log_data = [(db_notebookname,db_tablename,Gold_LoadDate,Gold_Insert,Gold_Update,Gold_Delete,Gold_ActiveRows,Gold_TotalRows)]\n",
+					"print(log_data)\n",
+					"log_columns = ['PIPELINE_NAME', 'TABLE_NAME', 'INGEST_DATETIME', 'INSERT','UPDATE','DELETE','ACTIVE_ROWS','TOTAL_ROWS']\n",
+					"df_log = spark.createDataFrame(log_data, log_columns)"
+				],
+				"execution_count": 52
+			},
+			{
+				"cell_type": "code",
+				"source": [
+					"#Write to controldb\n",
+					"db_port = 1433\n",
+					"linked_service_name = \"LS_SQL_ELTFrameworkDB\"\n",
+					"linkedServiceProperties = json.loads(mssparkutils.credentials.getPropertiesAll(linked_service_name))\n",
+					"sql_server_name = linkedServiceProperties.get('Endpoint')\n",
+					"db_name = linkedServiceProperties.get('Database')\n",
+					"access_token = mssparkutils.credentials.getConnectionStringOrCreds(linked_service_name)\n",
+					"write_table_name = \"[CTL].[CFG_INGESTION_LOGS]\"\n",
+					"\n",
+					"try:\n",
+					"    df_log.write.format(\"jdbc\") \\\n",
+					"        .option(\"url\", \"jdbc:sqlserver://%s:%s\" % (sql_server_name, db_port)) \\\n",
+					"        .option(\"dbtable\", write_table_name) \\\n",
+					"        .option(\"accessToken\", access_token) \\\n",
+					"        .option(\"encrypt\", \"true\") \\\n",
+					"        .option(\"databaseName\", db_name) \\\n",
+					"        .option(\"hostNameInCertificate\", \"*.database.windows.net\") \\\n",
+					"        .mode(\"append\") \\\n",
+					"        .save()\n",
+					"except ValueError as error :\n",
+					"    print(\"MSSQL Connector write failed\", error)\n",
+					"\n",
+					"print(\"MSSQL Connector write(append) succeeded  \")"
+				],
+				"execution_count": 53
+			},
+			{
+				"cell_type": "code",
+				"metadata": {
+					"collapsed": false
+				},
+				"source": [
+					"gold_df = spark.sql(f\"\"\"\n",
+					"SELECT \n",
+					"    FactFuelConsumptionKey,\n",
+					"\tDimMonthStartDateKey,\n",
+					"\tDimSiteKey,\n",
+					"\tDimUsageCategoryKey,\n",
+					"\tDimEmissionScopeKey,\n",
+					"\tDieselTransportationConsumptionVolumeLitre,\n",
+					"\tDieselStationaryConsumptionVolumeLitre,\n",
+					"\tPetrolTransportationConsumptionVolumeLitre,\n",
+					"\tPetrolStationaryConsumptionVolumeLitre,\n",
+					"\tDieselTransportationEmissionsTCO2e,\n",
+					"\tDieselStationaryEmissionsTCO2e,\n",
+					"\tPetrolTransportationEmissionsTCO2e,\n",
+					"\tPetrolStationaryEmissionsTCO2e,\n",
+					"\tCDCLoadDate,\n",
+					"\tCDCStartDate,\n",
+					"\tCDCEndDate,\n",
+					"\tCDCOps,\n",
+					"\tCDCCurrentFlag\n",
+					"FROM\n",
+					"    gold.fact_fuel_consumption\n",
+					"\"\"\")\n",
+					"#display(gold_df)"
+				],
+				"execution_count": 54
+			},
+			{
+				"cell_type": "code",
+				"source": [
+					"# Configure and submit the request to write to Synapse Dedicated SQL Pool\n",
+					"(gold_df.write\n",
+					".option(Constants.SERVER, f\"\"\"{SynapseDedicatedServer}\"\"\")\n",
+					".option(Constants.TEMP_FOLDER, (f\"\"\"abfss://temp@{TempFolder}/{tablename}_staging\"\"\"))\n",
+					".mode(\"overwrite\")\n",
+					".synapsesql(f\"\"\"{SynapseDedicatedDatabase}.dbo.{tablename}\"\"\"))"
+				],
+				"execution_count": 55
+			},
+			{
+				"cell_type": "markdown",
+				"metadata": {
+					"nteract": {
+						"transient": {
+							"deleting": false
+						}
+					}
+				},
+				"source": [
+					"# Table: FactFuelConsumption: END"
+				]
+			}
+		]
+	}
+}

@@ -1,0 +1,1672 @@
+{
+	"name": "AEMO_MSATS_Silver",
+	"properties": {
+		"folder": {
+			"name": "DataHubBatchScripts/AEMO"
+		},
+		"nbformat": 4,
+		"nbformat_minor": 2,
+		"bigDataPool": {
+			"referenceName": "JobSparkpool03",
+			"type": "BigDataPoolReference"
+		},
+		"sessionProperties": {
+			"driverMemory": "112g",
+			"driverCores": 16,
+			"executorMemory": "112g",
+			"executorCores": 16,
+			"numExecutors": 1,
+			"conf": {
+				"spark.dynamicAllocation.enabled": "true",
+				"spark.dynamicAllocation.minExecutors": "1",
+				"spark.dynamicAllocation.maxExecutors": "5",
+				"spark.autotune.trackingId": "aa999ad8-8c2e-4ec5-8251-a095836dae46"
+			}
+		},
+		"metadata": {
+			"saveOutput": true,
+			"enableDebugMode": false,
+			"kernelspec": {
+				"name": "synapse_pyspark",
+				"display_name": "Synapse PySpark"
+			},
+			"language_info": {
+				"name": "python"
+			},
+			"a365ComputeOptions": {
+				"id": "/subscriptions/2e9f823e-dc76-4e8e-b815-c8a4f22d05ff/resourceGroups/CQL-AZUR1-DEVDATAHUB01-RG/providers/Microsoft.Synapse/workspaces/cql-dev-datahub-synapse01/bigDataPools/JobSparkpool03",
+				"name": "JobSparkpool03",
+				"type": "Spark",
+				"endpoint": "https://cql-dev-datahub-synapse01.dev.azuresynapse.net/livyApi/versions/2019-11-01-preview/sparkPools/JobSparkpool03",
+				"auth": {
+					"type": "AAD",
+					"authResource": "https://dev.azuresynapse.net"
+				},
+				"sparkVersion": "3.4",
+				"nodeCount": 3,
+				"cores": 16,
+				"memory": 112,
+				"automaticScaleJobs": true
+			},
+			"sessionKeepAliveTimeout": 30
+		},
+		"cells": [
+			{
+				"cell_type": "code",
+				"source": [
+					"msats_nmi_location_23516 = False"
+				],
+				"execution_count": 86
+			},
+			{
+				"cell_type": "code",
+				"source": [
+					"%run \"DataHubBatchScripts/DEVELOPMENT_TOOLS/get_feature_flags\""
+				],
+				"execution_count": 87
+			},
+			{
+				"cell_type": "code",
+				"source": [
+					"# Feature Flag (msats_nmi_location_23516) check in the Unify database.\n",
+					"try:\n",
+					"    msats_nmi_location_23516 = df_feature_flags.where(\"FlagName = 'msats_nmi_location_23516'\").collect()[0][\"FlagState\"]\n",
+					"except Exception as e:\n",
+					"    print(e) # printing error output in case unexpected errors occur with the above"
+				],
+				"execution_count": null
+			},
+			{
+				"cell_type": "code",
+				"source": [
+					"#Imports\n",
+					"import json\n",
+					"\n",
+					"from pyspark.sql.functions import hash\n",
+					"from pyspark.sql import functions as fn\n",
+					"from pyspark.sql.functions import col, concat, lit, to_timestamp,current_timestamp,date_format,from_utc_timestamp\n",
+					"from pyspark.sql.functions import sha2, concat_ws\n",
+					"\n",
+					"from pyspark.sql.types import StructType, StructField, StringType, IntegerType, BooleanType,DateType, DoubleType,TimestampType\n",
+					"\n",
+					"from py4j.protocol import Py4JJavaError"
+				],
+				"execution_count": 88
+			},
+			{
+				"cell_type": "code",
+				"source": [
+					"#Get Parameters from controldb\n",
+					"db_port = 1433\n",
+					"linked_service_name = \"LS_SQL_ELTFrameworkDB\"\n",
+					"db_notebookname= \"AEMO_MSATS_Silver\"\n",
+					"lake_db_name = \"aemo_silver\"\n",
+					"linkedServiceProperties = json.loads(mssparkutils.credentials.getPropertiesAll(linked_service_name))\n",
+					"sql_server_name = linkedServiceProperties.get('Endpoint')\n",
+					"db_name = linkedServiceProperties.get('Database')\n",
+					"#print(linkedServiceProperties)\n",
+					"access_token = mssparkutils.credentials.getConnectionStringOrCreds(linked_service_name)\n",
+					"\n",
+					"#Get load meta from controldb\n",
+					"\n",
+					"db_query =\"SELECT A.*,B.NotebookParameterId,B.ParameterType,B.Value  FROM [CTL].[CFG_NOTEBOOK] A LEFT JOIN [CTL].[CFG_NOTEBOOK_PARAMETER] B ON A.NotebookId = B.NotebookId\"\n",
+					"\n",
+					"df = spark.read.format(\"jdbc\") \\\n",
+					"    .option(\"url\", \"jdbc:sqlserver://%s:%s\" % (sql_server_name, db_port)) \\\n",
+					"    .option(\"query\", db_query) \\\n",
+					"    .option(\"accessToken\", access_token) \\\n",
+					"    .option(\"encrypt\", \"true\") \\\n",
+					"    .option(\"databaseName\", db_name) \\\n",
+					"    .option(\"hostNameInCertificate\", \"*.database.windows.net\") \\\n",
+					"    .load()\n",
+					"\n",
+					"#Join cfg_notebook and cfg_notebook_parameter tables to retrieve source & target meta from controldb\n",
+					"\n",
+					"df2 = df.where(df.NotebookPath==db_notebookname) "
+				],
+				"execution_count": 89
+			},
+			{
+				"cell_type": "code",
+				"source": [
+					"#Destination DataLake storage details\n",
+					"destination_storage = df2.where(df2.ParameterType=='destination_storage').collect()[0][\"Value\"] #Storage name\n",
+					"destination_container = df2.where(df2.ParameterType=='destination_container').collect()[0][\"Value\"] #raw storage container details\n",
+					"destination_path = df2.where(df2.ParameterType=='destination_path').collect()[0][\"Value\"] #raw delta file path\n",
+					"\n",
+					"#Get Current Date\n",
+					"Date_Collection = spark.sql(\"select current_timestamp() AS Current,(current_timestamp() + interval '-1' second) AS EndDate\").collect()\n",
+					"Silver_LoadDate = Date_Collection[0]['Current']\n",
+					"Silver_UpdateEndDate = Date_Collection[0]['EndDate']"
+				],
+				"execution_count": 90
+			},
+			{
+				"cell_type": "markdown",
+				"metadata": {
+					"nteract": {
+						"transient": {
+							"deleting": false
+						}
+					}
+				},
+				"source": [
+					"# Display values\n",
+					"print(destination_storage)\n",
+					"print(destination_container)\n",
+					"print(destination_path)"
+				]
+			},
+			{
+				"cell_type": "code",
+				"source": [
+					"# Create AEMO Dir if it does not exist\n",
+					"dirs_in_silver =  [f.name for f in mssparkutils.fs.ls(f\"abfss://{destination_container}@{destination_storage}.dfs.core.windows.net/\")]\n",
+					"if \"AEMO\" not in dirs_in_silver:\n",
+					"    mssparkutils.fs.mkdirs(f\"abfss://{destination_container}@{destination_storage}.dfs.core.windows.net/AEMO\")"
+				],
+				"execution_count": 91
+			},
+			{
+				"cell_type": "code",
+				"source": [
+					"# Create MSATS Dir if it does not exist \n",
+					"dirs_in_aemo =  [f.name for f in mssparkutils.fs.ls(f\"abfss://{destination_container}@{destination_storage}.dfs.core.windows.net/AEMO\")]\n",
+					"\n",
+					"if \"MSATS\" not in dirs_in_aemo:\n",
+					"    mssparkutils.fs.mkdirs(f\"abfss://{destination_container}@{destination_storage}.dfs.core.windows.net/AEMO/MSATS\")   "
+				],
+				"execution_count": 92
+			},
+			{
+				"cell_type": "markdown",
+				"metadata": {
+					"nteract": {
+						"transient": {
+							"deleting": false
+						}
+					}
+				},
+				"source": [
+					"#  Table: **nmi_loss_factor**: START"
+				]
+			},
+			{
+				"cell_type": "code",
+				"source": [
+					"#Set table name\n",
+					"db_tablename=\"nmi_loss_factor\"\n",
+					"Bronze_tablename=\"msats_nmi_data\"\n",
+					"Bronze_notebookname=\"aemo_bronze\""
+				],
+				"execution_count": 93
+			},
+			{
+				"cell_type": "code",
+				"metadata": {
+					"ms_comments": []
+				},
+				"source": [
+					"#Create Bronze Table\n",
+					"spark.sql(f\"\"\"CREATE DATABASE IF NOT EXISTS {lake_db_name};\"\"\")\n",
+					"spark.sql(f\"\"\"\n",
+					"CREATE TABLE IF NOT EXISTS {lake_db_name}.{db_tablename}\n",
+					"(\n",
+					"\tParticipantId STRING,\n",
+					"\tSequenceNumber INT,\n",
+					"\tCreationDate TIMESTAMP,\n",
+					"\tCreationDate_D TIMESTAMP,\n",
+					"\tMaintenanceDate TIMESTAMP,\n",
+					"\tMaintenanceDate_D TIMESTAMP,\n",
+					"\tRowStatus STRING,\n",
+					"\tValidFrom TIMESTAMP,\n",
+					"\tValidFrom_D TIMESTAMP,\n",
+					"\tValidTo TIMESTAMP,\n",
+					"\tValidTo_D TIMESTAMP,\n",
+					"\tNMI STRING,\n",
+					"\tNMIHashId STRING,\n",
+					"\tTNI STRING,\n",
+					"\tDLFCode STRING,\n",
+					"\tStatus STRING,\n",
+					"\tFileName STRING,\n",
+					"    CDCLoadDate TIMESTAMP,\n",
+					"    CDCStartDate TIMESTAMP,\n",
+					"    CDCEndDate TIMESTAMP,\n",
+					"    CDCOps INT,\n",
+					"    CDCCurrentFlag BOOLEAN,\n",
+					"    HashKey STRING,\n",
+					"    HashDiff STRING  \n",
+					")\n",
+					"USING delta\n",
+					"LOCATION 'abfss://{destination_container}@{destination_storage}.dfs.core.windows.net/{destination_path}/{db_tablename}'\n",
+					"\"\"\")"
+				],
+				"execution_count": 94
+			},
+			{
+				"cell_type": "code",
+				"source": [
+					"# Row count parameters\n",
+					"Silver_Insert_Pre=spark.sql(f\"\"\" SELECT COUNT(*) FROM {lake_db_name}.{db_tablename} WHERE CDCOps = 1 \"\"\").collect()[0][0]\n",
+					"Silver_Update_Pre=spark.sql(f\"\"\" SELECT COUNT(*) FROM {lake_db_name}.{db_tablename} WHERE CDCOps = 2 \"\"\").collect()[0][0]\n",
+					"Silver_Delete_Pre=spark.sql(f\"\"\" SELECT COUNT(*) FROM {lake_db_name}.{db_tablename} WHERE CDCOps = 0 \"\"\").collect()[0][0]"
+				],
+				"execution_count": 95
+			},
+			{
+				"cell_type": "code",
+				"source": [
+					"#Silver load dates\n",
+					"df_Latest_LoadDate = spark.sql(f\"\"\"\n",
+					"                        SELECT date_format(CDCLoadDate,'yyyy-MM-dd HH:mm:ss.SSSSSS') AS Latest_LoadDate FROM\n",
+					"                            (SELECT DISTINCT CDCLoadDate FROM {lake_db_name}.{db_tablename}\n",
+					"                            ORDER BY CDCLoadDate DESC\n",
+					"                            LIMIT 1);\n",
+					"                    \"\"\")\n",
+					"#display(df_Latest_LoadDate)\n",
+					"\n",
+					"if df_Latest_LoadDate.count() > 0 and df_Latest_LoadDate.collect()[0][0] != None:\n",
+					"    silver_loaddate = df_Latest_LoadDate.collect()[0][0]\n",
+					"    \n",
+					"else:\n",
+					"    silver_loaddate = '1900-01-01 00:00:00.000000'\n",
+					"print(silver_loaddate)"
+				],
+				"execution_count": 96
+			},
+			{
+				"cell_type": "code",
+				"source": [
+					"# Create a temporary view\n",
+					"spark.sql(f\"\"\"\n",
+					"    CREATE OR REPLACE TEMPORARY VIEW \n",
+					"       Silver_temp_{db_tablename}\n",
+					"    AS\n",
+					"        (\n",
+					"            WITH Numbered_Rows_R AS (\n",
+					"                SELECT *, ROW_NUMBER() OVER (PARTITION BY ParticipantId,NMI,FromDate ORDER BY CreationDate desc) AS RecordRank\n",
+					"                FROM {Bronze_notebookname}.{Bronze_tablename}\n",
+					"                WHERE CDCLoadDate > '{silver_loaddate}'\n",
+					"                )\n",
+					"                , Numbered_Rows_S AS (\n",
+					"                    SELECT  *, ROW_NUMBER() OVER (PARTITION BY ParticipantId,SequenceNumber ORDER BY MaintenanceDate) AS SequenceRank\n",
+					"                    FROM Numbered_Rows_R\n",
+					"                    WHERE RecordRank = 1 OR RowStatus = 'I'   \n",
+					"                )            \n",
+					"                SELECT  ParticipantId,\n",
+					"                        SequenceNumber,                          \n",
+					"                        CreationDate,  \n",
+					"                        MaintenanceDate,\n",
+					"                        RowStatus,\n",
+					"                        FromDate,\n",
+					"                        ToDate,\n",
+					"                        NMI, \n",
+					"                        TransmissionNodeIdentifier,\n",
+					"                        DistributionLossFactorCode,\n",
+					"                        Status,\n",
+					"                        FileName               \n",
+					"                FROM Numbered_Rows_S\n",
+					"                WHERE SequenceRank = 1\n",
+					"                order by SequenceNumber,CreationDate\n",
+					"        )\n",
+					"\"\"\")"
+				],
+				"execution_count": 97
+			},
+			{
+				"cell_type": "code",
+				"source": [
+					"df_silver = spark.sql(f\"\"\"SELECT * FROM Silver_temp_{db_tablename} \"\"\")\n",
+					"\n",
+					"# Changing timestamp columns format from UTC to AEST\n",
+					"df_silver = df_silver.withColumn(\"CreationDate_D\", from_utc_timestamp(col(\"CreationDate\"), \"Australia/Brisbane\"))\n",
+					"df_silver = df_silver.withColumn(\"MaintenanceDate_D\", from_utc_timestamp(col(\"MaintenanceDate\"), \"Australia/Brisbane\"))\n",
+					"df_silver = df_silver.withColumn(\"FromDate_D\", from_utc_timestamp(col(\"FromDate\"), \"Australia/Brisbane\"))\n",
+					"df_silver = df_silver.withColumn(\"ToDate_D\", from_utc_timestamp(col(\"ToDate\"), \"Australia/Brisbane\"))\n",
+					"\n",
+					"# Add CDC columns\n",
+					"df_silver = df_silver.withColumn(\"HashKey\", sha2(concat_ws(\"||\", \"ParticipantId\",\"SequenceNumber\"), 256))\n",
+					"df_silver = df_silver.withColumn(\"HashDiff\", sha2(concat_ws(\"||\", \"CreationDate\",\"MaintenanceDate\",\"RowStatus\",\"FromDate\",\"ToDate\",\"NMI\",\"TransmissionNodeIdentifier\",\"DistributionLossFactorCode\",\"Status\"), 256))\n",
+					"df_silver = df_silver.withColumn(\"NMIHashId\", sha2(concat_ws(\"||\", \"NMI\"), 256))\n",
+					"df_silver = df_silver.withColumn(\"CDCLoadDate\", to_timestamp(lit(Silver_LoadDate),'yyyy-MM-dd HH:mm:ss'))\n",
+					"df_silver = df_silver.withColumn(\"CDCStartDate\", to_timestamp(lit(Silver_LoadDate), 'yyyy-MM-dd HH:mm:ss'))\n",
+					"df_silver = df_silver.withColumn(\"CDCEndDate\", to_timestamp(lit(\"9999-12-31 23:59:59\"), 'yyyy-MM-dd HH:mm:ss'))\n",
+					"df_silver = df_silver.withColumn(\"CDCCurrentFlag\", lit(1))\n",
+					"df_silver = df_silver.withColumn(\"CDCOps\", lit(1))"
+				],
+				"execution_count": 98
+			},
+			{
+				"cell_type": "code",
+				"source": [
+					"# SCD2 logic\n",
+					"# Create a temporary view of the dataframe\n",
+					"df_silver.createOrReplaceTempView(\"temp_table\")\n",
+					"\n",
+					"# Use the merge operation to update the target table\n",
+					"spark.sql(f\"\"\"\n",
+					"    MERGE INTO {lake_db_name}.{db_tablename} t\n",
+					"    USING temp_table s\n",
+					"    ON t.HashKey = s.HashKey AND t.CDCCurrentFlag == true\n",
+					"    WHEN MATCHED AND t.HashDiff <> s.HashDiff THEN\n",
+					"      UPDATE SET t.CDCEndDate = '{Silver_UpdateEndDate}',\n",
+					"                 t.CDCCurrentFlag = false,\n",
+					"                 t.CDCOps = s.CDCOps + 1\n",
+					"    WHEN NOT MATCHED THEN\n",
+					"      INSERT (ParticipantId,SequenceNumber,CreationDate,CreationDate_D,MaintenanceDate,MaintenanceDate_D,RowStatus,ValidFrom,ValidFrom_D,ValidTo,ValidTo_D,\n",
+					"              NMI,NMIHashId,TNI,DLFCode,Status,FileName,CDCLoadDate,CDCStartDate,CDCEndDate,CDCOps,CDCCurrentFlag,HashKey,HashDiff)\n",
+					"      VALUES (s.ParticipantId,s.SequenceNumber,s.CreationDate,s.CreationDate_D,s.MaintenanceDate,s.MaintenanceDate_D,s.RowStatus,s.FromDate,s.FromDate_D,s.ToDate,s.ToDate_D,\n",
+					"              s.NMI,s.NMIHashId,s.TransmissionNodeIdentifier,s.DistributionLossFactorCode,s.Status,s.FileName,s.CDCLoadDate,s.CDCStartDate,s.CDCEndDate,s.CDCOps,s.CDCCurrentFlag,s.HashKey,s.HashDiff)\n",
+					"\"\"\")\n",
+					"\n",
+					"# Use the merge operation to Insert updated record \n",
+					"spark.sql(f\"\"\"\n",
+					"    MERGE INTO {lake_db_name}.{db_tablename} t\n",
+					"    USING temp_table s\n",
+					"    ON t.HashKey = s.HashKey AND t.CDCCurrentFlag == true\n",
+					"    WHEN MATCHED AND t.HashDiff <> s.HashDiff THEN\n",
+					"      UPDATE SET t.CDCEndDate = '{Silver_UpdateEndDate}',\n",
+					"                 t.CDCCurrentFlag = false,\n",
+					"                 t.CDCOps = s.CDCOps + 1\n",
+					"    WHEN NOT MATCHED THEN\n",
+					"      INSERT (ParticipantId,SequenceNumber,CreationDate,CreationDate_D,MaintenanceDate,MaintenanceDate_D,RowStatus,ValidFrom,ValidFrom_D,ValidTo,ValidTo_D,\n",
+					"              NMI,NMIHashId,TNI,DLFCode,Status,FileName,CDCLoadDate,CDCStartDate,CDCEndDate,CDCOps,CDCCurrentFlag,HashKey,HashDiff)\n",
+					"      VALUES (s.ParticipantId,s.SequenceNumber,s.CreationDate,s.CreationDate_D,s.MaintenanceDate,s.MaintenanceDate_D,s.RowStatus,s.FromDate,s.FromDate_D,s.ToDate,s.ToDate_D,\n",
+					"              s.NMI,s.NMIHashId,s.TransmissionNodeIdentifier,s.DistributionLossFactorCode,s.Status,s.FileName,s.CDCLoadDate,s.CDCStartDate,s.CDCEndDate,s.CDCOps,s.CDCCurrentFlag,s.HashKey,s.HashDiff)\n",
+					"      \n",
+					"\"\"\")"
+				],
+				"execution_count": 99
+			},
+			{
+				"cell_type": "code",
+				"source": [
+					"#Row count parameters\n",
+					"Silver_Insert_Post=spark.sql(f\"\"\" SELECT COUNT(*) FROM {lake_db_name}.{db_tablename} WHERE CDCOps = 1 \"\"\").collect()[0][0]\n",
+					"Silver_Update_Post=spark.sql(f\"\"\" SELECT COUNT(*) FROM {lake_db_name}.{db_tablename} WHERE CDCOps = 2 \"\"\").collect()[0][0]\n",
+					"Silver_Delete_Post=spark.sql(f\"\"\" SELECT COUNT(*) FROM {lake_db_name}.{db_tablename} WHERE CDCOps = 0 \"\"\").collect()[0][0]\n",
+					"Silver_TotalRowCount_Post=spark.sql(f\"\"\" SELECT COUNT(*) FROM {lake_db_name}.{db_tablename}\"\"\").collect()[0][0]\n",
+					"Silver_ActiveRecord_Post=spark.sql(f\"\"\" SELECT COUNT(*) FROM {lake_db_name}.{db_tablename} WHERE CDCCurrentFlag = true \"\"\").collect()[0][0]"
+				],
+				"execution_count": 100
+			},
+			{
+				"cell_type": "code",
+				"source": [
+					"#Row calculation\n",
+					"Silver_Update = Silver_Update_Post - Silver_Update_Pre\n",
+					"Silver_Insert = (Silver_Insert_Post - Silver_Insert_Pre) + Silver_Update\n",
+					"Silver_Delete = Silver_Delete_Post - Silver_Delete_Pre\n",
+					"Silver_ActiveRows = Silver_ActiveRecord_Post \n",
+					"Silver_TotalRows = Silver_TotalRowCount_Post"
+				],
+				"execution_count": 101
+			},
+			{
+				"cell_type": "markdown",
+				"metadata": {
+					"nteract": {
+						"transient": {
+							"deleting": false
+						}
+					}
+				},
+				"source": [
+					"print(Silver_Update)\n",
+					"print(Silver_Insert)\n",
+					"print(Silver_Delete)\n",
+					"print(Silver_ActiveRows)\n",
+					"print(Silver_TotalRows)"
+				]
+			},
+			{
+				"cell_type": "code",
+				"source": [
+					"#Create dataframe to insert log to controldb\n",
+					"log_data = [(db_notebookname,db_tablename,Silver_LoadDate,Silver_Insert,Silver_Update,Silver_Delete,Silver_ActiveRows,Silver_TotalRows)]\n",
+					"print(log_data)\n",
+					"log_columns = ['PIPELINE_NAME', 'TABLE_NAME', 'INGEST_DATETIME', 'INSERT','UPDATE','DELETE','ACTIVE_ROWS','TOTAL_ROWS']\n",
+					"df_log = spark.createDataFrame(log_data, log_columns)"
+				],
+				"execution_count": 102
+			},
+			{
+				"cell_type": "code",
+				"source": [
+					"#Write df_log to logging table in controldb\n",
+					"db_port = 1433\n",
+					"linked_service_name = \"LS_SQL_ELTFrameworkDB\"\n",
+					"linkedServiceProperties = json.loads(mssparkutils.credentials.getPropertiesAll(linked_service_name))\n",
+					"sql_server_name = linkedServiceProperties.get('Endpoint')\n",
+					"db_name = linkedServiceProperties.get('Database')\n",
+					"access_token = mssparkutils.credentials.getConnectionStringOrCreds(linked_service_name)\n",
+					"write_table_name = \"[CTL].[CFG_INGESTION_LOGS]\"\n",
+					"\n",
+					"try:\n",
+					"    df_log.write.format(\"jdbc\") \\\n",
+					"        .option(\"url\", \"jdbc:sqlserver://%s:%s\" % (sql_server_name, db_port)) \\\n",
+					"        .option(\"dbtable\", write_table_name) \\\n",
+					"        .option(\"accessToken\", access_token) \\\n",
+					"        .option(\"encrypt\", \"true\") \\\n",
+					"        .option(\"databaseName\", db_name) \\\n",
+					"        .option(\"hostNameInCertificate\", \"*.database.windows.net\") \\\n",
+					"        .mode(\"append\") \\\n",
+					"        .save()\n",
+					"except ValueError as error :\n",
+					"    print(\"MSSQL Connector write failed\", error)\n",
+					"\n",
+					"print(\"MSSQL Connector write(append) succeeded  \")\n",
+					""
+				],
+				"execution_count": 103
+			},
+			{
+				"cell_type": "markdown",
+				"metadata": {
+					"nteract": {
+						"transient": {
+							"deleting": false
+						}
+					}
+				},
+				"source": [
+					"#  Table: **nmi_loss_factor**: END"
+				]
+			},
+			{
+				"cell_type": "markdown",
+				"metadata": {
+					"nteract": {
+						"transient": {
+							"deleting": false
+						}
+					}
+				},
+				"source": [
+					"#  Table: **nmi_nmi_relationship**: START"
+				]
+			},
+			{
+				"cell_type": "code",
+				"source": [
+					"#Set table name\n",
+					"db_tablename=\"nmi_nmi_relationship\"\n",
+					"Bronze_tablename=\"msats_nmi_data\"\n",
+					"Bronze_notebookname=\"aemo_bronze\""
+				],
+				"execution_count": 104
+			},
+			{
+				"cell_type": "code",
+				"source": [
+					"#Create Bronze Table\n",
+					"spark.sql(f\"\"\"CREATE DATABASE IF NOT EXISTS {lake_db_name};\"\"\")\n",
+					"spark.sql(f\"\"\"\n",
+					"CREATE TABLE IF NOT EXISTS {lake_db_name}.{db_tablename}\n",
+					"(\n",
+					"\tParticipantId STRING,\n",
+					"\tSequenceNumber INT,\n",
+					"    NMI STRING,\n",
+					"\tNMIHashId STRING,\n",
+					"    ParentNMI STRING,\n",
+					"\tValidFrom TIMESTAMP,\n",
+					"    ValidFrom_D TIMESTAMP,\n",
+					"\tValidTo TIMESTAMP,\n",
+					"    ValidTo_D TIMESTAMP,\n",
+					"    RowStatus STRING,\n",
+					"    Status STRING,\n",
+					"\tENID STRING,\n",
+					"    CDCLoadDate TIMESTAMP,\n",
+					"    CDCStartDate TIMESTAMP,\n",
+					"    CDCEndDate TIMESTAMP,\n",
+					"    CDCOps INT,\n",
+					"    CDCCurrentFlag BOOLEAN,\n",
+					"    HashKey STRING,\n",
+					"    HashDiff STRING  \n",
+					")\n",
+					"USING delta\n",
+					"LOCATION 'abfss://{destination_container}@{destination_storage}.dfs.core.windows.net/{destination_path}/{db_tablename}'\n",
+					"\"\"\")"
+				],
+				"execution_count": 105
+			},
+			{
+				"cell_type": "code",
+				"source": [
+					"# Row count parameters\n",
+					"Silver_Insert_Pre=spark.sql(f\"\"\" SELECT COUNT(*) FROM {lake_db_name}.{db_tablename} WHERE CDCOps = 1 \"\"\").collect()[0][0]\n",
+					"Silver_Update_Pre=spark.sql(f\"\"\" SELECT COUNT(*) FROM {lake_db_name}.{db_tablename} WHERE CDCOps = 2 \"\"\").collect()[0][0]\n",
+					"Silver_Delete_Pre=spark.sql(f\"\"\" SELECT COUNT(*) FROM {lake_db_name}.{db_tablename} WHERE CDCOps = 0 \"\"\").collect()[0][0]"
+				],
+				"execution_count": 106
+			},
+			{
+				"cell_type": "code",
+				"source": [
+					"#Silver load dates\n",
+					"df_Latest_LoadDate = spark.sql(f\"\"\"\n",
+					"                        SELECT date_format(CDCLoadDate,'yyyy-MM-dd HH:mm:ss.SSSSSS') AS Latest_LoadDate FROM\n",
+					"                            (SELECT DISTINCT CDCLoadDate FROM {lake_db_name}.{db_tablename}\n",
+					"                            ORDER BY CDCLoadDate DESC\n",
+					"                            LIMIT 1);\n",
+					"                    \"\"\")\n",
+					"#display(df_Latest_LoadDate)\n",
+					"\n",
+					"if df_Latest_LoadDate.count() > 0 and df_Latest_LoadDate.collect()[0][0] != None:\n",
+					"    silver_loaddate = df_Latest_LoadDate.collect()[0][0]\n",
+					"    \n",
+					"else:\n",
+					"    silver_loaddate = '1900-01-01 00:00:00.000000'\n",
+					"print(silver_loaddate)"
+				],
+				"execution_count": 107
+			},
+			{
+				"cell_type": "code",
+				"source": [
+					"# Create a temporary view\n",
+					"spark.sql(f\"\"\"\n",
+					"    CREATE OR REPLACE TEMPORARY VIEW \n",
+					"       Silver_temp_{db_tablename}\n",
+					"    AS\n",
+					"        (\n",
+					"            WITH Numbered_Rows_R AS (\n",
+					"                SELECT *, ROW_NUMBER() OVER (PARTITION BY ParticipantId,NMI,FromDate ORDER BY CreationDate desc) AS RecordRank\n",
+					"                FROM {Bronze_notebookname}.{Bronze_tablename}\n",
+					"                WHERE CDCLoadDate > '{silver_loaddate}'\n",
+					"                )\n",
+					"                , Numbered_Rows_S AS (\n",
+					"                    SELECT  *, ROW_NUMBER() OVER (PARTITION BY ParticipantId,SequenceNumber ORDER BY MaintenanceDate) AS SequenceRank\n",
+					"                    FROM Numbered_Rows_R\n",
+					"                    WHERE RecordRank = 1 OR RowStatus = 'I'   \n",
+					"                )            \n",
+					"                SELECT  \n",
+					"                        ParticipantId,\n",
+					"\t                    SequenceNumber,                \n",
+					"                        NMI,\n",
+					"                        FromDate,\n",
+					"                        ToDate,\n",
+					"                        ParentEmbeddedNetworkIdentifier AS ParentENID,\n",
+					"                        ChildEmbeddedNetworkIdentifier AS ChildENID,\n",
+					"                        RowStatus,\n",
+					"                        Status\n",
+					"                FROM Numbered_Rows_S\n",
+					"                WHERE SequenceRank = 1\n",
+					"                order by SequenceNumber,CreationDate\n",
+					"        )\n",
+					"\"\"\")"
+				],
+				"execution_count": 108
+			},
+			{
+				"cell_type": "code",
+				"source": [
+					"df_silver = spark.sql(f\"\"\"SELECT * FROM Silver_temp_{db_tablename} \"\"\")"
+				],
+				"execution_count": 109
+			},
+			{
+				"cell_type": "code",
+				"source": [
+					"#Create separate dataframes for child and parent NMIs\n",
+					"df_child  = df_silver.filter(\"ChildENID IS NOT NULL\").alias(\"df_child\").select('ParticipantId', 'SequenceNumber',col('NMI').alias(\"ChildNMI\"),\n",
+					"                                                                        'FromDate','ToDate','RowStatus','Status',col('ChildENID').alias(\"c_enid\"))\n",
+					"df_parent = df_silver.filter(\"ParentENID IS NOT NULL\").alias(\"df_parent\").select(col('NMI').alias(\"ParentNMI\"),col('ParentENID').alias(\"p_enid\"))"
+				],
+				"execution_count": 110
+			},
+			{
+				"cell_type": "code",
+				"source": [
+					"# Join child and parent dataframes using embedded network id\n",
+					"df_join_enid = df_child.join(\n",
+					"    df_parent,\n",
+					"    [df_child.c_enid == df_parent.p_enid],\n",
+					"    'inner'\n",
+					").select(\n",
+					"     \"ParticipantId\",\"SequenceNumber\",\"ChildNMI\",\"ParentNMI\",\"FromDate\",\"ToDate\",\"RowStatus\",\"Status\",\"c_enid\"\n",
+					")"
+				],
+				"execution_count": 111
+			},
+			{
+				"cell_type": "code",
+				"source": [
+					"# Remove duplicates\n",
+					"df_silver_final = df_join_enid.dropDuplicates()"
+				],
+				"execution_count": 112
+			},
+			{
+				"cell_type": "code",
+				"source": [
+					"# Changing timestamp columns format from UTC to AEST\n",
+					"df_silver_final = df_silver_final.withColumn(\"FromDate_D\", from_utc_timestamp(col(\"FromDate\"), \"Australia/Brisbane\"))\n",
+					"df_silver_final = df_silver_final.withColumn(\"ToDate_D\", from_utc_timestamp(col(\"ToDate\"), \"Australia/Brisbane\"))\n",
+					"\n",
+					"# Add CDC columns\n",
+					"df_silver_final = df_silver_final.withColumn(\"HashKey\", sha2(concat_ws(\"||\", \"ParticipantId\",\"SequenceNumber\"), 256))\n",
+					"df_silver_final = df_silver_final.withColumn(\"HashDiff\", sha2(concat_ws(\"||\",  \"ChildNMI\",\"ParentNMI\",\"FromDate\",\"ToDate\",\"RowStatus\",\"Status\",\"c_enid\"), 256))\n",
+					"df_silver_final = df_silver_final.withColumn(\"NMIHashId\", sha2(concat_ws(\"||\", \"ChildNMI\"), 256))\n",
+					"df_silver_final = df_silver_final.withColumn(\"CDCLoadDate\", to_timestamp(lit(Silver_LoadDate),'yyyy-MM-dd HH:mm:ss'))\n",
+					"df_silver_final = df_silver_final.withColumn(\"CDCStartDate\", to_timestamp(lit(Silver_LoadDate), 'yyyy-MM-dd HH:mm:ss'))\n",
+					"df_silver_final = df_silver_final.withColumn(\"CDCEndDate\", to_timestamp(lit(\"9999-12-31 23:59:59\"), 'yyyy-MM-dd HH:mm:ss'))\n",
+					"df_silver_final = df_silver_final.withColumn(\"CDCCurrentFlag\", lit(1))\n",
+					"df_silver_final = df_silver_final.withColumn(\"CDCOps\", lit(1))"
+				],
+				"execution_count": 113
+			},
+			{
+				"cell_type": "code",
+				"source": [
+					"# SCD2 logic\n",
+					"# Create a temporary view of the dataframe\n",
+					"df_silver_final.createOrReplaceTempView(\"temp_table\")\n",
+					"\n",
+					"# Use the merge operation to update the target table\n",
+					"spark.sql(f\"\"\"\n",
+					"    MERGE INTO {lake_db_name}.{db_tablename} t\n",
+					"    USING temp_table s\n",
+					"    ON t.HashKey = s.HashKey AND t.CDCCurrentFlag == true\n",
+					"    WHEN MATCHED AND t.HashDiff <> s.HashDiff THEN\n",
+					"      UPDATE SET t.CDCEndDate = '{Silver_UpdateEndDate}',\n",
+					"                 t.CDCCurrentFlag = false,\n",
+					"                 t.CDCOps = s.CDCOps + 1\n",
+					"    WHEN NOT MATCHED THEN\n",
+					"      INSERT (ParticipantId,SequenceNumber,NMI,NMIHashId,ParentNMI,ValidFrom,ValidFrom_D,ValidTo,ValidTo_D,RowStatus,Status,ENID,\n",
+					"              CDCLoadDate,CDCStartDate,CDCEndDate,CDCOps,CDCCurrentFlag,HashKey,HashDiff)\n",
+					"      VALUES (s.ParticipantId,s.SequenceNumber,s.ChildNMI,s.NMIHashId,s.ParentNMI,s.FromDate,s.FromDate_D,s.ToDate,s.ToDate_D,s.RowStatus,s.Status,s.c_enid,\n",
+					"              s.CDCLoadDate,s.CDCStartDate,s.CDCEndDate,s.CDCOps,s.CDCCurrentFlag,s.HashKey,s.HashDiff)\n",
+					"\"\"\")\n",
+					"\n",
+					"# Use the merge operation to Insert updated record \n",
+					"spark.sql(f\"\"\"\n",
+					"    MERGE INTO {lake_db_name}.{db_tablename} t\n",
+					"    USING temp_table s\n",
+					"    ON t.HashKey = s.HashKey AND t.CDCCurrentFlag == true\n",
+					"    WHEN MATCHED AND t.HashDiff <> s.HashDiff THEN\n",
+					"      UPDATE SET t.CDCEndDate = '{Silver_UpdateEndDate}',\n",
+					"                 t.CDCCurrentFlag = false,\n",
+					"                 t.CDCOps = s.CDCOps + 1\n",
+					"    WHEN NOT MATCHED THEN\n",
+					"      INSERT (ParticipantId,SequenceNumber,NMI,NMIHashId,ParentNMI,ValidFrom,ValidFrom_D,ValidTo,ValidTo_D,RowStatus,Status,ENID,\n",
+					"              CDCLoadDate,CDCStartDate,CDCEndDate,CDCOps,CDCCurrentFlag,HashKey,HashDiff)\n",
+					"      VALUES (s.ParticipantId,s.SequenceNumber,s.ChildNMI,s.NMIHashId,s.ParentNMI,s.FromDate,s.FromDate_D,s.ToDate,s.ToDate_D,s.RowStatus,s.Status,s.c_enid,\n",
+					"              s.CDCLoadDate,s.CDCStartDate,s.CDCEndDate,s.CDCOps,s.CDCCurrentFlag,s.HashKey,s.HashDiff)\n",
+					"      \n",
+					"\"\"\")"
+				],
+				"execution_count": 114
+			},
+			{
+				"cell_type": "code",
+				"source": [
+					"#Row count parameters\n",
+					"Silver_Insert_Post=spark.sql(f\"\"\" SELECT COUNT(*) FROM {lake_db_name}.{db_tablename} WHERE CDCOps = 1 \"\"\").collect()[0][0]\n",
+					"Silver_Update_Post=spark.sql(f\"\"\" SELECT COUNT(*) FROM {lake_db_name}.{db_tablename} WHERE CDCOps = 2 \"\"\").collect()[0][0]\n",
+					"Silver_Delete_Post=spark.sql(f\"\"\" SELECT COUNT(*) FROM {lake_db_name}.{db_tablename} WHERE CDCOps = 0 \"\"\").collect()[0][0]\n",
+					"Silver_TotalRowCount_Post=spark.sql(f\"\"\" SELECT COUNT(*) FROM {lake_db_name}.{db_tablename}\"\"\").collect()[0][0]\n",
+					"Silver_ActiveRecord_Post=spark.sql(f\"\"\" SELECT COUNT(*) FROM {lake_db_name}.{db_tablename} WHERE CDCCurrentFlag = true \"\"\").collect()[0][0]"
+				],
+				"execution_count": 115
+			},
+			{
+				"cell_type": "code",
+				"source": [
+					"#Row calculation\n",
+					"Silver_Update = Silver_Update_Post - Silver_Update_Pre\n",
+					"Silver_Insert = (Silver_Insert_Post - Silver_Insert_Pre) + Silver_Update\n",
+					"Silver_Delete = Silver_Delete_Post - Silver_Delete_Pre\n",
+					"Silver_ActiveRows = Silver_ActiveRecord_Post \n",
+					"Silver_TotalRows = Silver_TotalRowCount_Post"
+				],
+				"execution_count": 116
+			},
+			{
+				"cell_type": "markdown",
+				"metadata": {
+					"nteract": {
+						"transient": {
+							"deleting": false
+						}
+					}
+				},
+				"source": [
+					"print(Silver_Update)\n",
+					"print(Silver_Insert)\n",
+					"print(Silver_Delete)\n",
+					"print(Silver_ActiveRows)\n",
+					"print(Silver_TotalRows)"
+				]
+			},
+			{
+				"cell_type": "code",
+				"source": [
+					"#Create dataframe to insert log to controldb\n",
+					"log_data = [(db_notebookname,db_tablename,Silver_LoadDate,Silver_Insert,Silver_Update,Silver_Delete,Silver_ActiveRows,Silver_TotalRows)]\n",
+					"#print(log_data)\n",
+					"log_columns = ['PIPELINE_NAME', 'TABLE_NAME', 'INGEST_DATETIME', 'INSERT','UPDATE','DELETE','ACTIVE_ROWS','TOTAL_ROWS']\n",
+					"df_log = spark.createDataFrame(log_data, log_columns)"
+				],
+				"execution_count": 117
+			},
+			{
+				"cell_type": "code",
+				"source": [
+					"#Write df_log to logging table in controldb\n",
+					"db_port = 1433\n",
+					"linked_service_name = \"LS_SQL_ELTFrameworkDB\"\n",
+					"linkedServiceProperties = json.loads(mssparkutils.credentials.getPropertiesAll(linked_service_name))\n",
+					"sql_server_name = linkedServiceProperties.get('Endpoint')\n",
+					"db_name = linkedServiceProperties.get('Database')\n",
+					"access_token = mssparkutils.credentials.getConnectionStringOrCreds(linked_service_name)\n",
+					"write_table_name = \"[CTL].[CFG_INGESTION_LOGS]\"\n",
+					"\n",
+					"try:\n",
+					"    df_log.write.format(\"jdbc\") \\\n",
+					"        .option(\"url\", \"jdbc:sqlserver://%s:%s\" % (sql_server_name, db_port)) \\\n",
+					"        .option(\"dbtable\", write_table_name) \\\n",
+					"        .option(\"accessToken\", access_token) \\\n",
+					"        .option(\"encrypt\", \"true\") \\\n",
+					"        .option(\"databaseName\", db_name) \\\n",
+					"        .option(\"hostNameInCertificate\", \"*.database.windows.net\") \\\n",
+					"        .mode(\"append\") \\\n",
+					"        .save()\n",
+					"except ValueError as error :\n",
+					"    print(\"MSSQL Connector write failed\", error)\n",
+					"\n",
+					"print(\"MSSQL Connector write(append) succeeded  \")\n",
+					""
+				],
+				"execution_count": 118
+			},
+			{
+				"cell_type": "markdown",
+				"metadata": {
+					"nteract": {
+						"transient": {
+							"deleting": false
+						}
+					}
+				},
+				"source": [
+					"#  Table: **nmi_nmi_relationship**: END"
+				]
+			},
+			{
+				"cell_type": "markdown",
+				"metadata": {
+					"nteract": {
+						"transient": {
+							"deleting": false
+						}
+					}
+				},
+				"source": [
+					"#  Table: **NMI**: START"
+				]
+			},
+			{
+				"cell_type": "code",
+				"source": [
+					"#Set table name\n",
+					"db_tablename=\"NMI\"\n",
+					"Bronze_tablename=\"msats_nmi_role\"\n",
+					"Bronze_notebookname=\"aemo_bronze\""
+				],
+				"execution_count": 119
+			},
+			{
+				"cell_type": "code",
+				"source": [
+					"#Create Bronze Table\n",
+					"spark.sql(f\"\"\"CREATE DATABASE IF NOT EXISTS {lake_db_name};\"\"\")\n",
+					"spark.sql(f\"\"\"\n",
+					"CREATE TABLE IF NOT EXISTS {lake_db_name}.{db_tablename}\n",
+					"(\n",
+					"\tParticipantId STRING,\n",
+					"\tSequenceNumber INT,\n",
+					"\tNMI STRING,\n",
+					"\tNMIHashId STRING,\n",
+					"\tCreationDate TIMESTAMP,\n",
+					"\tCreationDate_D TIMESTAMP,\n",
+					"\tMaintenanceDate TIMESTAMP,\n",
+					"\tMaintenanceDate_D TIMESTAMP,\n",
+					"\tNMIRole STRING,\t\n",
+					"\tRowStatus STRING,\n",
+					"\tParty STRING,\n",
+					"\tValidFrom TIMESTAMP,\n",
+					"\tValidFrom_D TIMESTAMP,\n",
+					"\tValidTo TIMESTAMP,\n",
+					"\tValidTo_D TIMESTAMP,\n",
+					"\tFileName STRING,\n",
+					"    CDCLoadDate TIMESTAMP,\n",
+					"    CDCStartDate TIMESTAMP,\n",
+					"    CDCEndDate TIMESTAMP,\n",
+					"    CDCOps INT,\n",
+					"    CDCCurrentFlag BOOLEAN,\n",
+					"    HashKey STRING,\n",
+					"    HashDiff STRING  \n",
+					")\n",
+					"USING delta\n",
+					"LOCATION 'abfss://{destination_container}@{destination_storage}.dfs.core.windows.net/{destination_path}/{db_tablename}'\n",
+					"\"\"\")"
+				],
+				"execution_count": 120
+			},
+			{
+				"cell_type": "code",
+				"source": [
+					"# Row count parameters\n",
+					"Silver_Insert_Pre=spark.sql(f\"\"\" SELECT COUNT(*) FROM {lake_db_name}.{db_tablename} WHERE CDCOps = 1 \"\"\").collect()[0][0]\n",
+					"Silver_Update_Pre=spark.sql(f\"\"\" SELECT COUNT(*) FROM {lake_db_name}.{db_tablename} WHERE CDCOps = 2 \"\"\").collect()[0][0]\n",
+					"Silver_Delete_Pre=spark.sql(f\"\"\" SELECT COUNT(*) FROM {lake_db_name}.{db_tablename} WHERE CDCOps = 0 \"\"\").collect()[0][0]"
+				],
+				"execution_count": 121
+			},
+			{
+				"cell_type": "code",
+				"metadata": {
+					"jupyter": {
+						"source_hidden": false,
+						"outputs_hidden": false
+					},
+					"nteract": {
+						"transient": {
+							"deleting": false
+						}
+					}
+				},
+				"source": [
+					"#Silver load dates\n",
+					"df_Latest_LoadDate = spark.sql(f\"\"\"\n",
+					"                        SELECT date_format(CDCLoadDate,'yyyy-MM-dd HH:mm:ss.SSSSSS') AS Latest_LoadDate FROM\n",
+					"                            (SELECT DISTINCT CDCLoadDate FROM {lake_db_name}.{db_tablename}\n",
+					"                            ORDER BY CDCLoadDate DESC\n",
+					"                            LIMIT 1);\n",
+					"                    \"\"\")\n",
+					"#display(df_Latest_LoadDate)\n",
+					"\n",
+					"if df_Latest_LoadDate.count() > 0 and df_Latest_LoadDate.collect()[0][0] != None:\n",
+					"    silver_loaddate = df_Latest_LoadDate.collect()[0][0]\n",
+					"    \n",
+					"else:\n",
+					"    silver_loaddate = '1900-01-01 00:00:00.000000'\n",
+					"print(silver_loaddate)"
+				],
+				"execution_count": 122
+			},
+			{
+				"cell_type": "code",
+				"source": [
+					"# Create a temporary view\n",
+					"spark.sql(f\"\"\"\n",
+					"    CREATE OR REPLACE TEMPORARY VIEW \n",
+					"       Silver_temp_{db_tablename}\n",
+					"    AS\n",
+					"        (\n",
+					"            WITH Numbered_Rows_R AS (\n",
+					"                SELECT *, ROW_NUMBER() OVER (PARTITION BY ParticipantId,NMI,FromDate,Role ORDER BY CreationDate desc) AS RecordRank\n",
+					"                FROM {Bronze_notebookname}.{Bronze_tablename}\n",
+					"                WHERE CDCLoadDate > '{silver_loaddate}'\n",
+					"                )\n",
+					"                , Numbered_Rows_S AS (\n",
+					"                    SELECT  *, ROW_NUMBER() OVER (PARTITION BY ParticipantId,SequenceNumber ORDER BY MaintenanceDate) AS SequenceRank\n",
+					"                    FROM Numbered_Rows_R\n",
+					"                    WHERE RecordRank = 1 OR RowStatus = 'I'   \n",
+					"                )            \n",
+					"                SELECT  \n",
+					"                        ParticipantId,\n",
+					"\t                    SequenceNumber,                \n",
+					"                        NMI,\n",
+					"                        CreationDate,  \n",
+					"                        MaintenanceDate,\n",
+					"                        Role,\n",
+					"                        RowStatus,\n",
+					"                        Party,\n",
+					"                        FromDate,\n",
+					"                        ToDate,\n",
+					"                        FileName   \n",
+					"                FROM Numbered_Rows_S\n",
+					"                WHERE SequenceRank = 1\n",
+					"                order by SequenceNumber,CreationDate\n",
+					"        )\n",
+					"\"\"\")"
+				],
+				"execution_count": 123
+			},
+			{
+				"cell_type": "code",
+				"source": [
+					"df_silver = spark.sql(f\"\"\"SELECT * FROM Silver_temp_{db_tablename} \"\"\")\n",
+					"\n",
+					"# Changing timestamp columns format from UTC to AEST\n",
+					"df_silver = df_silver.withColumn(\"CreationDate_D\", from_utc_timestamp(col(\"CreationDate\"), \"Australia/Brisbane\"))\n",
+					"df_silver = df_silver.withColumn(\"MaintenanceDate_D\", from_utc_timestamp(col(\"MaintenanceDate\"), \"Australia/Brisbane\"))\n",
+					"df_silver = df_silver.withColumn(\"FromDate_D\", from_utc_timestamp(col(\"FromDate\"), \"Australia/Brisbane\"))\n",
+					"df_silver = df_silver.withColumn(\"ToDate_D\", from_utc_timestamp(col(\"ToDate\"), \"Australia/Brisbane\"))\n",
+					"\n",
+					"# Add CDC columns\n",
+					"df_silver = df_silver.withColumn(\"HashKey\", sha2(concat_ws(\"||\", \"ParticipantId\",\"SequenceNumber\"), 256))\n",
+					"df_silver = df_silver.withColumn(\"HashDiff\", sha2(concat_ws(\"||\", \"NMI\",\"CreationDate\",\"MaintenanceDate\",\"Role\",\"RowStatus\",\"Party\",\"FromDate\",\"ToDate\"), 256))\n",
+					"df_silver = df_silver.withColumn(\"NMIHashId\", sha2(concat_ws(\"||\", \"NMI\"), 256))\n",
+					"df_silver = df_silver.withColumn(\"CDCLoadDate\", to_timestamp(lit(Silver_LoadDate),'yyyy-MM-dd HH:mm:ss'))\n",
+					"df_silver = df_silver.withColumn(\"CDCStartDate\", to_timestamp(lit(Silver_LoadDate), 'yyyy-MM-dd HH:mm:ss'))\n",
+					"df_silver = df_silver.withColumn(\"CDCEndDate\", to_timestamp(lit(\"9999-12-31 23:59:59\"), 'yyyy-MM-dd HH:mm:ss'))\n",
+					"df_silver = df_silver.withColumn(\"CDCCurrentFlag\", lit(1))\n",
+					"df_silver = df_silver.withColumn(\"CDCOps\", lit(1))"
+				],
+				"execution_count": 124
+			},
+			{
+				"cell_type": "code",
+				"source": [
+					"# Row count parameters\n",
+					"Silver_Insert_Pre=spark.sql(f\"\"\" SELECT COUNT(*) FROM {lake_db_name}.{db_tablename} WHERE CDCOps = 1 \"\"\").collect()[0][0]\n",
+					"Silver_Update_Pre=spark.sql(f\"\"\" SELECT COUNT(*) FROM {lake_db_name}.{db_tablename} WHERE CDCOps = 2 \"\"\").collect()[0][0]\n",
+					"Silver_Delete_Pre=spark.sql(f\"\"\" SELECT COUNT(*) FROM {lake_db_name}.{db_tablename} WHERE CDCOps = 0 \"\"\").collect()[0][0]"
+				],
+				"execution_count": 125
+			},
+			{
+				"cell_type": "code",
+				"source": [
+					"# SCD2 logic\n",
+					"# Create a temporary view of the dataframe\n",
+					"df_silver.createOrReplaceTempView(\"temp_table\")\n",
+					"\n",
+					"# Use the merge operation to update the target table\n",
+					"spark.sql(f\"\"\"\n",
+					"    MERGE INTO {lake_db_name}.{db_tablename} t\n",
+					"    USING temp_table s\n",
+					"    ON t.HashKey = s.HashKey AND t.CDCCurrentFlag == true\n",
+					"    WHEN MATCHED AND t.HashDiff <> s.HashDiff THEN\n",
+					"      UPDATE SET t.CDCEndDate = '{Silver_UpdateEndDate}',\n",
+					"                 t.CDCCurrentFlag = false,\n",
+					"                 t.CDCOps = s.CDCOps + 1\n",
+					"    WHEN NOT MATCHED THEN\n",
+					"      INSERT (ParticipantId,SequenceNumber,CreationDate,CreationDate_D,MaintenanceDate,MaintenanceDate_D,RowStatus,ValidFrom,ValidFrom_D,ValidTo,ValidTo_D,NMI,NMIHashId,Party,NMIRole,FileName,\n",
+					"              CDCLoadDate,CDCStartDate,CDCEndDate,CDCOps,CDCCurrentFlag,HashKey,HashDiff)\n",
+					"      VALUES (s.ParticipantId,s.SequenceNumber,s.CreationDate,s.CreationDate_D,s.MaintenanceDate,s.MaintenanceDate_D,s.RowStatus,s.FromDate,s.FromDate_D,s.ToDate,s.ToDate_D,s.NMI,s.NMIHashId,s.Party,s.Role,s.FileName,\n",
+					"              s.CDCLoadDate,s.CDCStartDate,s.CDCEndDate,s.CDCOps,s.CDCCurrentFlag,s.HashKey,s.HashDiff)\n",
+					"\"\"\")\n",
+					"\n",
+					"# Use the merge operation to Insert updated record \n",
+					"spark.sql(f\"\"\"\n",
+					"    MERGE INTO {lake_db_name}.{db_tablename} t\n",
+					"    USING temp_table s\n",
+					"    ON t.HashKey = s.HashKey AND t.CDCCurrentFlag == true\n",
+					"    WHEN MATCHED AND t.HashDiff <> s.HashDiff THEN\n",
+					"      UPDATE SET t.CDCEndDate = '{Silver_UpdateEndDate}',\n",
+					"                 t.CDCCurrentFlag = false,\n",
+					"                 t.CDCOps = s.CDCOps + 1\n",
+					"    WHEN NOT MATCHED THEN\n",
+					"      INSERT (ParticipantId,SequenceNumber,CreationDate,CreationDate_D,MaintenanceDate,MaintenanceDate_D,RowStatus,ValidFrom,ValidFrom_D,ValidTo,ValidTo_D,NMI,NMIHashId,Party,NMIRole,FileName,\n",
+					"              CDCLoadDate,CDCStartDate,CDCEndDate,CDCOps,CDCCurrentFlag,HashKey,HashDiff)\n",
+					"      VALUES (s.ParticipantId,s.SequenceNumber,s.CreationDate,s.CreationDate_D,s.MaintenanceDate,s.MaintenanceDate_D,s.RowStatus,s.FromDate,s.FromDate_D,s.ToDate,s.ToDate_D,s.NMI,s.NMIHashId,s.Party,s.Role,s.FileName,\n",
+					"              s.CDCLoadDate,s.CDCStartDate,s.CDCEndDate,s.CDCOps,s.CDCCurrentFlag,s.HashKey,s.HashDiff)\n",
+					"\"\"\")"
+				],
+				"execution_count": 126
+			},
+			{
+				"cell_type": "code",
+				"source": [
+					"#Row count parameters\n",
+					"Silver_Insert_Post=spark.sql(f\"\"\" SELECT COUNT(*) FROM {lake_db_name}.{db_tablename} WHERE CDCOps = 1 \"\"\").collect()[0][0]\n",
+					"Silver_Update_Post=spark.sql(f\"\"\" SELECT COUNT(*) FROM {lake_db_name}.{db_tablename} WHERE CDCOps = 2 \"\"\").collect()[0][0]\n",
+					"Silver_Delete_Post=spark.sql(f\"\"\" SELECT COUNT(*) FROM {lake_db_name}.{db_tablename} WHERE CDCOps = 0 \"\"\").collect()[0][0]\n",
+					"Silver_TotalRowCount_Post=spark.sql(f\"\"\" SELECT COUNT(*) FROM {lake_db_name}.{db_tablename}\"\"\").collect()[0][0]\n",
+					"Silver_ActiveRecord_Post=spark.sql(f\"\"\" SELECT COUNT(*) FROM {lake_db_name}.{db_tablename} WHERE CDCCurrentFlag = true \"\"\").collect()[0][0]"
+				],
+				"execution_count": 127
+			},
+			{
+				"cell_type": "code",
+				"source": [
+					"#Row calculation\n",
+					"Silver_Update = Silver_Update_Post - Silver_Update_Pre\n",
+					"Silver_Insert = (Silver_Insert_Post - Silver_Insert_Pre) + Silver_Update\n",
+					"Silver_Delete = Silver_Delete_Post - Silver_Delete_Pre\n",
+					"Silver_ActiveRows = Silver_ActiveRecord_Post \n",
+					"Silver_TotalRows = Silver_TotalRowCount_Post"
+				],
+				"execution_count": 128
+			},
+			{
+				"cell_type": "markdown",
+				"metadata": {
+					"nteract": {
+						"transient": {
+							"deleting": false
+						}
+					}
+				},
+				"source": [
+					"print(Silver_Update)\n",
+					"print(Silver_Insert)\n",
+					"print(Silver_Delete)\n",
+					"print(Silver_ActiveRows)\n",
+					"print(Silver_TotalRows)"
+				]
+			},
+			{
+				"cell_type": "code",
+				"source": [
+					"#Create dataframe to insert log to controldb\n",
+					"log_data = [(db_notebookname,db_tablename,Silver_LoadDate,Silver_Insert,Silver_Update,Silver_Delete,Silver_ActiveRows,Silver_TotalRows)]\n",
+					"print(log_data)\n",
+					"log_columns = ['PIPELINE_NAME', 'TABLE_NAME', 'INGEST_DATETIME', 'INSERT','UPDATE','DELETE','ACTIVE_ROWS','TOTAL_ROWS']\n",
+					"df_log = spark.createDataFrame(log_data, log_columns)"
+				],
+				"execution_count": 129
+			},
+			{
+				"cell_type": "code",
+				"source": [
+					"#Write df_log to logging table in controldb\n",
+					"db_port = 1433\n",
+					"linked_service_name = \"LS_SQL_ELTFrameworkDB\"\n",
+					"linkedServiceProperties = json.loads(mssparkutils.credentials.getPropertiesAll(linked_service_name))\n",
+					"sql_server_name = linkedServiceProperties.get('Endpoint')\n",
+					"db_name = linkedServiceProperties.get('Database')\n",
+					"access_token = mssparkutils.credentials.getConnectionStringOrCreds(linked_service_name)\n",
+					"write_table_name = \"[CTL].[CFG_INGESTION_LOGS]\"\n",
+					"\n",
+					"try:\n",
+					"    df_log.write.format(\"jdbc\") \\\n",
+					"        .option(\"url\", \"jdbc:sqlserver://%s:%s\" % (sql_server_name, db_port)) \\\n",
+					"        .option(\"dbtable\", write_table_name) \\\n",
+					"        .option(\"accessToken\", access_token) \\\n",
+					"        .option(\"encrypt\", \"true\") \\\n",
+					"        .option(\"databaseName\", db_name) \\\n",
+					"        .option(\"hostNameInCertificate\", \"*.database.windows.net\") \\\n",
+					"        .mode(\"append\") \\\n",
+					"        .save()\n",
+					"except ValueError as error :\n",
+					"    print(\"MSSQL Connector write failed\", error)\n",
+					"\n",
+					"print(\"MSSQL Connector write(append) succeeded  \")\n",
+					""
+				],
+				"execution_count": 130
+			},
+			{
+				"cell_type": "markdown",
+				"metadata": {
+					"nteract": {
+						"transient": {
+							"deleting": false
+						}
+					}
+				},
+				"source": [
+					"#  Table: **NMI**: END"
+				]
+			},
+			{
+				"cell_type": "markdown",
+				"metadata": {
+					"nteract": {
+						"transient": {
+							"deleting": false
+						}
+					}
+				},
+				"source": [
+					"#  Table: **nmi_location**: START"
+				]
+			},
+			{
+				"cell_type": "code",
+				"source": [
+					"if msats_nmi_location_23516:\n",
+					"    #Set table name\n",
+					"    db_tablename=\"nmi_location\"\n",
+					"    Bronze_tablename1=\"msats_nmi_meters\"\n",
+					"    Bronze_tablename2=\"msats_nmi_data\"\n",
+					"    Bronze_notebookname=\"aemo_bronze\"\n",
+					"else:\n",
+					"    print(\"Feature Flag turned off, new code not allowed to run.\")"
+				],
+				"execution_count": 132
+			},
+			{
+				"cell_type": "code",
+				"source": [
+					"if msats_nmi_location_23516:\n",
+					"    #Create Silver Table\n",
+					"    spark.sql(f\"\"\"CREATE DATABASE IF NOT EXISTS {lake_db_name};\"\"\")\n",
+					"    spark.sql(f\"\"\"\n",
+					"    CREATE TABLE IF NOT EXISTS {lake_db_name}.{db_tablename}\n",
+					"    (\n",
+					"        ParticipantId STRING,\n",
+					"        ValidFrom TIMESTAMP,\n",
+					"        ValidFrom_D TIMESTAMP,\n",
+					"        ValidTo TIMESTAMP,\n",
+					"        ValidTo_D TIMESTAMP,\n",
+					"        NMI STRING,\n",
+					"        NMIHashId STRING,\n",
+					"        SerialNumber STRING,\n",
+					"        JurisdictionCode STRING,\n",
+					"        BuildingName STRING,\n",
+					"        LotNumber STRING,\n",
+					"        FlatNumber STRING,\n",
+					"        FlatType STRING,\n",
+					"        FloorNumber STRING,\n",
+					"        FloorType STRING,\n",
+					"        HouseNumber STRING,\n",
+					"        HouseNumberSuffix STRING,\n",
+					"        HouseNumberTo STRING,\n",
+					"        HouseNumberToSuffix STRING,\n",
+					"        StreetName STRING,\n",
+					"        StreetType STRING,\n",
+					"        StreetSuffix STRING,\n",
+					"        Suburb STRING,\n",
+					"        LocationDescriptor STRING,\n",
+					"        State STRING,\n",
+					"        PostCode STRING,\n",
+					"        Latitude DECIMAL(10, 7),\n",
+					"        Longitude DECIMAL(10, 7),\n",
+					"        CDCLoadDate TIMESTAMP,\n",
+					"        CDCStartDate TIMESTAMP,\n",
+					"        CDCEndDate TIMESTAMP,\n",
+					"        CDCOps INT,\n",
+					"        CDCCurrentFlag BOOLEAN,\n",
+					"        HashKey STRING,\n",
+					"        HashDiff STRING\n",
+					"    )\n",
+					"    USING delta\n",
+					"    LOCATION 'abfss://{destination_container}@{destination_storage}.dfs.core.windows.net/{destination_path}/{db_tablename}'\n",
+					"    \"\"\")\n",
+					"else:\n",
+					"    print(\"Feature Flag turned off, new code not allowed to run.\")"
+				],
+				"execution_count": 133
+			},
+			{
+				"cell_type": "code",
+				"source": [
+					"if msats_nmi_location_23516:\n",
+					"    # Row count parameters\n",
+					"    Silver_Insert_Pre=spark.sql(f\"\"\" SELECT COUNT(*) FROM {lake_db_name}.{db_tablename} WHERE CDCOps = 1 \"\"\").collect()[0][0]\n",
+					"    Silver_Update_Pre=spark.sql(f\"\"\" SELECT COUNT(*) FROM {lake_db_name}.{db_tablename} WHERE CDCOps = 2 \"\"\").collect()[0][0]\n",
+					"    Silver_Delete_Pre=spark.sql(f\"\"\" SELECT COUNT(*) FROM {lake_db_name}.{db_tablename} WHERE CDCOps = 0 \"\"\").collect()[0][0]\n",
+					"else:\n",
+					"\n",
+					"    print(\"Feature Flag turned off, new code not allowed to run.\")\n",
+					"\n",
+					""
+				],
+				"execution_count": 134
+			},
+			{
+				"cell_type": "code",
+				"source": [
+					"if msats_nmi_location_23516:\n",
+					"    #Silver load dates\n",
+					"    df_Latest_LoadDate = spark.sql(f\"\"\"\n",
+					"                            SELECT date_format(CDCLoadDate,'yyyy-MM-dd HH:mm:ss.SSSSSS') AS Latest_LoadDate FROM\n",
+					"                                (SELECT DISTINCT CDCLoadDate FROM {lake_db_name}.{db_tablename}\n",
+					"                                ORDER BY CDCLoadDate DESC\n",
+					"                                LIMIT 1);\n",
+					"                        \"\"\")\n",
+					"    #display(df_Latest_LoadDate)\n",
+					"\n",
+					"    if df_Latest_LoadDate.count() > 0 and df_Latest_LoadDate.collect()[0][0] != None:\n",
+					"        silver_loaddate = df_Latest_LoadDate.collect()[0][0]\n",
+					"        \n",
+					"    else:\n",
+					"        silver_loaddate = '1900-01-01 00:00:00.000000'\n",
+					"    print(silver_loaddate)\n",
+					"else:\n",
+					"\n",
+					"    print(\"Feature Flag turned off, new code not allowed to run.\")"
+				],
+				"execution_count": 135
+			},
+			{
+				"cell_type": "code",
+				"metadata": {
+					"ms_comments": []
+				},
+				"source": [
+					"if msats_nmi_location_23516:\n",
+					"    # Create a temporary view\n",
+					"\n",
+					"    spark.sql(f\"\"\"\n",
+					"    CREATE OR REPLACE TEMPORARY VIEW Silver_temp_{db_tablename}\n",
+					"    AS\n",
+					"    (\n",
+					"        WITH DimDate AS (\n",
+					"            SELECT Date\n",
+					"            FROM dimtables_gold.dimdate\n",
+					"        ),\n",
+					"\n",
+					"        Meters_Ranked AS (\n",
+					"            SELECT \n",
+					"                m.ParticipantId,\n",
+					"                m.SequenceNumber,\n",
+					"                m.CreationDate,\n",
+					"                m.MaintenanceDate,\n",
+					"                m.RowStatus,\n",
+					"                m.SerialNumber,\n",
+					"                to_date(m.FromDate) AS FromDate,\n",
+					"                to_date(m.ToDate)   AS ToDate,\n",
+					"                m.NMI,\n",
+					"                m.Latitude,\n",
+					"                m.Longitude,\n",
+					"                ROW_NUMBER() OVER (\n",
+					"                    PARTITION BY m.ParticipantId, m.NMI, to_date(m.FromDate)\n",
+					"                    ORDER BY m.CreationDate DESC\n",
+					"                ) AS RecordRank\n",
+					"            FROM {Bronze_notebookname}.{Bronze_tablename1} m\n",
+					"            WHERE m.RowStatus = \"A\"\n",
+					"            AND m.CDCLoadDate > '{silver_loaddate}'\n",
+					"        ),\n",
+					"            \n",
+					"        Meters_Filtered AS (\n",
+					"            SELECT \n",
+					"                *,\n",
+					"                ROW_NUMBER() OVER (\n",
+					"                    PARTITION BY ParticipantId, SequenceNumber\n",
+					"                    ORDER BY MaintenanceDate\n",
+					"                ) AS SequenceRank\n",
+					"            FROM Meters_Ranked\n",
+					"            WHERE RecordRank = 1\n",
+					"        ),\n",
+					"        \n",
+					"        Meters_Final AS (\n",
+					"            SELECT\n",
+					"                ParticipantId,\n",
+					"                RowStatus,\n",
+					"                SerialNumber,\n",
+					"                FromDate,\n",
+					"                ToDate,\n",
+					"                NMI,\n",
+					"                Latitude,\n",
+					"                Longitude\n",
+					"            FROM Meters_Filtered\n",
+					"            WHERE SequenceRank = 1\n",
+					"        ),\n",
+					"\n",
+					"        Data_Ranked AS (\n",
+					"            SELECT \n",
+					"                d.ParticipantId,\n",
+					"                d.SequenceNumber,\n",
+					"                d.CreationDate,\n",
+					"                d.MaintenanceDate,\n",
+					"                d.RowStatus,\n",
+					"                to_date(d.FromDate) AS FromDate,\n",
+					"                to_date(d.ToDate)   AS ToDate,\n",
+					"                d.NMI,\n",
+					"                d.JurisdictionCode,\n",
+					"                d.BuildingName,\n",
+					"                d.LotNumber,\n",
+					"                d.FlatNumber,\n",
+					"                d.FlatType,\n",
+					"                d.FloorNumber,\n",
+					"                d.FloorType,\n",
+					"                d.HouseNumber,\n",
+					"                d.HouseNumberSuffix,\n",
+					"                d.HouseNumberTo,\n",
+					"                d.HouseNumberToSuffix,\n",
+					"                d.StreetName,\n",
+					"                d.StreetType,\n",
+					"                d.StreetSuffix,\n",
+					"                d.Suburb,\n",
+					"                d.LocationDescriptor,\n",
+					"                d.State,\n",
+					"                d.PostCode,\n",
+					"                ROW_NUMBER() OVER (\n",
+					"                    PARTITION BY d.ParticipantId, d.NMI, to_date(d.FromDate)\n",
+					"                    ORDER BY d.CreationDate DESC\n",
+					"                ) AS RecordRank\n",
+					"            FROM {Bronze_notebookname}.{Bronze_tablename2} d\n",
+					"            WHERE d.RowStatus = \"A\" \n",
+					"            AND d.CDCLoadDate > '{silver_loaddate}'\n",
+					"        ),\n",
+					"        \n",
+					"        Data_Filtered AS (\n",
+					"            SELECT \n",
+					"                *,\n",
+					"                ROW_NUMBER() OVER (\n",
+					"                    PARTITION BY ParticipantId, SequenceNumber\n",
+					"                    ORDER BY MaintenanceDate\n",
+					"                ) AS SequenceRank\n",
+					"            FROM Data_Ranked\n",
+					"            WHERE RecordRank = 1\n",
+					"        ),\n",
+					"        \n",
+					"        Data_Final AS (\n",
+					"            SELECT\n",
+					"                ParticipantId,\n",
+					"                RowStatus,\n",
+					"                FromDate,\n",
+					"                ToDate,\n",
+					"                NMI,\n",
+					"                JurisdictionCode,\n",
+					"                BuildingName,\n",
+					"                LotNumber,\n",
+					"                FlatNumber,\n",
+					"                FlatType,\n",
+					"                FloorNumber,\n",
+					"                FloorType,\n",
+					"                HouseNumber,\n",
+					"                HouseNumberSuffix,\n",
+					"                HouseNumberTo,\n",
+					"                HouseNumberToSuffix,\n",
+					"                StreetName,\n",
+					"                StreetType,\n",
+					"                StreetSuffix,\n",
+					"                Suburb,\n",
+					"                LocationDescriptor,\n",
+					"                State,\n",
+					"                PostCode\n",
+					"            FROM Data_Filtered\n",
+					"            WHERE SequenceRank = 1\n",
+					"        ),\n",
+					"\n",
+					"        -- Join with DimDate to convert period based records into daily grain records\n",
+					"        Meters_Date AS (\n",
+					"            SELECT\n",
+					"                dd.Date,\n",
+					"                m.*\n",
+					"            FROM DimDate dd\n",
+					"            INNER JOIN Meters_Final m\n",
+					"                ON dd.Date BETWEEN m.FromDate AND m.ToDate\n",
+					"        ),\n",
+					"\n",
+					"        Data_Date AS (\n",
+					"            SELECT\n",
+					"                dd.Date,\n",
+					"                d.*\n",
+					"            FROM DimDate dd\n",
+					"            INNER JOIN Data_Final d\n",
+					"                ON dd.Date BETWEEN d.FromDate AND d.ToDate\n",
+					"        ),\n",
+					"\n",
+					"        Joined_All AS (\n",
+					"            SELECT\n",
+					"                COALESCE(m.ParticipantId, d.ParticipantId) AS ParticipantId,\n",
+					"                COALESCE(m.RowStatus, d.RowStatus) AS RowStatus,\n",
+					"                COALESCE(m.NMI, d.NMI) AS NMI,\n",
+					"                m.Latitude,\n",
+					"                m.Longitude,\n",
+					"                m.SerialNumber,\n",
+					"                d.JurisdictionCode,\n",
+					"                d.BuildingName,\n",
+					"                d.LotNumber,\n",
+					"                d.FlatNumber,\n",
+					"                d.FlatType,\n",
+					"                d.FloorNumber,\n",
+					"                d.FloorType,\n",
+					"                d.HouseNumber,\n",
+					"                d.HouseNumberSuffix,\n",
+					"                d.HouseNumberTo,\n",
+					"                d.HouseNumberToSuffix,\n",
+					"                d.StreetName,\n",
+					"                d.StreetType,\n",
+					"                d.StreetSuffix,\n",
+					"                d.Suburb,\n",
+					"                d.LocationDescriptor,\n",
+					"                d.State,\n",
+					"                d.PostCode,\n",
+					"                COALESCE(m.Date, d.Date) AS Date\n",
+					"            FROM Meters_Date m\n",
+					"            FULL OUTER JOIN Data_Date d\n",
+					"                ON m.ParticipantId = d.ParticipantId\n",
+					"            AND m.NMI = d.NMI\n",
+					"            AND m.Date = d.Date\n",
+					"        ),\n",
+					"\n",
+					"    Final_Grouped AS (\n",
+					"        SELECT\n",
+					"            ParticipantId,\n",
+					"            NMI,\n",
+					"            RowStatus,\n",
+					"            SerialNumber,\n",
+					"            JurisdictionCode,\n",
+					"            BuildingName,\n",
+					"            LotNumber,\n",
+					"            FlatNumber,\n",
+					"            FlatType,\n",
+					"            FloorNumber,\n",
+					"            FloorType,\n",
+					"            HouseNumber,\n",
+					"            HouseNumberSuffix,\n",
+					"            HouseNumberTo,\n",
+					"            HouseNumberToSuffix,\n",
+					"            StreetName,\n",
+					"            StreetType,\n",
+					"            StreetSuffix,\n",
+					"            Suburb,\n",
+					"            LocationDescriptor,\n",
+					"            State,\n",
+					"            PostCode,\n",
+					"            Latitude,\n",
+					"            Longitude,\n",
+					"            MIN(Date) AS FromDate,\n",
+					"            MAX(Date) AS ToDate\n",
+					"        FROM Joined_All\n",
+					"        GROUP BY \n",
+					"            ParticipantId,\n",
+					"            NMI,\n",
+					"            RowStatus,\n",
+					"            SerialNumber,\n",
+					"            JurisdictionCode,\n",
+					"            BuildingName,\n",
+					"            LotNumber,\n",
+					"            FlatNumber,\n",
+					"            FlatType,\n",
+					"            FloorNumber,\n",
+					"            FloorType,\n",
+					"            HouseNumber,\n",
+					"            HouseNumberSuffix,\n",
+					"            HouseNumberTo,\n",
+					"            HouseNumberToSuffix,\n",
+					"            StreetName,\n",
+					"            StreetType,\n",
+					"            StreetSuffix,\n",
+					"            Suburb,\n",
+					"            LocationDescriptor,\n",
+					"            State,\n",
+					"            PostCode,\n",
+					"            Latitude,\n",
+					"            Longitude\n",
+					"    )\n",
+					"\n",
+					"        SELECT\n",
+					"            ParticipantId,\n",
+					"            FromDate,\n",
+					"            ToDate,\n",
+					"            NMI,\n",
+					"            SerialNumber,\n",
+					"            JurisdictionCode,\n",
+					"            BuildingName,\n",
+					"            LotNumber,\n",
+					"            FlatNumber,\n",
+					"            FlatType,\n",
+					"            FloorNumber,\n",
+					"            FloorType,\n",
+					"            HouseNumber,\n",
+					"            HouseNumberSuffix,\n",
+					"            HouseNumberTo,\n",
+					"            HouseNumberToSuffix,\n",
+					"            StreetName,\n",
+					"            StreetType,\n",
+					"            StreetSuffix,\n",
+					"            Suburb,\n",
+					"            LocationDescriptor,\n",
+					"            State,\n",
+					"            PostCode,\n",
+					"            Latitude,\n",
+					"            Longitude\n",
+					"        FROM Final_Grouped\n",
+					"        ORDER BY ParticipantId, NMI\n",
+					"    )\n",
+					"    \"\"\")\n",
+					"\n",
+					"else:\n",
+					"    print(\"Feature Flag turned off, new code not allowed to run.\")"
+				],
+				"execution_count": 137
+			},
+			{
+				"cell_type": "code",
+				"source": [
+					"if msats_nmi_location_23516:\n",
+					"    df_silver = spark.sql(f\"\"\"SELECT * FROM Silver_temp_{db_tablename} \"\"\")\n",
+					"\n",
+					"    # Changing timestamp columns format from UTC to AEST\n",
+					"    df_silver = df_silver.withColumn(\"FromDate_D\", from_utc_timestamp(col(\"FromDate\"), \"Australia/Brisbane\"))\n",
+					"    df_silver = df_silver.withColumn(\"ToDate_D\", from_utc_timestamp(col(\"ToDate\"), \"Australia/Brisbane\"))\n",
+					"\n",
+					"    # Add CDC columns\n",
+					"    df_silver = df_silver.withColumn(\"HashKey\", sha2(concat_ws(\"||\", \"ParticipantId\",\"NMI\", \"FromDate\", \"SerialNumber\"), 256))\n",
+					"    df_silver = df_silver.withColumn(\"HashDiff\", sha2(concat_ws(\"||\",\"ToDate\",\"JurisdictionCode\",\"BuildingName\",\"LotNumber\",\"FlatNumber\",\"FlatType\",\"FloorNumber\",\"FloorType\",\"HouseNumber\",\"HouseNumberSuffix\",\"HouseNumberTo\",\"HouseNumberToSuffix\",\"StreetName\",\"StreetType\",\"StreetSuffix\",\"Suburb\",\"LocationDescriptor\",\"State\",\"PostCode\",\"Latitude\",\"Longitude\"), 256))\n",
+					"    df_silver = df_silver.withColumn(\"NMIHashId\", sha2(concat_ws(\"||\", \"NMI\"), 256))\n",
+					"    df_silver = df_silver.withColumn(\"CDCLoadDate\", to_timestamp(lit(Silver_LoadDate),'yyyy-MM-dd HH:mm:ss'))\n",
+					"    df_silver = df_silver.withColumn(\"CDCStartDate\", to_timestamp(lit(Silver_LoadDate), 'yyyy-MM-dd HH:mm:ss'))\n",
+					"    df_silver = df_silver.withColumn(\"CDCEndDate\", to_timestamp(lit(\"9999-12-31 23:59:59\"), 'yyyy-MM-dd HH:mm:ss'))\n",
+					"    df_silver = df_silver.withColumn(\"CDCCurrentFlag\", lit(1))\n",
+					"    df_silver = df_silver.withColumn(\"CDCOps\", lit(1))\n",
+					"\n",
+					"else:\n",
+					"    print(\"Feature Flag turned off, new code not allowed to run.\")\n",
+					""
+				],
+				"execution_count": 138
+			},
+			{
+				"cell_type": "code",
+				"source": [
+					"\n",
+					"if msats_nmi_location_23516:\n",
+					"    # Row count parameters\n",
+					"    Silver_Insert_Pre=spark.sql(f\"\"\" SELECT COUNT(*) FROM {lake_db_name}.{db_tablename} WHERE CDCOps = 1 \"\"\").collect()[0][0]\n",
+					"    Silver_Update_Pre=spark.sql(f\"\"\" SELECT COUNT(*) FROM {lake_db_name}.{db_tablename} WHERE CDCOps = 2 \"\"\").collect()[0][0]\n",
+					"    Silver_Delete_Pre=spark.sql(f\"\"\" SELECT COUNT(*) FROM {lake_db_name}.{db_tablename} WHERE CDCOps = 0 \"\"\").collect()[0][0]\n",
+					"else:\n",
+					"\n",
+					"    print(\"Feature Flag turned off, new code not allowed to run.\")\n",
+					""
+				],
+				"execution_count": 139
+			},
+			{
+				"cell_type": "code",
+				"source": [
+					"if msats_nmi_location_23516:\n",
+					"    print(Silver_Insert_Pre)\n",
+					"    print(Silver_Update_Pre)\n",
+					"    print(Silver_Delete_Pre)\n",
+					"else:\n",
+					"    print(\"Feature Flag turned off, new code not allowed to run.\")\n",
+					""
+				],
+				"execution_count": 140
+			},
+			{
+				"cell_type": "code",
+				"metadata": {
+					"editable": true,
+					"run_control": {
+						"frozen": false
+					}
+				},
+				"source": [
+					"if msats_nmi_location_23516:\n",
+					"  # SCD2 logic\n",
+					"  # Create a temporary view of the dataframe\n",
+					"  df_silver.createOrReplaceTempView(\"temp_table\")\n",
+					"\n",
+					"  # Use the merge operation to update the target table\n",
+					"  spark.sql(f\"\"\"\n",
+					"      MERGE INTO {lake_db_name}.{db_tablename} t\n",
+					"      USING temp_table s\n",
+					"      ON t.HashKey = s.HashKey AND t.CDCCurrentFlag == true\n",
+					"      WHEN MATCHED AND t.HashDiff <> s.HashDiff THEN\n",
+					"        UPDATE SET t.CDCEndDate = '{Silver_UpdateEndDate}',\n",
+					"                  t.CDCCurrentFlag = false,\n",
+					"                  t.CDCOps = s.CDCOps + 1\n",
+					"      WHEN NOT MATCHED THEN\n",
+					"        INSERT (\n",
+					"          ParticipantId, ValidFrom, ValidFrom_D, ValidTo, ValidTo_D, NMI, NMIHashId, SerialNumber,\n",
+					"          JurisdictionCode, BuildingName, LotNumber, FlatNumber, FlatType, FloorNumber, FloorType, \n",
+					"          HouseNumber, HouseNumberSuffix, HouseNumberTo, HouseNumberToSuffix,\n",
+					"          StreetName, StreetType, StreetSuffix, Suburb, LocationDescriptor, State, PostCode, Latitude, Longitude,\n",
+					"          CDCLoadDate, CDCStartDate, CDCEndDate, CDCOps, CDCCurrentFlag, HashKey, HashDiff\n",
+					"          )\n",
+					"        VALUES (\n",
+					"          s.ParticipantId, s.FromDate, s.FromDate_D, s.ToDate, s.ToDate_D, s.NMI, s.NMIHashId, s.SerialNumber,\n",
+					"          s.JurisdictionCode, s.BuildingName, s.LotNumber, s.FlatNumber, s.FlatType, s.FloorNumber, s.FloorType,\n",
+					"          s.HouseNumber, s.HouseNumberSuffix, s.HouseNumberTo, s.HouseNumberToSuffix,\n",
+					"          s.StreetName, s.StreetType, s.StreetSuffix, s.Suburb, s.LocationDescriptor, s.State, s.PostCode, s.Latitude, s.Longitude,\n",
+					"          s.CDCLoadDate, s.CDCStartDate, s.CDCEndDate, s.CDCOps, s.CDCCurrentFlag, s.HashKey, s.HashDiff\n",
+					"          )\n",
+					"  \"\"\")\n",
+					"\n",
+					"  # Use the merge operation to Insert updated record \n",
+					"  spark.sql(f\"\"\"\n",
+					"      MERGE INTO {lake_db_name}.{db_tablename} t\n",
+					"      USING temp_table s\n",
+					"      ON t.HashKey = s.HashKey AND t.CDCCurrentFlag == true\n",
+					"      WHEN MATCHED AND t.HashDiff <> s.HashDiff THEN\n",
+					"        UPDATE SET t.CDCEndDate = '{Silver_UpdateEndDate}',\n",
+					"                  t.CDCCurrentFlag = false,\n",
+					"                  t.CDCOps = s.CDCOps + 1\n",
+					"      WHEN NOT MATCHED THEN\n",
+					"        INSERT (\n",
+					"          ParticipantId, ValidFrom, ValidFrom_D, ValidTo, ValidTo_D, NMI, NMIHashId, SerialNumber,\n",
+					"          JurisdictionCode, BuildingName, LotNumber, FlatNumber, FlatType, FloorNumber, FloorType, \n",
+					"          HouseNumber, HouseNumberSuffix, HouseNumberTo, HouseNumberToSuffix,\n",
+					"          StreetName, StreetType, StreetSuffix, Suburb, LocationDescriptor, State, PostCode, Latitude, Longitude,\n",
+					"          CDCLoadDate, CDCStartDate, CDCEndDate, CDCOps, CDCCurrentFlag, HashKey, HashDiff\n",
+					"          )\n",
+					"        VALUES (\n",
+					"          s.ParticipantId, s.FromDate, s.FromDate_D, s.ToDate, s.ToDate_D, s.NMI, s.NMIHashId, s.SerialNumber,\n",
+					"          s.JurisdictionCode, s.BuildingName, s.LotNumber, s.FlatNumber, s.FlatType, s.FloorNumber, s.FloorType,\n",
+					"          s.HouseNumber, s.HouseNumberSuffix, s.HouseNumberTo, s.HouseNumberToSuffix,\n",
+					"          s.StreetName, s.StreetType, s.StreetSuffix, s.Suburb, s.LocationDescriptor, s.State, s.PostCode, s.Latitude, s.Longitude,\n",
+					"          s.CDCLoadDate, s.CDCStartDate, s.CDCEndDate, s.CDCOps, s.CDCCurrentFlag, s.HashKey, s.HashDiff\n",
+					"          )\n",
+					"  \"\"\")\n",
+					"\n",
+					"else:\n",
+					"    print(\"Feature Flag turned off, new code not allowed to run.\")"
+				],
+				"execution_count": 141
+			},
+			{
+				"cell_type": "code",
+				"source": [
+					"if msats_nmi_location_23516:\n",
+					"    #Row count parameters\n",
+					"    Silver_Insert_Post=spark.sql(f\"\"\" SELECT COUNT(*) FROM {lake_db_name}.{db_tablename} WHERE CDCOps = 1 \"\"\").collect()[0][0]\n",
+					"    Silver_Update_Post=spark.sql(f\"\"\" SELECT COUNT(*) FROM {lake_db_name}.{db_tablename} WHERE CDCOps = 2 \"\"\").collect()[0][0]\n",
+					"    Silver_Delete_Post=spark.sql(f\"\"\" SELECT COUNT(*) FROM {lake_db_name}.{db_tablename} WHERE CDCOps = 0 \"\"\").collect()[0][0]\n",
+					"    Silver_TotalRowCount_Post=spark.sql(f\"\"\" SELECT COUNT(*) FROM {lake_db_name}.{db_tablename}\"\"\").collect()[0][0]\n",
+					"    Silver_ActiveRecord_Post=spark.sql(f\"\"\" SELECT COUNT(*) FROM {lake_db_name}.{db_tablename} WHERE CDCCurrentFlag = true \"\"\").collect()[0][0]\n",
+					"\n",
+					"else:\n",
+					"    print(\"Feature Flag turned off, new code not allowed to run.\")"
+				],
+				"execution_count": 142
+			},
+			{
+				"cell_type": "markdown",
+				"metadata": {
+					"nteract": {
+						"transient": {
+							"deleting": false
+						}
+					}
+				},
+				"source": [
+					"#  Table: **nmi_location**: END"
+				]
+			}
+		]
+	}
+}

@@ -1,0 +1,11 @@
+{
+	"name": "Retail Operations",
+	"properties": {
+		"annotations": [],
+		"type": "PowerBIWorkspace",
+		"typeProperties": {
+			"workspaceID": "8772bbcf-fe28-4191-b0d8-b4de2882c543",
+			"tenantID": "22a3df9b-ba07-4cf7-97c5-5dd4ff48c62f"
+		}
+	}
+}

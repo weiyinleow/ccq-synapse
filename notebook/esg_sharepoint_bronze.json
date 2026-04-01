@@ -1,0 +1,1926 @@
+{
+	"name": "esg_sharepoint_bronze",
+	"properties": {
+		"folder": {
+			"name": "DataHubBatchScripts/ESG_SHAREPOINT"
+		},
+		"nbformat": 4,
+		"nbformat_minor": 2,
+		"bigDataPool": {
+			"referenceName": "Sparkpool01",
+			"type": "BigDataPoolReference"
+		},
+		"sessionProperties": {
+			"driverMemory": "56g",
+			"driverCores": 8,
+			"executorMemory": "56g",
+			"executorCores": 8,
+			"numExecutors": 2,
+			"conf": {
+				"spark.dynamicAllocation.enabled": "false",
+				"spark.dynamicAllocation.minExecutors": "2",
+				"spark.dynamicAllocation.maxExecutors": "2",
+				"spark.autotune.trackingId": "41095846-3c37-47a5-b215-4e94ddb298d5"
+			}
+		},
+		"metadata": {
+			"saveOutput": true,
+			"enableDebugMode": false,
+			"kernelspec": {
+				"name": "synapse_pyspark",
+				"display_name": "Synapse PySpark"
+			},
+			"language_info": {
+				"name": "python"
+			},
+			"a365ComputeOptions": {
+				"id": "/subscriptions/2e9f823e-dc76-4e8e-b815-c8a4f22d05ff/resourceGroups/CQL-AZUR1-DEVDATAHUB01-RG/providers/Microsoft.Synapse/workspaces/cql-dev-datahub-synapse01/bigDataPools/Sparkpool01",
+				"name": "Sparkpool01",
+				"type": "Spark",
+				"endpoint": "https://cql-dev-datahub-synapse01.dev.azuresynapse.net/livyApi/versions/2019-11-01-preview/sparkPools/Sparkpool01",
+				"auth": {
+					"type": "AAD",
+					"authResource": "https://dev.azuresynapse.net"
+				},
+				"sparkVersion": "3.4",
+				"nodeCount": 10,
+				"cores": 8,
+				"memory": 56,
+				"automaticScaleJobs": false
+			},
+			"sessionKeepAliveTimeout": 30
+		},
+		"cells": [
+			{
+				"cell_type": "markdown",
+				"metadata": {
+					"nteract": {
+						"transient": {
+							"deleting": false
+						}
+					}
+				},
+				"source": [
+					"#### Implement Feature Flags"
+				]
+			},
+			{
+				"cell_type": "code",
+				"source": [
+					"esg_sharepoint_bronze_flag = False"
+				],
+				"execution_count": 1
+			},
+			{
+				"cell_type": "code",
+				"source": [
+					"%run \"DataHubBatchScripts/DEVELOPMENT_TOOLS/get_feature_flags\""
+				],
+				"execution_count": 2
+			},
+			{
+				"cell_type": "code",
+				"source": [
+					"try:\n",
+					"    esg_sharepoint_bronze_flag = df_feature_flags.where(\"FlagName = 'esg_sharepoint_bronze'\").collect()[0][\"FlagState\"]\n",
+					"except Exception as e:\n",
+					"    print(e)"
+				],
+				"execution_count": 3
+			},
+			{
+				"cell_type": "markdown",
+				"metadata": {
+					"nteract": {
+						"transient": {
+							"deleting": false
+						}
+					}
+				},
+				"source": [
+					"#### Import python libraries"
+				]
+			},
+			{
+				"cell_type": "code",
+				"source": [
+					"#Get Parameters from controldb\n",
+					"import json\n",
+					"import sys\n",
+					"import logging"
+				],
+				"execution_count": 76
+			},
+			{
+				"cell_type": "markdown",
+				"metadata": {
+					"nteract": {
+						"transient": {
+							"deleting": false
+						}
+					}
+				},
+				"source": [
+					"#### Configure logging"
+				]
+			},
+			{
+				"cell_type": "code",
+				"source": [
+					"if esg_sharepoint_bronze_flag:\n",
+					"    print(\"Feature Flag turned on, new code allowed to run.\")\n",
+					"    # Configure logging\n",
+					"    def setup_logger(notebook_name):\n",
+					"        # Get or create logger\n",
+					"        logger = logging.getLogger(notebook_name)\n",
+					"        logger.setLevel(logging.DEBUG)  # Set to DEBUG for detailed logs\n",
+					"\n",
+					"        # Remove any existing handlers to prevent duplicates\n",
+					"        logger.handlers.clear()\n",
+					"\n",
+					"        # Prevent propagation to root logger (avoids default handlers)\n",
+					"        logger.propagate = False\n",
+					"\n",
+					"        # Create console handler\n",
+					"        console_handler = logging.StreamHandler(sys.stdout)\n",
+					"        console_handler.setLevel(logging.DEBUG)\n",
+					"\n",
+					"        # Define log format (only the formatted line will appear)\n",
+					"        log_format = logging.Formatter('%(asctime)s - %(name)s - %(levelname)s - %(message)s')\n",
+					"        console_handler.setFormatter(log_format)\n",
+					"\n",
+					"        # Add handler to logger\n",
+					"        logger.addHandler(console_handler)\n",
+					"        \n",
+					"        return logger\n",
+					"\n",
+					"else:\n",
+					"    print(\"Feature Flag turned off, new code not allowed to run.\")"
+				],
+				"execution_count": 77
+			},
+			{
+				"cell_type": "markdown",
+				"metadata": {
+					"nteract": {
+						"transient": {
+							"deleting": false
+						}
+					}
+				},
+				"source": [
+					"# Get parameters from CTL db\n",
+					"### db_notebookname & NotebookPath: **esg_sharepoint_bronze**\n",
+					""
+				]
+			},
+			{
+				"cell_type": "code",
+				"metadata": {
+					"jupyter": {
+						"source_hidden": false,
+						"outputs_hidden": false
+					},
+					"nteract": {
+						"transient": {
+							"deleting": false
+						}
+					},
+					"collapsed": false
+				},
+				"source": [
+					"#Get Parameters from controldb\n",
+					"db_port = 1433\n",
+					"linked_service_name = \"LS_SQL_ELTFrameworkDB\"\n",
+					"db_notebookname= \"esg_sharepoint_bronze\"\n",
+					"linkedServiceProperties = json.loads(mssparkutils.credentials.getPropertiesAll(linked_service_name))\n",
+					"sql_server_name = linkedServiceProperties.get('Endpoint')\n",
+					"db_name = linkedServiceProperties.get('Database')\n",
+					"#print(linkedServiceProperties)\n",
+					"access_token = mssparkutils.credentials.getConnectionStringOrCreds(linked_service_name)\n",
+					"\n",
+					"#Get load meta from controldb\n",
+					"\n",
+					"db_query =\"SELECT A.*,B.NotebookParameterId,B.ParameterType,B.Value  FROM [CTL].[CFG_NOTEBOOK] A LEFT JOIN [CTL].[CFG_NOTEBOOK_PARAMETER] B ON A.NotebookId = B.NotebookId\"\n",
+					"\n",
+					"df = spark.read.format(\"jdbc\") \\\n",
+					"    .option(\"url\", \"jdbc:sqlserver://%s:%s\" % (sql_server_name, db_port)) \\\n",
+					"    .option(\"query\", db_query) \\\n",
+					"    .option(\"accessToken\", access_token) \\\n",
+					"    .option(\"encrypt\", \"true\") \\\n",
+					"    .option(\"databaseName\", db_name) \\\n",
+					"    .option(\"hostNameInCertificate\", \"*.database.windows.net\") \\\n",
+					"    .load()\n",
+					"\n",
+					"#Join cfg_notebook and cfg_notebook_parameter tables to retrieve source & target meta from controldb\n",
+					"\n",
+					"df2 = df.where(df.NotebookPath==db_notebookname) \n",
+					"\n",
+					"#display(df2)"
+				],
+				"execution_count": 6
+			},
+			{
+				"cell_type": "code",
+				"metadata": {
+					"collapsed": false
+				},
+				"source": [
+					"#Source DataLake storage details\n",
+					"source_storage = df2.where(df2.ParameterType=='source_storage').collect()[0][\"Value\"] #Storage name\n",
+					"source_container = df2.where(df2.ParameterType=='source_container').collect()[0][\"Value\"] #Storage container detail\n",
+					"source_path = df2.where(df2.ParameterType=='source_path').collect()[0][\"Value\"] #internal folder location in container \n",
+					"\n",
+					"#Destination DataLake storage details\n",
+					"destination_storage = df2.where(df2.ParameterType=='destination_storage').collect()[0][\"Value\"] #Storage name\n",
+					"destination_container = df2.where(df2.ParameterType=='destination_container').collect()[0][\"Value\"] #raw storage container details\n",
+					"destination_path = df2.where(df2.ParameterType=='destination_path').collect()[0][\"Value\"] #raw delta file patch\n",
+					"\n",
+					"#Get Current Date\n",
+					"Date_Collection = spark.sql(\"select current_timestamp() AS Current,(current_timestamp() + interval '-1' second) AS EndDate\").collect()\n",
+					"Bronze_LoadDate = Date_Collection[0]['Current']\n",
+					"Bronze_UpdateEndDate = Date_Collection[0]['EndDate']"
+				],
+				"execution_count": 7
+			},
+			{
+				"cell_type": "markdown",
+				"metadata": {
+					"nteract": {
+						"transient": {
+							"deleting": false
+						}
+					}
+				},
+				"source": [
+					"# Table: **reference_data**: START\n",
+					""
+				]
+			},
+			{
+				"cell_type": "markdown",
+				"metadata": {
+					"nteract": {
+						"transient": {
+							"deleting": false
+						}
+					}
+				},
+				"source": [
+					"#UTILS: Set table name\n",
+					"\n",
+					"#tablename=\"reference_data\"\n",
+					"\n",
+					"#UTILS: Drop db\n",
+					"\n",
+					"#spark.sql(f\"\"\"DROP DATABASE IF EXISTS {db_notebookname} CASCADE\"\"\")\n",
+					"#raw_output_path = f\"abfss://{destination_container}@{destination_storage}.dfs.core.windows.net/{destination_path}\"\n",
+					"#mssparkutils.fs.rm(raw_output_path,recurse=True)\n",
+					"\n",
+					"#UTILS: Drop table\n",
+					"\n",
+					"#spark.sql(f\"\"\"DROP TABLE IF EXISTS {db_notebookname}.{tablename}\"\"\")\n",
+					"#raw_output_path = f\"abfss://{destination_container}@{destination_storage}.dfs.core.windows.net/{destination_path}/{tablename}\"\n",
+					"#mssparkutils.fs.rm(raw_output_path,recurse=True)"
+				]
+			},
+			{
+				"cell_type": "code",
+				"metadata": {
+					"jupyter": {
+						"source_hidden": false,
+						"outputs_hidden": false
+					},
+					"nteract": {
+						"transient": {
+							"deleting": false
+						}
+					}
+				},
+				"source": [
+					"#Set table name\n",
+					"db_tablename=\"reference_data\"\n",
+					"\n",
+					"if esg_sharepoint_bronze_flag:\n",
+					"    print(\"Feature Flag turned on, new code allowed to run.\")\n",
+					"    # Set up logger for this notebook section\n",
+					"    logger = setup_logger(db_tablename)\t\n",
+					"else:\n",
+					"    print(\"Feature Flag turned off, new code not allowed to run.\")"
+				],
+				"execution_count": 8
+			},
+			{
+				"cell_type": "code",
+				"metadata": {
+					"jupyter": {
+						"source_hidden": false,
+						"outputs_hidden": false
+					},
+					"nteract": {
+						"transient": {
+							"deleting": false
+						}
+					}
+				},
+				"source": [
+					"#Create reference_data: Bronze Table\n",
+					"\n",
+					"spark.sql(f\"\"\"CREATE DATABASE IF NOT EXISTS {db_notebookname};\"\"\")\n",
+					"spark.sql(f\"\"\"\n",
+					"CREATE TABLE IF NOT EXISTS {db_notebookname}.{db_tablename}\n",
+					"(\n",
+					"    Dataset STRING,\n",
+					"    Code STRING,\n",
+					"    Description STRING,\n",
+					"    NumericValue STRING,\n",
+					"    UnitOfMeasure STRING,\n",
+					"    DisplayOrder STRING,\n",
+					"    ValidFromDate STRING,\n",
+					"    ValidToDate STRING,\n",
+					"    ReferenceLink STRING,\n",
+					"    CDCLoadDate TIMESTAMP,\n",
+					"    CDCStartDate TIMESTAMP,\n",
+					"    CDCEndDate TIMESTAMP,\n",
+					"    CDCOps INT,\n",
+					"    CDCCurrentFlag BOOLEAN,\n",
+					"    HashKey STRING,\n",
+					"    HashDiff STRING   \n",
+					")\n",
+					"USING delta\n",
+					"LOCATION 'abfss://{destination_container}@{destination_storage}.dfs.core.windows.net/{destination_path}/{db_tablename}'\n",
+					"\"\"\")"
+				],
+				"execution_count": 9
+			},
+			{
+				"cell_type": "code",
+				"metadata": {
+					"jupyter": {
+						"source_hidden": false,
+						"outputs_hidden": false
+					},
+					"nteract": {
+						"transient": {
+							"deleting": false
+						}
+					},
+					"collapsed": false
+				},
+				"source": [
+					"if esg_sharepoint_bronze_flag:\n",
+					"    print(\"Feature Flag turned on, new code allowed to run.\")\n",
+					"    # load parquet file as dataframe\n",
+					"    try:\n",
+					"        raw_df = spark.read.format(\"parquet\").load(f'abfss://{source_container}@{source_storage}.dfs.core.windows.net/{source_path}/{db_tablename}/')\n",
+					"\n",
+					"    except Exception as e:\n",
+					"        logger.error(f\"Error - Reading parquet file: 'abfss://{source_container}@{source_storage}.dfs.core.windows.net/{source_path}/{db_tablename}/: {str(e)}\")\n",
+					"        raise\t\n",
+					"else:\n",
+					"    print(\"Feature Flag turned off, new code not allowed to run.\")\n",
+					"    # load parquet file as dataframe\n",
+					"    raw_df = spark.read.format(\"parquet\").load(f'abfss://{source_container}@{source_storage}.dfs.core.windows.net/{source_path}/{db_tablename}/')"
+				],
+				"execution_count": 10
+			},
+			{
+				"cell_type": "code",
+				"metadata": {
+					"jupyter": {
+						"source_hidden": false,
+						"outputs_hidden": false
+					},
+					"nteract": {
+						"transient": {
+							"deleting": false
+						}
+					},
+					"collapsed": false
+				},
+				"source": [
+					"# Add CDC columns\n",
+					"from pyspark.sql.functions import hash\n",
+					"from pyspark.sql import functions as fn\n",
+					"from pyspark.sql.functions import col, concat, lit, to_timestamp,current_timestamp,date_format, to_date, when\n",
+					"from pyspark.sql.functions import sha2, concat_ws, regexp_replace\n",
+					"from pyspark.sql.types import DecimalType\n",
+					"\n",
+					"\n",
+					"raw_df = raw_df.withColumn(\"HashKey\", sha2(concat_ws(\"||\", \"Dataset\", \"Code\", regexp_replace(\"ValidFromDate\", \"-|[/.:]\", \"\"), regexp_replace(\"ValidToDate\", \"-|[/.:]\", \"\")), 256))\n",
+					"raw_df = raw_df.withColumn(\"HashDiff\", sha2(concat_ws(\"||\",\"Description\",\"NumericValue\",\"UnitOfMeasure\",\"DisplayOrder\",\"ReferenceLink\"), 256))\n",
+					"raw_df = raw_df.withColumn(\"CDCLoadDate\", to_timestamp(lit(Bronze_LoadDate),'yyyy-MM-dd HH:mm:ss'))\n",
+					"raw_df = raw_df.withColumn(\"CDCStartDate\", to_timestamp(lit(Bronze_LoadDate), 'yyyy-MM-dd HH:mm:ss'))\n",
+					"raw_df = raw_df.withColumn(\"CDCEndDate\", to_timestamp(lit(\"9999-12-31 23:59:59\"), 'yyyy-MM-dd HH:mm:ss'))\n",
+					"raw_df = raw_df.withColumn(\"CDCCurrentFlag\", lit(1))\n",
+					"raw_df = raw_df.withColumn(\"CDCOps\", lit(1))\n",
+					"\n",
+					"#display(raw_df)"
+				],
+				"execution_count": 11
+			},
+			{
+				"cell_type": "code",
+				"metadata": {
+					"jupyter": {
+						"source_hidden": false,
+						"outputs_hidden": false
+					},
+					"nteract": {
+						"transient": {
+							"deleting": false
+						}
+					}
+				},
+				"source": [
+					"# Row count parameters\n",
+					"Bronze_Insert_Pre=spark.sql(f\"\"\" SELECT COUNT(*) FROM {db_notebookname}.{db_tablename} WHERE CDCOps = 1 \"\"\").collect()[0][0]\n",
+					"Bronze_Update_Pre=spark.sql(f\"\"\" SELECT COUNT(*) FROM {db_notebookname}.{db_tablename} WHERE CDCOps = 2 \"\"\").collect()[0][0]\n",
+					"Bronze_Delete_Pre=spark.sql(f\"\"\" SELECT COUNT(*) FROM {db_notebookname}.{db_tablename} WHERE CDCOps = 0 \"\"\").collect()[0][0]\n",
+					""
+				],
+				"execution_count": 38
+			},
+			{
+				"cell_type": "code",
+				"metadata": {
+					"jupyter": {
+						"source_hidden": false,
+						"outputs_hidden": false
+					},
+					"nteract": {
+						"transient": {
+							"deleting": false
+						}
+					}
+				},
+				"source": [
+					"# SCD2 logic\n",
+					"\n",
+					"# Create a temporary view of the dataframe\n",
+					"\n",
+					"raw_df.createOrReplaceTempView(\"temp_table\")\n",
+					"\n",
+					"# Use the merge operation to update the target table\n",
+					"\n",
+					"spark.sql(f\"\"\"\n",
+					"    MERGE INTO {db_notebookname}.{db_tablename} t\n",
+					"    USING temp_table s\n",
+					"    ON t.HashKey = s.HashKey AND t.CDCCurrentFlag == true\n",
+					"    WHEN MATCHED AND t.HashDiff <> s.HashDiff THEN\n",
+					"      UPDATE SET t.CDCEndDate = '{Bronze_UpdateEndDate}',\n",
+					"                 t.CDCCurrentFlag = false,\n",
+					"                 t.CDCOps = s.CDCOps + 1\n",
+					"    WHEN NOT MATCHED THEN\n",
+					"      INSERT ( Dataset, Code, Description, NumericValue, UnitOfMeasure, DisplayOrder, ValidFromDate, ValidToDate, ReferenceLink, CDCLoadDate, CDCStartDate, CDCEndDate, CDCOps, CDCCurrentFlag, HashKey, HashDiff)\n",
+					"      VALUES (s.Dataset, s.Code, s.Description, s.NumericValue, s.UnitOfMeasure, s.DisplayOrder, s.ValidFromDate, s.ValidToDate, s.ReferenceLink, s.CDCLoadDate, s.CDCStartDate, s.CDCEndDate, 1, s.CDCCurrentFlag, s.HashKey, s.HashDiff)\n",
+					"\"\"\")\n",
+					"\n",
+					"# Use the merge operation to Insert updated record \n",
+					"\n",
+					"\n",
+					"spark.sql(f\"\"\"\n",
+					"    MERGE INTO {db_notebookname}.{db_tablename} t\n",
+					"    USING temp_table s\n",
+					"    ON t.HashKey = s.HashKey AND t.CDCCurrentFlag == true\n",
+					"    WHEN MATCHED AND t.HashDiff <> s.HashDiff THEN\n",
+					"      UPDATE SET t.CDCEndDate = '{Bronze_UpdateEndDate}',\n",
+					"                 t.CDCCurrentFlag = false,\n",
+					"                 t.CDCOps = s.CDCOps + 1\n",
+					"    WHEN NOT MATCHED THEN\n",
+					"      INSERT ( Dataset, Code, Description, NumericValue, UnitOfMeasure, DisplayOrder, ValidFromDate, ValidToDate, ReferenceLink, CDCLoadDate, CDCStartDate, CDCEndDate, CDCOps, CDCCurrentFlag, HashKey, HashDiff)\n",
+					"      VALUES (s.Dataset, s.Code, s.Description, s.NumericValue, s.UnitOfMeasure, s.DisplayOrder, s.ValidFromDate, s.ValidToDate, s.ReferenceLink, s.CDCLoadDate, s.CDCStartDate, s.CDCEndDate, 1, s.CDCCurrentFlag, s.HashKey, s.HashDiff)\n",
+					"\"\"\")"
+				],
+				"execution_count": 39
+			},
+			{
+				"cell_type": "code",
+				"metadata": {
+					"jupyter": {
+						"source_hidden": false,
+						"outputs_hidden": false
+					},
+					"nteract": {
+						"transient": {
+							"deleting": false
+						}
+					}
+				},
+				"source": [
+					"#Row count parameters\n",
+					"\n",
+					"Bronze_Insert_Post=spark.sql(f\"\"\" SELECT COUNT(*) FROM {db_notebookname}.{db_tablename} WHERE CDCOps = 1 \"\"\").collect()[0][0]\n",
+					"Bronze_Update_Post=spark.sql(f\"\"\" SELECT COUNT(*) FROM {db_notebookname}.{db_tablename} WHERE CDCOps = 2 \"\"\").collect()[0][0]\n",
+					"Bronze_Delete_Post=spark.sql(f\"\"\" SELECT COUNT(*) FROM {db_notebookname}.{db_tablename} WHERE CDCOps = 0 \"\"\").collect()[0][0]\n",
+					"Bronze_TotalRowCount_Post=spark.sql(f\"\"\" SELECT COUNT(*) FROM {db_notebookname}.{db_tablename}\"\"\").collect()[0][0]\n",
+					"Bronze_ActiveRecord_Post=spark.sql(f\"\"\" SELECT COUNT(*) FROM {db_notebookname}.{db_tablename} WHERE CDCCurrentFlag = true \"\"\").collect()[0][0]"
+				],
+				"execution_count": 40
+			},
+			{
+				"cell_type": "code",
+				"metadata": {
+					"jupyter": {
+						"source_hidden": false,
+						"outputs_hidden": false
+					},
+					"nteract": {
+						"transient": {
+							"deleting": false
+						}
+					}
+				},
+				"source": [
+					"#Row calculation\n",
+					"\n",
+					"Bronze_Update = Bronze_Update_Post - Bronze_Update_Pre\n",
+					"Bronze_Insert = (Bronze_Insert_Post - Bronze_Insert_Pre) + Bronze_Update\n",
+					"Bronze_Delete = Bronze_Delete_Post - Bronze_Delete_Pre\n",
+					"Bronze_ActiveRows = Bronze_ActiveRecord_Post \n",
+					"Bronze_TotalRows = Bronze_TotalRowCount_Post"
+				],
+				"execution_count": 41
+			},
+			{
+				"cell_type": "code",
+				"metadata": {
+					"jupyter": {
+						"source_hidden": false,
+						"outputs_hidden": false
+					},
+					"nteract": {
+						"transient": {
+							"deleting": false
+						}
+					},
+					"collapsed": false
+				},
+				"source": [
+					"#Create dataframe to insert log to controldb\n",
+					"\n",
+					"from pyspark.sql.types import StructType, StructField, StringType, IntegerType, BooleanType,DateType, DoubleType,TimestampType\n",
+					"\n",
+					"log_data = [(db_notebookname,db_tablename,Bronze_LoadDate,Bronze_Insert,Bronze_Update,Bronze_Delete,Bronze_ActiveRows,Bronze_TotalRows)]\n",
+					"print(log_data)\n",
+					"log_columns = ['PIPELINE_NAME', 'TABLE_NAME', 'INGEST_DATETIME', 'INSERT','UPDATE','DELETE','ACTIVE_ROWS','TOTAL_ROWS']\n",
+					"df_log = spark.createDataFrame(log_data, log_columns)\n",
+					"\n",
+					"#display(df_log)"
+				],
+				"execution_count": 42
+			},
+			{
+				"cell_type": "code",
+				"metadata": {
+					"jupyter": {
+						"source_hidden": false,
+						"outputs_hidden": false
+					},
+					"nteract": {
+						"transient": {
+							"deleting": false
+						}
+					},
+					"collapsed": false
+				},
+				"source": [
+					"#Write df_log to logging table in controldb\n",
+					"db_port = 1433\n",
+					"linked_service_name = \"LS_SQL_ELTFrameworkDB\"\n",
+					"linkedServiceProperties = json.loads(mssparkutils.credentials.getPropertiesAll(linked_service_name))\n",
+					"sql_server_name = linkedServiceProperties.get('Endpoint')\n",
+					"db_name = linkedServiceProperties.get('Database')\n",
+					"access_token = mssparkutils.credentials.getConnectionStringOrCreds(linked_service_name)\n",
+					"write_table_name = \"[CTL].[CFG_INGESTION_LOGS]\"\n",
+					"\n",
+					"try:\n",
+					"    df_log.write.format(\"jdbc\") \\\n",
+					"        .option(\"url\", \"jdbc:sqlserver://%s:%s\" % (sql_server_name, db_port)) \\\n",
+					"        .option(\"dbtable\", write_table_name) \\\n",
+					"        .option(\"accessToken\", access_token) \\\n",
+					"        .option(\"encrypt\", \"true\") \\\n",
+					"        .option(\"databaseName\", db_name) \\\n",
+					"        .option(\"hostNameInCertificate\", \"*.database.windows.net\") \\\n",
+					"        .mode(\"append\") \\\n",
+					"        .save()\n",
+					"except ValueError as error :\n",
+					"    print(\"MSSQL Connector write failed\", error)\n",
+					"\n",
+					"print(\"MSSQL Connector write(append) succeeded  \")\n",
+					""
+				],
+				"execution_count": 43
+			},
+			{
+				"cell_type": "markdown",
+				"metadata": {
+					"nteract": {
+						"transient": {
+							"deleting": false
+						}
+					}
+				},
+				"source": [
+					"#  Table: **reference_data**: END"
+				]
+			},
+			{
+				"cell_type": "markdown",
+				"metadata": {
+					"nteract": {
+						"transient": {
+							"deleting": false
+						}
+					}
+				},
+				"source": [
+					"# Table: **fuelcard_facility_map**: START"
+				]
+			},
+			{
+				"cell_type": "markdown",
+				"metadata": {
+					"nteract": {
+						"transient": {
+							"deleting": false
+						}
+					}
+				},
+				"source": [
+					"#UTILS: Set table name\n",
+					"\n",
+					"#tablename=\"fuelcard_facility_map\"\n",
+					"\n",
+					"#UTILS: Drop table\n",
+					"\n",
+					"#spark.sql(f\"\"\"DROP TABLE IF EXISTS {db_notebookname}.{tablename}\"\"\")\n",
+					"#raw_output_path = f\"abfss://{destination_container}@{destination_storage}.dfs.core.windows.net/{destination_path}/{tablename}\"\n",
+					"#mssparkutils.fs.rm(raw_output_path,recurse=True)"
+				]
+			},
+			{
+				"cell_type": "code",
+				"metadata": {
+					"jupyter": {
+						"source_hidden": false,
+						"outputs_hidden": false
+					},
+					"nteract": {
+						"transient": {
+							"deleting": false
+						}
+					},
+					"editable": true,
+					"run_control": {
+						"frozen": false
+					}
+				},
+				"source": [
+					"#Set table name\n",
+					"if esg_sharepoint_bronze_flag:\n",
+					"    print(\"Feature Flag turned on, new code allowed to run.\")\n",
+					"    db_tablename=\"fuelcard_facility_map\"\n",
+					"\n",
+					"    # Set up logger for this notebook section\n",
+					"    logger = setup_logger(db_tablename)\t\n",
+					"else:\n",
+					"    print(\"Feature Flag turned off, new code not allowed to run.\")\n",
+					"    db_tablename=\"fuelcard_facility_map\""
+				],
+				"execution_count": 45
+			},
+			{
+				"cell_type": "code",
+				"metadata": {
+					"jupyter": {
+						"source_hidden": false,
+						"outputs_hidden": false
+					},
+					"nteract": {
+						"transient": {
+							"deleting": false
+						}
+					},
+					"editable": true,
+					"run_control": {
+						"frozen": false
+					}
+				},
+				"source": [
+					"#Create fuelcard_facility_map: Bronze Table\n",
+					"\n",
+					"spark.sql(f\"\"\"CREATE DATABASE IF NOT EXISTS {db_notebookname};\"\"\")\n",
+					"spark.sql(f\"\"\"\n",
+					"CREATE TABLE IF NOT EXISTS {db_notebookname}.{db_tablename}\n",
+					"(\n",
+					"    FuelCardNumber STRING,\n",
+					"    Facility STRING,\n",
+					"    ValidFromDate STRING,\n",
+					"    ValidToDate STRING,\n",
+					"    CDCLoadDate TIMESTAMP,\n",
+					"    CDCStartDate TIMESTAMP,\n",
+					"    CDCEndDate TIMESTAMP,\n",
+					"    CDCOps INT,\n",
+					"    CDCCurrentFlag BOOLEAN,\n",
+					"    HashKey STRING,\n",
+					"    HashDiff STRING   \n",
+					")\n",
+					"USING delta\n",
+					"LOCATION 'abfss://{destination_container}@{destination_storage}.dfs.core.windows.net/{destination_path}/{db_tablename}'\n",
+					"\"\"\")"
+				],
+				"execution_count": 46
+			},
+			{
+				"cell_type": "code",
+				"metadata": {
+					"jupyter": {
+						"source_hidden": false,
+						"outputs_hidden": false
+					},
+					"nteract": {
+						"transient": {
+							"deleting": false
+						}
+					},
+					"editable": true,
+					"run_control": {
+						"frozen": false
+					},
+					"collapsed": false
+				},
+				"source": [
+					"if esg_sharepoint_bronze_flag:\n",
+					"    print(\"Feature Flag turned on, new code allowed to run.\")\n",
+					"    # load parquet file as dataframe\n",
+					"    try:\n",
+					"        raw_df = spark.read.format(\"parquet\").load(f'abfss://{source_container}@{source_storage}.dfs.core.windows.net/{source_path}/{db_tablename}/')\n",
+					"\n",
+					"    except Exception as e:\n",
+					"        logger.error(f\"Error - Reading parquet file: 'abfss://{source_container}@{source_storage}.dfs.core.windows.net/{source_path}/{db_tablename}/: {str(e)}\")\n",
+					"        raise\t\n",
+					"else:\n",
+					"    print(\"Feature Flag turned off, new code not allowed to run.\")\n",
+					"    # load parquet file as dataframe\n",
+					"    raw_df = spark.read.format(\"parquet\").load(f'abfss://{source_container}@{source_storage}.dfs.core.windows.net/{source_path}/{db_tablename}/')"
+				],
+				"execution_count": 47
+			},
+			{
+				"cell_type": "code",
+				"metadata": {
+					"jupyter": {
+						"source_hidden": false,
+						"outputs_hidden": false
+					},
+					"nteract": {
+						"transient": {
+							"deleting": false
+						}
+					},
+					"editable": true,
+					"run_control": {
+						"frozen": false
+					},
+					"collapsed": false
+				},
+				"source": [
+					"from pyspark.sql.functions import hash\n",
+					"from pyspark.sql import functions as fn\n",
+					"from pyspark.sql.functions import col, concat, lit, to_timestamp,current_timestamp,date_format, to_date, when, substring\n",
+					"from pyspark.sql.functions import sha2, concat_ws, regexp_replace\n",
+					"from pyspark.sql.types import DecimalType\n",
+					"\n",
+					"# Add new column for masked fuel card numbers \n",
+					"raw_df = raw_df.withColumn(\"FuelCardNumberMasked\", substring(\"FuelCardNumber\", -5, 5))\n",
+					"\n",
+					"# Add CDC columns\n",
+					"raw_df = raw_df.withColumn(\"HashKey\", sha2(concat_ws(\"||\", \"FuelCardNumber\", regexp_replace(\"ValidFromDate\", \"-|[/.:]\", \"\"), regexp_replace(\"ValidToDate\", \"-|[/.:]\", \"\")), 256))\n",
+					"raw_df = raw_df.withColumn(\"HashDiff\", sha2(concat_ws(\"||\", \"FacilityValue\"), 256))\n",
+					"raw_df = raw_df.withColumn(\"CDCLoadDate\", to_timestamp(lit(Bronze_LoadDate),'yyyy-MM-dd HH:mm:ss'))\n",
+					"raw_df = raw_df.withColumn(\"CDCStartDate\", to_timestamp(lit(Bronze_LoadDate), 'yyyy-MM-dd HH:mm:ss'))\n",
+					"raw_df = raw_df.withColumn(\"CDCEndDate\", to_timestamp(lit(\"9999-12-31 23:59:59\"), 'yyyy-MM-dd HH:mm:ss'))\n",
+					"raw_df = raw_df.withColumn(\"CDCCurrentFlag\", lit(1))\n",
+					"raw_df = raw_df.withColumn(\"CDCOps\", lit(1))\n",
+					"\n",
+					"#display(raw_df)"
+				],
+				"execution_count": 48
+			},
+			{
+				"cell_type": "code",
+				"metadata": {
+					"jupyter": {
+						"source_hidden": false,
+						"outputs_hidden": false
+					},
+					"nteract": {
+						"transient": {
+							"deleting": false
+						}
+					},
+					"editable": true,
+					"run_control": {
+						"frozen": false
+					}
+				},
+				"source": [
+					"# Row count parameters\n",
+					"\n",
+					"Bronze_Insert_Pre=spark.sql(f\"\"\" SELECT COUNT(*) FROM {db_notebookname}.{db_tablename} WHERE CDCOps = 1 \"\"\").collect()[0][0]\n",
+					"Bronze_Update_Pre=spark.sql(f\"\"\" SELECT COUNT(*) FROM {db_notebookname}.{db_tablename} WHERE CDCOps = 2 \"\"\").collect()[0][0]\n",
+					"Bronze_Delete_Pre=spark.sql(f\"\"\" SELECT COUNT(*) FROM {db_notebookname}.{db_tablename} WHERE CDCOps = 0 \"\"\").collect()[0][0]"
+				],
+				"execution_count": 49
+			},
+			{
+				"cell_type": "code",
+				"metadata": {
+					"jupyter": {
+						"source_hidden": false,
+						"outputs_hidden": false
+					},
+					"nteract": {
+						"transient": {
+							"deleting": false
+						}
+					},
+					"editable": true,
+					"run_control": {
+						"frozen": false
+					}
+				},
+				"source": [
+					"# SCD2 logic\n",
+					"\n",
+					"# Create a temporary view of the dataframe\n",
+					"\n",
+					"raw_df.createOrReplaceTempView(\"temp_table\")\n",
+					"\n",
+					"# Use the merge operation to update the target table\n",
+					"\n",
+					"spark.sql(f\"\"\"\n",
+					"    MERGE INTO {db_notebookname}.{db_tablename} t\n",
+					"    USING temp_table s\n",
+					"    ON t.HashKey = s.HashKey AND t.CDCCurrentFlag == true\n",
+					"    WHEN MATCHED AND t.HashDiff <> s.HashDiff THEN\n",
+					"      UPDATE SET t.CDCEndDate = '{Bronze_UpdateEndDate}',\n",
+					"                 t.CDCCurrentFlag = false,\n",
+					"                 t.CDCOps = s.CDCOps + 1\n",
+					"    WHEN NOT MATCHED THEN\n",
+					"      INSERT ( FuelCardNumber, Facility, ValidFromDate, ValidToDate, CDCLoadDate, CDCStartDate, CDCEndDate, CDCOps, CDCCurrentFlag, HashKey, HashDiff)\n",
+					"      VALUES (s.FuelCardNumberMasked, s.FacilityValue, s.ValidFromDate, s.ValidToDate, s.CDCLoadDate, s.CDCStartDate, s.CDCEndDate, 1, s.CDCCurrentFlag, s.HashKey, s.HashDiff)\n",
+					"\"\"\")\n",
+					"\n",
+					"# Use the merge operation to Insert updated record \n",
+					"\n",
+					"spark.sql(f\"\"\"\n",
+					"    MERGE INTO {db_notebookname}.{db_tablename} t\n",
+					"    USING temp_table s\n",
+					"    ON t.HashKey = s.HashKey AND t.CDCCurrentFlag == true\n",
+					"    WHEN MATCHED AND t.HashDiff <> s.HashDiff THEN\n",
+					"      UPDATE SET t.CDCEndDate = '{Bronze_UpdateEndDate}',\n",
+					"                 t.CDCCurrentFlag = false,\n",
+					"                 t.CDCOps = s.CDCOps + 1\n",
+					"    WHEN NOT MATCHED THEN\n",
+					"      INSERT ( FuelCardNumber, Facility, ValidFromDate, ValidToDate, CDCLoadDate, CDCStartDate, CDCEndDate, CDCOps, CDCCurrentFlag, HashKey, HashDiff)\n",
+					"      VALUES (s.FuelCardNumberMasked, s.FacilityValue, s.ValidFromDate, s.ValidToDate, s.CDCLoadDate, s.CDCStartDate, s.CDCEndDate, 1, s.CDCCurrentFlag, s.HashKey, s.HashDiff)\n",
+					"\"\"\")\n",
+					""
+				],
+				"execution_count": 50
+			},
+			{
+				"cell_type": "code",
+				"metadata": {
+					"jupyter": {
+						"source_hidden": false,
+						"outputs_hidden": false
+					},
+					"nteract": {
+						"transient": {
+							"deleting": false
+						}
+					},
+					"editable": true,
+					"run_control": {
+						"frozen": false
+					}
+				},
+				"source": [
+					"#Row count parameters\n",
+					"\n",
+					"Bronze_Insert_Post=spark.sql(f\"\"\" SELECT COUNT(*) FROM {db_notebookname}.{db_tablename} WHERE CDCOps = 1 \"\"\").collect()[0][0]\n",
+					"Bronze_Update_Post=spark.sql(f\"\"\" SELECT COUNT(*) FROM {db_notebookname}.{db_tablename} WHERE CDCOps = 2 \"\"\").collect()[0][0]\n",
+					"Bronze_Delete_Post=spark.sql(f\"\"\" SELECT COUNT(*) FROM {db_notebookname}.{db_tablename} WHERE CDCOps = 0 \"\"\").collect()[0][0]\n",
+					"Bronze_TotalRowCount_Post=spark.sql(f\"\"\" SELECT COUNT(*) FROM {db_notebookname}.{db_tablename}\"\"\").collect()[0][0]\n",
+					"Bronze_ActiveRecord_Post=spark.sql(f\"\"\" SELECT COUNT(*) FROM {db_notebookname}.{db_tablename} WHERE CDCCurrentFlag = true \"\"\").collect()[0][0]"
+				],
+				"execution_count": 51
+			},
+			{
+				"cell_type": "code",
+				"metadata": {
+					"jupyter": {
+						"source_hidden": false,
+						"outputs_hidden": false
+					},
+					"nteract": {
+						"transient": {
+							"deleting": false
+						}
+					},
+					"editable": true,
+					"run_control": {
+						"frozen": false
+					}
+				},
+				"source": [
+					"#Row calculation\n",
+					"\n",
+					"Bronze_Update = Bronze_Update_Post - Bronze_Update_Pre\n",
+					"Bronze_Insert = (Bronze_Insert_Post - Bronze_Insert_Pre) + Bronze_Update\n",
+					"Bronze_Delete = Bronze_Delete_Post - Bronze_Delete_Pre\n",
+					"Bronze_ActiveRows = Bronze_ActiveRecord_Post \n",
+					"Bronze_TotalRows = Bronze_TotalRowCount_Post"
+				],
+				"execution_count": 52
+			},
+			{
+				"cell_type": "code",
+				"metadata": {
+					"jupyter": {
+						"source_hidden": false,
+						"outputs_hidden": false
+					},
+					"nteract": {
+						"transient": {
+							"deleting": false
+						}
+					},
+					"editable": true,
+					"run_control": {
+						"frozen": false
+					},
+					"collapsed": false
+				},
+				"source": [
+					"#Create dataframe to insert log to controldb\n",
+					"\n",
+					"from pyspark.sql.types import StructType, StructField, StringType, IntegerType, BooleanType,DateType, DoubleType,TimestampType\n",
+					"\n",
+					"log_data = [(db_notebookname,db_tablename,Bronze_LoadDate,Bronze_Insert,Bronze_Update,Bronze_Delete,Bronze_ActiveRows,Bronze_TotalRows)]\n",
+					"#print(log_data)\n",
+					"log_columns = ['PIPELINE_NAME', 'TABLE_NAME', 'INGEST_DATETIME', 'INSERT','UPDATE','DELETE','ACTIVE_ROWS','TOTAL_ROWS']\n",
+					"df_log = spark.createDataFrame(log_data, log_columns)\n",
+					"\n",
+					"#display(df_log)"
+				],
+				"execution_count": 53
+			},
+			{
+				"cell_type": "code",
+				"metadata": {
+					"jupyter": {
+						"source_hidden": false,
+						"outputs_hidden": false
+					},
+					"nteract": {
+						"transient": {
+							"deleting": false
+						}
+					},
+					"editable": true,
+					"run_control": {
+						"frozen": false
+					}
+				},
+				"source": [
+					"#Write df_log to logging table in controldb\n",
+					"db_port = 1433\n",
+					"linked_service_name = \"LS_SQL_ELTFrameworkDB\"\n",
+					"linkedServiceProperties = json.loads(mssparkutils.credentials.getPropertiesAll(linked_service_name))\n",
+					"sql_server_name = linkedServiceProperties.get('Endpoint')\n",
+					"db_name = linkedServiceProperties.get('Database')\n",
+					"access_token = mssparkutils.credentials.getConnectionStringOrCreds(linked_service_name)\n",
+					"write_table_name = \"[CTL].[CFG_INGESTION_LOGS]\"\n",
+					"\n",
+					"try:\n",
+					"    df_log.write.format(\"jdbc\") \\\n",
+					"        .option(\"url\", \"jdbc:sqlserver://%s:%s\" % (sql_server_name, db_port)) \\\n",
+					"        .option(\"dbtable\", write_table_name) \\\n",
+					"        .option(\"accessToken\", access_token) \\\n",
+					"        .option(\"encrypt\", \"true\") \\\n",
+					"        .option(\"databaseName\", db_name) \\\n",
+					"        .option(\"hostNameInCertificate\", \"*.database.windows.net\") \\\n",
+					"        .mode(\"append\") \\\n",
+					"        .save()\n",
+					"except ValueError as error :\n",
+					"    print(\"MSSQL Connector write failed\", error)\n",
+					"\n",
+					"print(\"MSSQL Connector write(append) succeeded  \")"
+				],
+				"execution_count": 54
+			},
+			{
+				"cell_type": "markdown",
+				"metadata": {
+					"nteract": {
+						"transient": {
+							"deleting": false
+						}
+					}
+				},
+				"source": [
+					"# Table: **fuelcard_facility_map**: END"
+				]
+			},
+			{
+				"cell_type": "markdown",
+				"metadata": {
+					"nteract": {
+						"transient": {
+							"deleting": false
+						}
+					}
+				},
+				"source": [
+					"# Table: **sf6_emissions**: START"
+				]
+			},
+			{
+				"cell_type": "markdown",
+				"metadata": {
+					"nteract": {
+						"transient": {
+							"deleting": false
+						}
+					}
+				},
+				"source": [
+					"#UTILS: Set table name\n",
+					"\n",
+					"#tablename=\"sf6_emissions\"\n",
+					"\n",
+					"#UTILS: Drop db\n",
+					"\n",
+					"#spark.sql(f\"\"\"DROP DATABASE IF EXISTS {db_notebookname} CASCADE\"\"\")\n",
+					"#raw_output_path = f\"abfss://{destination_container}@{destination_storage}.dfs.core.windows.net/{destination_path}\"\n",
+					"#mssparkutils.fs.rm(raw_output_path,recurse=True)\n",
+					"\n",
+					"#UTILS: Drop table\n",
+					"\n",
+					"#spark.sql(f\"\"\"DROP TABLE IF EXISTS {db_notebookname}.{tablename}\"\"\")\n",
+					"#raw_output_path = f\"abfss://{destination_container}@{destination_storage}.dfs.core.windows.net/{destination_path}/{tablename}\"\n",
+					"#mssparkutils.fs.rm(raw_output_path,recurse=True)"
+				]
+			},
+			{
+				"cell_type": "code",
+				"source": [
+					"if esg_sharepoint_bronze_flag:\n",
+					"    print(\"Feature Flag turned on, new code allowed to run.\")\n",
+					"    #Set table name\n",
+					"    db_tablename=\"sf6_emissions\"\n",
+					"\n",
+					"    # Set up logger for this notebook section\n",
+					"    logger = setup_logger(db_tablename)\n",
+					"else:\n",
+					"    print(\"Feature Flag turned off, new code not allowed to run.\")\n",
+					" "
+				],
+				"execution_count": 56
+			},
+			{
+				"cell_type": "code",
+				"source": [
+					"if esg_sharepoint_bronze_flag:\n",
+					"    print(\"Feature Flag turned on, new code allowed to run.\")\n",
+					"    #Create reference_data: Bronze Table\n",
+					"    spark.sql(f\"\"\"CREATE DATABASE IF NOT EXISTS {db_notebookname};\"\"\")\n",
+					"    spark.sql(f\"\"\"\n",
+					"    CREATE TABLE IF NOT EXISTS {db_notebookname}.{db_tablename}\n",
+					"    (\n",
+					"        Facility STRING,\n",
+					"        FiscalYear STRING,\n",
+					"        Method STRING,\n",
+					"        QuantitySF6kg STRING,\n",
+					"        QuantitySF6t STRING,\n",
+					"        QuantityTCO2e STRING,\n",
+					"        Scope1EmissionsTCO2e STRING,\n",
+					"        CDCLoadDate TIMESTAMP,\n",
+					"        CDCStartDate TIMESTAMP,\n",
+					"        CDCEndDate TIMESTAMP,\n",
+					"        CDCOps INT,\n",
+					"        CDCCurrentFlag BOOLEAN,\n",
+					"        HashKey STRING,\n",
+					"        HashDiff STRING   \n",
+					"    )\n",
+					"    USING delta\n",
+					"    LOCATION 'abfss://{destination_container}@{destination_storage}.dfs.core.windows.net/{destination_path}/{db_tablename}'\n",
+					"    \"\"\")\n",
+					"else:\n",
+					"    print(\"Feature Flag turned off, new code not allowed to run.\")\n",
+					""
+				],
+				"execution_count": 57
+			},
+			{
+				"cell_type": "code",
+				"metadata": {
+					"collapsed": false
+				},
+				"source": [
+					"if esg_sharepoint_bronze_flag:\n",
+					"    print(\"Feature Flag turned on, new code allowed to run.\")\n",
+					"    # load parquet file as dataframe\n",
+					"    try:\n",
+					"        raw_df = spark.read.format(\"parquet\").load(f'abfss://{source_container}@{source_storage}.dfs.core.windows.net/{source_path}/{db_tablename}/')\n",
+					"\n",
+					"    except Exception as e:\n",
+					"        logger.error(f\"Error - Reading parquet file: 'abfss://{source_container}@{source_storage}.dfs.core.windows.net/{source_path}/{db_tablename}/: {str(e)}\")\n",
+					"        raise\n",
+					"\n",
+					"    #display(raw_df)\n",
+					"else:\n",
+					"    print(\"Feature Flag turned off, new code not allowed to run.\")"
+				],
+				"execution_count": 58
+			},
+			{
+				"cell_type": "code",
+				"metadata": {
+					"collapsed": false
+				},
+				"source": [
+					"if esg_sharepoint_bronze_flag:\n",
+					"    print(\"Feature Flag turned on, new code allowed to run.\") \n",
+					"    # Add CDC columns\n",
+					"    from pyspark.sql.functions import hash\n",
+					"    from pyspark.sql import functions as fn\n",
+					"    from pyspark.sql.functions import col, concat, lit, to_timestamp,current_timestamp,date_format, to_date, when\n",
+					"    from pyspark.sql.functions import sha2, concat_ws, regexp_replace\n",
+					"    from pyspark.sql.types import DecimalType\n",
+					"\n",
+					"    raw_df = raw_df.withColumnRenamed(\"QuantitySF6_kg\", \"QuantitySF6kg\")\n",
+					"    raw_df = raw_df.withColumnRenamed(\"QuantitySF6_t\", \"QuantitySF6t\")\n",
+					"    raw_df = raw_df.withColumnRenamed(\"Quantity_tCO2e\", \"QuantityTCO2e\")\n",
+					"    raw_df = raw_df.withColumnRenamed(\"Scope1Emissions_tCO2e\", \"Scope1EmissionsTCO2e\")\n",
+					"    raw_df = raw_df.withColumn(\"HashKey\", sha2(concat_ws(\"||\", \"Facility\", \"FiscalYear\"), 256))\n",
+					"    raw_df = raw_df.withColumn(\"HashDiff\", sha2(concat_ws(\"||\", \"Method\", \"QuantitySF6kg\", \"QuantitySF6t\", \"QuantityTCO2e\", \"Scope1EmissionsTCO2e\"), 256))\n",
+					"    raw_df = raw_df.withColumn(\"CDCLoadDate\", to_timestamp(lit(Bronze_LoadDate),'yyyy-MM-dd HH:mm:ss'))\n",
+					"    raw_df = raw_df.withColumn(\"CDCStartDate\", to_timestamp(lit(Bronze_LoadDate), 'yyyy-MM-dd HH:mm:ss'))\n",
+					"    raw_df = raw_df.withColumn(\"CDCEndDate\", to_timestamp(lit(\"9999-12-31 23:59:59\"), 'yyyy-MM-dd HH:mm:ss'))\n",
+					"    raw_df = raw_df.withColumn(\"CDCCurrentFlag\", lit(1))\n",
+					"    raw_df = raw_df.withColumn(\"CDCOps\", lit(1))\n",
+					"\n",
+					"    #display(raw_df)\n",
+					"else:\n",
+					"    print(\"Feature Flag turned off, new code not allowed to run.\")"
+				],
+				"execution_count": 59
+			},
+			{
+				"cell_type": "code",
+				"source": [
+					"if esg_sharepoint_bronze_flag:\n",
+					"    print(\"Feature Flag turned on, new code allowed to run.\")    \n",
+					"    # Row count parameters\n",
+					"    Bronze_Insert_Pre=spark.sql(f\"\"\" SELECT COUNT(*) FROM {db_notebookname}.{db_tablename} WHERE CDCOps = 1 \"\"\").collect()[0][0]\n",
+					"    Bronze_Update_Pre=spark.sql(f\"\"\" SELECT COUNT(*) FROM {db_notebookname}.{db_tablename} WHERE CDCOps = 2 \"\"\").collect()[0][0]\n",
+					"    Bronze_Delete_Pre=spark.sql(f\"\"\" SELECT COUNT(*) FROM {db_notebookname}.{db_tablename} WHERE CDCOps = 0 \"\"\").collect()[0][0]\n",
+					"else:\n",
+					"    print(\"Feature Flag turned off, new code not allowed to run.\")"
+				],
+				"execution_count": 60
+			},
+			{
+				"cell_type": "code",
+				"source": [
+					"if esg_sharepoint_bronze_flag:\n",
+					"    print(\"Feature Flag turned on, new code allowed to run.\")\n",
+					"    # SCD2 logic\n",
+					"\n",
+					"    # Create a temporary view of the dataframe\n",
+					"    raw_df.createOrReplaceTempView(\"temp_table\")\n",
+					"\n",
+					"    # Use the merge operation to update the target table\n",
+					"    spark.sql(f\"\"\"\n",
+					"        MERGE INTO {db_notebookname}.{db_tablename} t\n",
+					"        USING temp_table s\n",
+					"        ON t.HashKey = s.HashKey AND t.CDCCurrentFlag == true\n",
+					"        WHEN MATCHED AND t.HashDiff <> s.HashDiff THEN\n",
+					"          UPDATE SET t.CDCEndDate = '{Bronze_UpdateEndDate}',\n",
+					"                    t.CDCCurrentFlag = false,\n",
+					"                    t.CDCOps = s.CDCOps + 1\n",
+					"        WHEN NOT MATCHED THEN\n",
+					"          INSERT (Facility, FiscalYear, Method, QuantitySF6kg, QuantitySF6t, QuantityTCO2e, Scope1EmissionsTCO2e, CDCLoadDate, CDCStartDate, CDCEndDate, CDCOps, CDCCurrentFlag, HashKey, HashDiff)\n",
+					"          VALUES (s.Facility, s.FiscalYear, s.Method, s.QuantitySF6kg, s.QuantitySF6t, s.QuantityTCO2e, s.Scope1EmissionsTCO2e, s.CDCLoadDate, s.CDCStartDate, s.CDCEndDate, 1, s.CDCCurrentFlag, s.HashKey, s.HashDiff)\n",
+					"    \"\"\")\n",
+					"\n",
+					"    # Use the merge operation to Insert updated record \n",
+					"    spark.sql(f\"\"\"\n",
+					"        MERGE INTO {db_notebookname}.{db_tablename} t\n",
+					"        USING temp_table s\n",
+					"        ON t.HashKey = s.HashKey AND t.CDCCurrentFlag == true\n",
+					"        WHEN MATCHED AND t.HashDiff <> s.HashDiff THEN\n",
+					"          UPDATE SET t.CDCEndDate = '{Bronze_UpdateEndDate}',\n",
+					"                    t.CDCCurrentFlag = false,\n",
+					"                    t.CDCOps = s.CDCOps + 1\n",
+					"        WHEN NOT MATCHED THEN\n",
+					"          INSERT (Facility, FiscalYear, Method, QuantitySF6kg, QuantitySF6t, QuantityTCO2e, Scope1EmissionsTCO2e, CDCLoadDate, CDCStartDate, CDCEndDate, CDCOps, CDCCurrentFlag, HashKey, HashDiff)\n",
+					"          VALUES (s.Facility, s.FiscalYear, s.Method, s.QuantitySF6kg, s.QuantitySF6t, s.QuantityTCO2e, s.Scope1EmissionsTCO2e, s.CDCLoadDate, s.CDCStartDate, s.CDCEndDate, 1, s.CDCCurrentFlag, s.HashKey, s.HashDiff)\n",
+					"    \"\"\")\n",
+					"else:\n",
+					"    print(\"Feature Flag turned off, new code not allowed to run.\")"
+				],
+				"execution_count": 61
+			},
+			{
+				"cell_type": "code",
+				"source": [
+					"if esg_sharepoint_bronze_flag:\n",
+					"    print(\"Feature Flag turned on, new code allowed to run.\")\n",
+					"    #Row count parameters\n",
+					"    Bronze_Insert_Post=spark.sql(f\"\"\" SELECT COUNT(*) FROM {db_notebookname}.{db_tablename} WHERE CDCOps = 1 \"\"\").collect()[0][0]\n",
+					"    Bronze_Update_Post=spark.sql(f\"\"\" SELECT COUNT(*) FROM {db_notebookname}.{db_tablename} WHERE CDCOps = 2 \"\"\").collect()[0][0]\n",
+					"    Bronze_Delete_Post=spark.sql(f\"\"\" SELECT COUNT(*) FROM {db_notebookname}.{db_tablename} WHERE CDCOps = 0 \"\"\").collect()[0][0]\n",
+					"    Bronze_TotalRowCount_Post=spark.sql(f\"\"\" SELECT COUNT(*) FROM {db_notebookname}.{db_tablename}\"\"\").collect()[0][0]\n",
+					"    Bronze_ActiveRecord_Post=spark.sql(f\"\"\" SELECT COUNT(*) FROM {db_notebookname}.{db_tablename} WHERE CDCCurrentFlag = true \"\"\").collect()[0][0]\n",
+					"else:\n",
+					"    print(\"Feature Flag turned off, new code not allowed to run.\")"
+				],
+				"execution_count": 62
+			},
+			{
+				"cell_type": "code",
+				"source": [
+					"if esg_sharepoint_bronze_flag:\n",
+					"    print(\"Feature Flag turned on, new code allowed to run.\")\n",
+					"    #Row calculation\n",
+					"    Bronze_Update = Bronze_Update_Post - Bronze_Update_Pre\n",
+					"    Bronze_Insert = (Bronze_Insert_Post - Bronze_Insert_Pre) + Bronze_Update\n",
+					"    Bronze_Delete = Bronze_Delete_Post - Bronze_Delete_Pre\n",
+					"    Bronze_ActiveRows = Bronze_ActiveRecord_Post \n",
+					"    Bronze_TotalRows = Bronze_TotalRowCount_Post\n",
+					"else:\n",
+					"    print(\"Feature Flag turned off, new code not allowed to run.\")"
+				],
+				"execution_count": 63
+			},
+			{
+				"cell_type": "code",
+				"source": [
+					"if esg_sharepoint_bronze_flag:\n",
+					"    print(\"Feature Flag turned on, new code allowed to run.\")\n",
+					"    #Create dataframe to insert log to controldb\n",
+					"    from pyspark.sql.types import StructType, StructField, StringType, IntegerType, BooleanType,DateType, DoubleType,TimestampType\n",
+					"\n",
+					"    log_data = [(db_notebookname,db_tablename,Bronze_LoadDate,Bronze_Insert,Bronze_Update,Bronze_Delete,Bronze_ActiveRows,Bronze_TotalRows)]\n",
+					"    print(log_data)\n",
+					"    log_columns = ['PIPELINE_NAME', 'TABLE_NAME', 'INGEST_DATETIME', 'INSERT','UPDATE','DELETE','ACTIVE_ROWS','TOTAL_ROWS']\n",
+					"    df_log = spark.createDataFrame(log_data, log_columns)\n",
+					"\n",
+					"    #display(df_log)\n",
+					"else:\n",
+					"    print(\"Feature Flag turned off, new code not allowed to run.\")"
+				],
+				"execution_count": 64
+			},
+			{
+				"cell_type": "code",
+				"source": [
+					"if esg_sharepoint_bronze_flag:\n",
+					"    print(\"Feature Flag turned on, new code allowed to run.\")\n",
+					"    #Write df_log to logging table in controldb\n",
+					"    db_port = 1433\n",
+					"    linked_service_name = \"LS_SQL_ELTFrameworkDB\"\n",
+					"    linkedServiceProperties = json.loads(mssparkutils.credentials.getPropertiesAll(linked_service_name))\n",
+					"    sql_server_name = linkedServiceProperties.get('Endpoint')\n",
+					"    db_name = linkedServiceProperties.get('Database')\n",
+					"    access_token = mssparkutils.credentials.getConnectionStringOrCreds(linked_service_name)\n",
+					"    write_table_name = \"[CTL].[CFG_INGESTION_LOGS]\"\n",
+					"\n",
+					"    try:\n",
+					"        df_log.write.format(\"jdbc\") \\\n",
+					"            .option(\"url\", \"jdbc:sqlserver://%s:%s\" % (sql_server_name, db_port)) \\\n",
+					"            .option(\"dbtable\", write_table_name) \\\n",
+					"            .option(\"accessToken\", access_token) \\\n",
+					"            .option(\"encrypt\", \"true\") \\\n",
+					"            .option(\"databaseName\", db_name) \\\n",
+					"            .option(\"hostNameInCertificate\", \"*.database.windows.net\") \\\n",
+					"            .mode(\"append\") \\\n",
+					"            .save()\n",
+					"    except ValueError as error :\n",
+					"        print(\"MSSQL Connector write failed\", error)\n",
+					"\n",
+					"    print(\"MSSQL Connector write(append) succeeded  \")\n",
+					"else:\n",
+					"    print(\"Feature Flag turned off, new code not allowed to run.\")"
+				],
+				"execution_count": 65
+			},
+			{
+				"cell_type": "markdown",
+				"metadata": {
+					"nteract": {
+						"transient": {
+							"deleting": false
+						}
+					}
+				},
+				"source": [
+					"# Table: **sf6_emissions**: END"
+				]
+			},
+			{
+				"cell_type": "markdown",
+				"metadata": {
+					"nteract": {
+						"transient": {
+							"deleting": false
+						}
+					}
+				},
+				"source": [
+					"# Table: **coregas_supplier_transactions**: START"
+				]
+			},
+			{
+				"cell_type": "markdown",
+				"metadata": {
+					"nteract": {
+						"transient": {
+							"deleting": false
+						}
+					}
+				},
+				"source": [
+					"#UTILS: Set table name\n",
+					"\n",
+					"#tablename=\"coregas_supplier_transactions\"\n",
+					"\n",
+					"#UTILS: Drop db\n",
+					"\n",
+					"#spark.sql(f\"\"\"DROP DATABASE IF EXISTS {db_notebookname} CASCADE\"\"\")\n",
+					"#raw_output_path = f\"abfss://{destination_container}@{destination_storage}.dfs.core.windows.net/{destination_path}\"\n",
+					"#mssparkutils.fs.rm(raw_output_path,recurse=True)\n",
+					"\n",
+					"#UTILS: Drop table\n",
+					"\n",
+					"#spark.sql(f\"\"\"DROP TABLE IF EXISTS {db_notebookname}.{tablename}\"\"\")\n",
+					"#raw_output_path = f\"abfss://{destination_container}@{destination_storage}.dfs.core.windows.net/{destination_path}/{tablename}\"\n",
+					"#mssparkutils.fs.rm(raw_output_path,recurse=True)"
+				]
+			},
+			{
+				"cell_type": "code",
+				"source": [
+					"if esg_sharepoint_bronze_flag:\n",
+					"    print(\"Feature Flag turned on, new code allowed to run.\")\n",
+					"    #Set table name\n",
+					"    db_tablename=\"coregas_supplier_transactions\"\n",
+					"\n",
+					"    # Set up logger for this notebook section\n",
+					"    logger = setup_logger(db_tablename)\n",
+					"else:\n",
+					"    print(\"Feature Flag turned off, new code not allowed to run.\")"
+				],
+				"execution_count": 67
+			},
+			{
+				"cell_type": "code",
+				"source": [
+					"if esg_sharepoint_bronze_flag:\n",
+					"    print(\"Feature Flag turned on, new code allowed to run.\") \n",
+					"    #Create reference_data: Bronze Table\n",
+					"    spark.sql(f\"\"\"CREATE DATABASE IF NOT EXISTS {db_notebookname};\"\"\")\n",
+					"    spark.sql(f\"\"\"\n",
+					"    CREATE TABLE IF NOT EXISTS {db_notebookname}.{db_tablename}\n",
+					"    (\n",
+					"        TransactionDate STRING,\n",
+					"        FiscalYear STRING,\n",
+					"        InvoiceNumber STRING,\n",
+					"        CustomerNumber STRING,\n",
+					"        CustomerName STRING,\n",
+					"        BranchCode STRING,\n",
+					"        SiteCode STRING,\n",
+					"        ShipToCode STRING,\n",
+					"        ShipToAddress STRING,\n",
+					"        ItemNumber STRING,\n",
+					"        ItemDescription STRING,\n",
+					"        Item STRING,\n",
+					"        ItemType STRING,\n",
+					"        UnitOfMeasure STRING,\n",
+					"        Amount STRING,\n",
+					"        CylinderTotal STRING,\n",
+					"        ItemVolume STRING,\n",
+					"        InvoiceStatus STRING,\n",
+					"        CDCLoadDate TIMESTAMP,\n",
+					"        CDCStartDate TIMESTAMP,\n",
+					"        CDCEndDate TIMESTAMP,\n",
+					"        CDCOps INT,\n",
+					"        CDCCurrentFlag BOOLEAN,\n",
+					"        HashKey STRING,\n",
+					"        HashDiff STRING   \n",
+					"    )\n",
+					"    USING delta\n",
+					"    LOCATION 'abfss://{destination_container}@{destination_storage}.dfs.core.windows.net/{destination_path}/{db_tablename}'\n",
+					"    \"\"\")\n",
+					"else:\n",
+					"    print(\"Feature Flag turned off, new code not allowed to run.\")"
+				],
+				"execution_count": 68
+			},
+			{
+				"cell_type": "code",
+				"source": [
+					"if esg_sharepoint_bronze_flag:\n",
+					"    print(\"Feature Flag turned on, new code allowed to run.\")\n",
+					"    # load parquet file as dataframe\n",
+					"    try:\n",
+					"        raw_df = spark.read.format(\"parquet\").load(f'abfss://{source_container}@{source_storage}.dfs.core.windows.net/{source_path}/{db_tablename}/')\n",
+					"\n",
+					"    except Exception as e:\n",
+					"        logger.error(f\"Error - Reading parquet file: 'abfss://{source_container}@{source_storage}.dfs.core.windows.net/{source_path}/{db_tablename}/: {str(e)}\")\n",
+					"        raise\n",
+					"\n",
+					"    #display(raw_df)\n",
+					"else:\n",
+					"    print(\"Feature Flag turned off, new code not allowed to run.\")"
+				],
+				"execution_count": 69
+			},
+			{
+				"cell_type": "code",
+				"source": [
+					"if esg_sharepoint_bronze_flag:\n",
+					"    print(\"Feature Flag turned on, new code allowed to run.\")\n",
+					"    # Add CDC columns\n",
+					"    from pyspark.sql.functions import hash\n",
+					"    from pyspark.sql import functions as fn\n",
+					"    from pyspark.sql.functions import col, concat, lit, to_timestamp,current_timestamp,date_format, to_date, when\n",
+					"    from pyspark.sql.functions import sha2, concat_ws, regexp_replace\n",
+					"    from pyspark.sql.types import DecimalType\n",
+					"\n",
+					"\n",
+					"    raw_df = raw_df.withColumn(\"HashKey\", sha2(concat_ws(\"||\", regexp_replace(\"TransactionDate\", \"-|[/.:]\", \"\"), \"InvoiceNumber\", \"ItemNumber\"), 256))\n",
+					"    raw_df = raw_df.withColumn(\"HashDiff\", sha2(concat_ws(\"||\", \"FiscalYear\", \"CustomerNumber\", \"CustomerName\", \"BranchCode\", \"SiteCode\", \"ShipToCode\", \"ShipToAddress\", \"Item\", \"ItemDescription\", \"ItemType\", \"UnitOfMeasure\", \"Amount\", \"CylinderTotal\", \"ItemVolume\", \"InvoiceStatus\"), 256))\n",
+					"    raw_df = raw_df.withColumn(\"CDCLoadDate\", to_timestamp(lit(Bronze_LoadDate),'yyyy-MM-dd HH:mm:ss'))\n",
+					"    raw_df = raw_df.withColumn(\"CDCStartDate\", to_timestamp(lit(Bronze_LoadDate), 'yyyy-MM-dd HH:mm:ss'))\n",
+					"    raw_df = raw_df.withColumn(\"CDCEndDate\", to_timestamp(lit(\"9999-12-31 23:59:59\"), 'yyyy-MM-dd HH:mm:ss'))\n",
+					"    raw_df = raw_df.withColumn(\"CDCCurrentFlag\", lit(1))\n",
+					"    raw_df = raw_df.withColumn(\"CDCOps\", lit(1))\n",
+					"\n",
+					"    #display(raw_df)\n",
+					"else:\n",
+					"    print(\"Feature Flag turned off, new code not allowed to run.\")"
+				],
+				"execution_count": 70
+			},
+			{
+				"cell_type": "code",
+				"source": [
+					"if esg_sharepoint_bronze_flag:\n",
+					"    print(\"Feature Flag turned on, new code allowed to run.\")\n",
+					"    # Row count parameters\n",
+					"    Bronze_Insert_Pre=spark.sql(f\"\"\" SELECT COUNT(*) FROM {db_notebookname}.{db_tablename} WHERE CDCOps = 1 \"\"\").collect()[0][0]\n",
+					"    Bronze_Update_Pre=spark.sql(f\"\"\" SELECT COUNT(*) FROM {db_notebookname}.{db_tablename} WHERE CDCOps = 2 \"\"\").collect()[0][0]\n",
+					"    Bronze_Delete_Pre=spark.sql(f\"\"\" SELECT COUNT(*) FROM {db_notebookname}.{db_tablename} WHERE CDCOps = 0 \"\"\").collect()[0][0]\n",
+					"else:\n",
+					"    print(\"Feature Flag turned off, new code not allowed to run.\")"
+				],
+				"execution_count": 71
+			},
+			{
+				"cell_type": "code",
+				"source": [
+					"if esg_sharepoint_bronze_flag:\n",
+					"    print(\"Feature Flag turned on, new code allowed to run.\")\n",
+					"    # SCD2 logic\n",
+					"\n",
+					"    # Create a temporary view of the dataframe\n",
+					"    raw_df.createOrReplaceTempView(\"temp_table\")\n",
+					"\n",
+					"    # Use the merge operation to update the target table\n",
+					"    spark.sql(f\"\"\"\n",
+					"        MERGE INTO {db_notebookname}.{db_tablename} t\n",
+					"        USING temp_table s\n",
+					"        ON t.HashKey = s.HashKey AND t.CDCCurrentFlag == true\n",
+					"        WHEN MATCHED AND t.HashDiff <> s.HashDiff THEN\n",
+					"          UPDATE SET t.CDCEndDate = '{Bronze_UpdateEndDate}',\n",
+					"                    t.CDCCurrentFlag = false,\n",
+					"                    t.CDCOps = s.CDCOps + 1\n",
+					"        WHEN NOT MATCHED THEN\n",
+					"          INSERT (TransactionDate, FiscalYear, InvoiceNumber, CustomerNumber, CustomerName, BranchCode, SiteCode, ShipToCode, ShipToAddress, ItemNumber, ItemDescription, Item, ItemType, UnitOfMeasure, Amount, CylinderTotal, ItemVolume, InvoiceStatus, CDCLoadDate, CDCStartDate, CDCEndDate, CDCOps, CDCCurrentFlag, HashKey, HashDiff)\n",
+					"          VALUES (s.TransactionDate, s.FiscalYear, s.InvoiceNumber, s.CustomerNumber, s.CustomerName, s.BranchCode, s.SiteCode, s.ShipToCode, s.ShipToAddress, s.ItemNumber, s.ItemDescription, s.Item, s.ItemType, s.UnitOfMeasure, s.Amount, s.CylinderTotal, s.ItemVolume, s.InvoiceStatus, s.CDCLoadDate, s.CDCStartDate, s.CDCEndDate, 1, s.CDCCurrentFlag, s.HashKey, s.HashDiff)\n",
+					"    \"\"\")\n",
+					"\n",
+					"    # Use the merge operation to Insert updated record \n",
+					"    spark.sql(f\"\"\"\n",
+					"        MERGE INTO {db_notebookname}.{db_tablename} t\n",
+					"        USING temp_table s\n",
+					"        ON t.HashKey = s.HashKey AND t.CDCCurrentFlag == true\n",
+					"        WHEN MATCHED AND t.HashDiff <> s.HashDiff THEN\n",
+					"          UPDATE SET t.CDCEndDate = '{Bronze_UpdateEndDate}',\n",
+					"                    t.CDCCurrentFlag = false,\n",
+					"                    t.CDCOps = s.CDCOps + 1\n",
+					"        WHEN NOT MATCHED THEN\n",
+					"          INSERT (TransactionDate, FiscalYear, InvoiceNumber, CustomerNumber, CustomerName, BranchCode, SiteCode, ShipToCode, ShipToAddress, ItemNumber, ItemDescription, Item, ItemType, UnitOfMeasure, Amount, CylinderTotal, ItemVolume, InvoiceStatus, CDCLoadDate, CDCStartDate, CDCEndDate, CDCOps, CDCCurrentFlag, HashKey, HashDiff)\n",
+					"          VALUES (s.TransactionDate, s.FiscalYear, s.InvoiceNumber, s.CustomerNumber, s.CustomerName, s.BranchCode, s.SiteCode, s.ShipToCode, s.ShipToAddress, s.ItemNumber, s.ItemDescription, s.Item, s.ItemType, s.UnitOfMeasure, s.Amount, s.CylinderTotal, s.ItemVolume, s.InvoiceStatus, s.CDCLoadDate, s.CDCStartDate, s.CDCEndDate, 1, s.CDCCurrentFlag, s.HashKey, s.HashDiff)\n",
+					"    \"\"\")\n",
+					"else:\n",
+					"    print(\"Feature Flag turned off, new code not allowed to run.\")"
+				],
+				"execution_count": 72
+			},
+			{
+				"cell_type": "code",
+				"source": [
+					"if esg_sharepoint_bronze_flag:\n",
+					"    print(\"Feature Flag turned on, new code allowed to run.\")\n",
+					"    #Row count parameters\n",
+					"    Bronze_Insert_Post=spark.sql(f\"\"\" SELECT COUNT(*) FROM {db_notebookname}.{db_tablename} WHERE CDCOps = 1 \"\"\").collect()[0][0]\n",
+					"    Bronze_Update_Post=spark.sql(f\"\"\" SELECT COUNT(*) FROM {db_notebookname}.{db_tablename} WHERE CDCOps = 2 \"\"\").collect()[0][0]\n",
+					"    Bronze_Delete_Post=spark.sql(f\"\"\" SELECT COUNT(*) FROM {db_notebookname}.{db_tablename} WHERE CDCOps = 0 \"\"\").collect()[0][0]\n",
+					"    Bronze_TotalRowCount_Post=spark.sql(f\"\"\" SELECT COUNT(*) FROM {db_notebookname}.{db_tablename}\"\"\").collect()[0][0]\n",
+					"    Bronze_ActiveRecord_Post=spark.sql(f\"\"\" SELECT COUNT(*) FROM {db_notebookname}.{db_tablename} WHERE CDCCurrentFlag = true \"\"\").collect()[0][0]\n",
+					"else:\n",
+					"    print(\"Feature Flag turned off, new code not allowed to run.\")"
+				],
+				"execution_count": 73
+			},
+			{
+				"cell_type": "code",
+				"source": [
+					"if esg_sharepoint_bronze_flag:\n",
+					"    print(\"Feature Flag turned on, new code allowed to run.\")\n",
+					"    #Row calculation\n",
+					"    Bronze_Update = Bronze_Update_Post - Bronze_Update_Pre\n",
+					"    Bronze_Insert = (Bronze_Insert_Post - Bronze_Insert_Pre) + Bronze_Update\n",
+					"    Bronze_Delete = Bronze_Delete_Post - Bronze_Delete_Pre\n",
+					"    Bronze_ActiveRows = Bronze_ActiveRecord_Post \n",
+					"    Bronze_TotalRows = Bronze_TotalRowCount_Post\n",
+					"else:\n",
+					"    print(\"Feature Flag turned off, new code not allowed to run.\")"
+				],
+				"execution_count": 74
+			},
+			{
+				"cell_type": "code",
+				"source": [
+					"if esg_sharepoint_bronze_flag:\n",
+					"    print(\"Feature Flag turned on, new code allowed to run.\")\n",
+					"    #Create dataframe to insert log to controldb\n",
+					"    from pyspark.sql.types import StructType, StructField, StringType, IntegerType, BooleanType,DateType, DoubleType,TimestampType\n",
+					"\n",
+					"    log_data = [(db_notebookname,db_tablename,Bronze_LoadDate,Bronze_Insert,Bronze_Update,Bronze_Delete,Bronze_ActiveRows,Bronze_TotalRows)]\n",
+					"    print(log_data)\n",
+					"    log_columns = ['PIPELINE_NAME', 'TABLE_NAME', 'INGEST_DATETIME', 'INSERT','UPDATE','DELETE','ACTIVE_ROWS','TOTAL_ROWS']\n",
+					"    df_log = spark.createDataFrame(log_data, log_columns)\n",
+					"\n",
+					"    #display(df_log)\n",
+					"else:\n",
+					"    print(\"Feature Flag turned off, new code not allowed to run.\")"
+				],
+				"execution_count": 75
+			},
+			{
+				"cell_type": "code",
+				"source": [
+					"if esg_sharepoint_bronze_flag:\n",
+					"    print(\"Feature Flag turned on, new code allowed to run.\")\n",
+					"    #Write df_log to logging table in controldb\n",
+					"    db_port = 1433\n",
+					"    linked_service_name = \"LS_SQL_ELTFrameworkDB\"\n",
+					"    linkedServiceProperties = json.loads(mssparkutils.credentials.getPropertiesAll(linked_service_name))\n",
+					"    sql_server_name = linkedServiceProperties.get('Endpoint')\n",
+					"    db_name = linkedServiceProperties.get('Database')\n",
+					"    access_token = mssparkutils.credentials.getConnectionStringOrCreds(linked_service_name)\n",
+					"    write_table_name = \"[CTL].[CFG_INGESTION_LOGS]\"\n",
+					"\n",
+					"    try:\n",
+					"        df_log.write.format(\"jdbc\") \\\n",
+					"            .option(\"url\", \"jdbc:sqlserver://%s:%s\" % (sql_server_name, db_port)) \\\n",
+					"            .option(\"dbtable\", write_table_name) \\\n",
+					"            .option(\"accessToken\", access_token) \\\n",
+					"            .option(\"encrypt\", \"true\") \\\n",
+					"            .option(\"databaseName\", db_name) \\\n",
+					"            .option(\"hostNameInCertificate\", \"*.database.windows.net\") \\\n",
+					"            .mode(\"append\") \\\n",
+					"            .save()\n",
+					"    except ValueError as error :\n",
+					"        print(\"MSSQL Connector write failed\", error)\n",
+					"\n",
+					"    print(\"MSSQL Connector write(append) succeeded  \")\n",
+					"else:\n",
+					"    print(\"Feature Flag turned off, new code not allowed to run.\")"
+				],
+				"execution_count": 76
+			},
+			{
+				"cell_type": "markdown",
+				"metadata": {
+					"nteract": {
+						"transient": {
+							"deleting": false
+						}
+					}
+				},
+				"source": [
+					"# Table: **coregas_supplier_transactions**: END"
+				]
+			},
+			{
+				"cell_type": "markdown",
+				"metadata": {
+					"nteract": {
+						"transient": {
+							"deleting": false
+						}
+					}
+				},
+				"source": [
+					"# Table: **duid_connection_point_mapping**: START"
+				]
+			},
+			{
+				"cell_type": "markdown",
+				"metadata": {
+					"nteract": {
+						"transient": {
+							"deleting": false
+						}
+					}
+				},
+				"source": [
+					"#UTILS: Set table name\n",
+					"\n",
+					"#tablename=\"duid_connection_point_mapping\"\n",
+					"\n",
+					"#UTILS: Drop db\n",
+					"\n",
+					"#spark.sql(f\"\"\"DROP DATABASE IF EXISTS {db_notebookname} CASCADE\"\"\")\n",
+					"#raw_output_path = f\"abfss://{destination_container}@{destination_storage}.dfs.core.windows.net/{destination_path}\"\n",
+					"#mssparkutils.fs.rm(raw_output_path,recurse=True)\n",
+					"\n",
+					"#UTILS: Drop table\n",
+					"\n",
+					"#spark.sql(f\"\"\"DROP TABLE IF EXISTS {db_notebookname}.{tablename}\"\"\")\n",
+					"#raw_output_path = f\"abfss://{destination_container}@{destination_storage}.dfs.core.windows.net/{destination_path}/{tablename}\"\n",
+					"#mssparkutils.fs.rm(raw_output_path,recurse=True)"
+				]
+			},
+			{
+				"cell_type": "code",
+				"source": [
+					"if esg_sharepoint_bronze_flag:\n",
+					"    print(\"Feature Flag turned on, new code allowed to run.\")\n",
+					"    #Set table name\n",
+					"    db_tablename=\"duid_connection_point_mapping\"\n",
+					"\n",
+					"    # Set up logger for this notebook section\n",
+					"    logger = setup_logger(db_tablename)\n",
+					"else:\n",
+					"    print(\"Feature Flag turned off, new code not allowed to run.\")"
+				],
+				"execution_count": 78
+			},
+			{
+				"cell_type": "code",
+				"source": [
+					"if esg_sharepoint_bronze_flag:\n",
+					"    print(\"Feature Flag turned on, new code allowed to run.\")\n",
+					"    #Create reference_data: Bronze Table\n",
+					"    spark.sql(f\"\"\"CREATE DATABASE IF NOT EXISTS {db_notebookname};\"\"\")\n",
+					"    spark.sql(f\"\"\"\n",
+					"    CREATE TABLE IF NOT EXISTS {db_notebookname}.{db_tablename}\n",
+					"    (\n",
+					"        ParticipantId STRING,\n",
+					"        StationId STRING,\n",
+					"        Mapped_DUID STRING,\n",
+					"        DUID STRING,\n",
+					"        GenSetId STRING,\n",
+					"        RegionId STRING,\n",
+					"        ConnectionPointId STRING,\n",
+					"        ValidFromDate STRING,\n",
+					"        ValidToDate STRING,\n",
+					"        CDCLoadDate TIMESTAMP,\n",
+					"        CDCStartDate TIMESTAMP,\n",
+					"        CDCEndDate TIMESTAMP,\n",
+					"        CDCOps INT,\n",
+					"        CDCCurrentFlag BOOLEAN,\n",
+					"        HashKey STRING,\n",
+					"        HashDiff STRING   \n",
+					"    )\n",
+					"    USING delta\n",
+					"    LOCATION 'abfss://{destination_container}@{destination_storage}.dfs.core.windows.net/{destination_path}/{db_tablename}'\n",
+					"    \"\"\")\n",
+					"else:\n",
+					"    print(\"Feature Flag turned off, new code not allowed to run.\")"
+				],
+				"execution_count": 79
+			},
+			{
+				"cell_type": "code",
+				"source": [
+					"if esg_sharepoint_bronze_flag:\n",
+					"    print(\"Feature Flag turned on, new code allowed to run.\")\n",
+					"    # load parquet file as dataframe\n",
+					"    try:\n",
+					"        raw_df = spark.read.format(\"parquet\").load(f'abfss://{source_container}@{source_storage}.dfs.core.windows.net/{source_path}/{db_tablename}/')\n",
+					"\n",
+					"    except Exception as e:\n",
+					"        logger.error(f\"Error - Reading parquet file: 'abfss://{source_container}@{source_storage}.dfs.core.windows.net/{source_path}/{db_tablename}/: {str(e)}\")\n",
+					"        raise\n",
+					"\n",
+					"    #display(raw_df)\n",
+					"else:\n",
+					"    print(\"Feature Flag turned off, new code not allowed to run.\")"
+				],
+				"execution_count": 80
+			},
+			{
+				"cell_type": "code",
+				"source": [
+					"if esg_sharepoint_bronze_flag:\n",
+					"    print(\"Feature Flag turned on, new code allowed to run.\")\n",
+					"    # Add CDC columns\n",
+					"    from pyspark.sql.functions import hash\n",
+					"    from pyspark.sql import functions as fn\n",
+					"    from pyspark.sql.functions import col, concat, lit, to_timestamp,current_timestamp,date_format, to_date, when\n",
+					"    from pyspark.sql.functions import sha2, concat_ws, regexp_replace\n",
+					"    from pyspark.sql.types import DecimalType\n",
+					"\n",
+					"\n",
+					"    raw_df = raw_df.withColumn(\"HashKey\", sha2(concat_ws(\"||\", \"ParticipantId\", \"StationId\", \"Mapped_DUID\", \"DUID\", \"ConnectionPointId\", \"GenSetId\", regexp_replace(\"ValidFromDate\", \"-|[/.:]\", \"\"), regexp_replace(\"ValidToDate\", \"-|[/.:]\", \"\")), 256))\n",
+					"    raw_df = raw_df.withColumn(\"HashDiff\", sha2(concat_ws(\"||\", \"RegionId\"), 256))\n",
+					"    raw_df = raw_df.withColumn(\"CDCLoadDate\", to_timestamp(lit(Bronze_LoadDate),'yyyy-MM-dd HH:mm:ss'))\n",
+					"    raw_df = raw_df.withColumn(\"CDCStartDate\", to_timestamp(lit(Bronze_LoadDate), 'yyyy-MM-dd HH:mm:ss'))\n",
+					"    raw_df = raw_df.withColumn(\"CDCEndDate\", to_timestamp(lit(\"9999-12-31 23:59:59\"), 'yyyy-MM-dd HH:mm:ss'))\n",
+					"    raw_df = raw_df.withColumn(\"CDCCurrentFlag\", lit(1))\n",
+					"    raw_df = raw_df.withColumn(\"CDCOps\", lit(1))\n",
+					"\n",
+					"    #display(raw_df)\n",
+					"else:\n",
+					"    print(\"Feature Flag turned off, new code not allowed to run.\")"
+				],
+				"execution_count": 81
+			},
+			{
+				"cell_type": "code",
+				"source": [
+					"if esg_sharepoint_bronze_flag:\n",
+					"    print(\"Feature Flag turned on, new code allowed to run.\")\n",
+					"    # Row count parameters\n",
+					"    Bronze_Insert_Pre=spark.sql(f\"\"\" SELECT COUNT(*) FROM {db_notebookname}.{db_tablename} WHERE CDCOps = 1 \"\"\").collect()[0][0]\n",
+					"    Bronze_Update_Pre=spark.sql(f\"\"\" SELECT COUNT(*) FROM {db_notebookname}.{db_tablename} WHERE CDCOps = 2 \"\"\").collect()[0][0]\n",
+					"    Bronze_Delete_Pre=spark.sql(f\"\"\" SELECT COUNT(*) FROM {db_notebookname}.{db_tablename} WHERE CDCOps = 0 \"\"\").collect()[0][0]\n",
+					"else:\n",
+					"    print(\"Feature Flag turned off, new code not allowed to run.\")"
+				],
+				"execution_count": 82
+			},
+			{
+				"cell_type": "code",
+				"source": [
+					"if esg_sharepoint_bronze_flag:\n",
+					"    print(\"Feature Flag turned on, new code allowed to run.\")\n",
+					"    # SCD2 logic\n",
+					"\n",
+					"    # Create a temporary view of the dataframe\n",
+					"    raw_df.createOrReplaceTempView(\"temp_table\")\n",
+					"\n",
+					"    # Use the merge operation to update the target table\n",
+					"    spark.sql(f\"\"\"\n",
+					"        MERGE INTO {db_notebookname}.{db_tablename} t\n",
+					"        USING temp_table s\n",
+					"        ON t.HashKey = s.HashKey AND t.CDCCurrentFlag == true\n",
+					"        WHEN MATCHED AND t.HashDiff <> s.HashDiff THEN\n",
+					"          UPDATE SET t.CDCEndDate = '{Bronze_UpdateEndDate}',\n",
+					"                    t.CDCCurrentFlag = false,\n",
+					"                    t.CDCOps = s.CDCOps + 1\n",
+					"        WHEN NOT MATCHED THEN\n",
+					"          INSERT (ParticipantId, StationId, Mapped_DUID, DUID, GenSetId, RegionId, ConnectionPointId, ValidFromDate, ValidToDate, CDCLoadDate, CDCStartDate, CDCEndDate, CDCOps, CDCCurrentFlag, HashKey, HashDiff)\n",
+					"          VALUES (s.ParticipantId, s.StationId, s.Mapped_DUID, s.DUID, s.GenSetId, s.RegionId, s.ConnectionPointId, s.ValidFromDate, s.ValidToDate, s.CDCLoadDate, s.CDCStartDate, s.CDCEndDate, 1, s.CDCCurrentFlag, s.HashKey, s.HashDiff)\n",
+					"    \"\"\")\n",
+					"\n",
+					"    # Use the merge operation to Insert updated record \n",
+					"    spark.sql(f\"\"\"\n",
+					"        MERGE INTO {db_notebookname}.{db_tablename} t\n",
+					"        USING temp_table s\n",
+					"        ON t.HashKey = s.HashKey AND t.CDCCurrentFlag == true\n",
+					"        WHEN MATCHED AND t.HashDiff <> s.HashDiff THEN\n",
+					"          UPDATE SET t.CDCEndDate = '{Bronze_UpdateEndDate}',\n",
+					"                    t.CDCCurrentFlag = false,\n",
+					"                    t.CDCOps = s.CDCOps + 1\n",
+					"        WHEN NOT MATCHED THEN\n",
+					"          INSERT (ParticipantId, StationId, Mapped_DUID, DUID, GenSetId, RegionId, ConnectionPointId, ValidFromDate, ValidToDate, CDCLoadDate, CDCStartDate, CDCEndDate, CDCOps, CDCCurrentFlag, HashKey, HashDiff)\n",
+					"          VALUES (s.ParticipantId, s.StationId, s.Mapped_DUID, s.DUID, s.GenSetId, s.RegionId, s.ConnectionPointId, s.ValidFromDate, s.ValidToDate, s.CDCLoadDate, s.CDCStartDate, s.CDCEndDate, 1, s.CDCCurrentFlag, s.HashKey, s.HashDiff)\n",
+					"    \"\"\")\n",
+					"else:\n",
+					"    print(\"Feature Flag turned off, new code not allowed to run.\")"
+				],
+				"execution_count": 83
+			},
+			{
+				"cell_type": "code",
+				"source": [
+					"if esg_sharepoint_bronze_flag:\n",
+					"    print(\"Feature Flag turned on, new code allowed to run.\")\n",
+					"    #Row count parameters\n",
+					"    Bronze_Insert_Post=spark.sql(f\"\"\" SELECT COUNT(*) FROM {db_notebookname}.{db_tablename} WHERE CDCOps = 1 \"\"\").collect()[0][0]\n",
+					"    Bronze_Update_Post=spark.sql(f\"\"\" SELECT COUNT(*) FROM {db_notebookname}.{db_tablename} WHERE CDCOps = 2 \"\"\").collect()[0][0]\n",
+					"    Bronze_Delete_Post=spark.sql(f\"\"\" SELECT COUNT(*) FROM {db_notebookname}.{db_tablename} WHERE CDCOps = 0 \"\"\").collect()[0][0]\n",
+					"    Bronze_TotalRowCount_Post=spark.sql(f\"\"\" SELECT COUNT(*) FROM {db_notebookname}.{db_tablename}\"\"\").collect()[0][0]\n",
+					"    Bronze_ActiveRecord_Post=spark.sql(f\"\"\" SELECT COUNT(*) FROM {db_notebookname}.{db_tablename} WHERE CDCCurrentFlag = true \"\"\").collect()[0][0]\n",
+					"else:\n",
+					"    print(\"Feature Flag turned off, new code not allowed to run.\")"
+				],
+				"execution_count": 84
+			},
+			{
+				"cell_type": "code",
+				"source": [
+					"if esg_sharepoint_bronze_flag:\n",
+					"    print(\"Feature Flag turned on, new code allowed to run.\")\n",
+					"    #Row calculation\n",
+					"    Bronze_Update = Bronze_Update_Post - Bronze_Update_Pre\n",
+					"    Bronze_Insert = (Bronze_Insert_Post - Bronze_Insert_Pre) + Bronze_Update\n",
+					"    Bronze_Delete = Bronze_Delete_Post - Bronze_Delete_Pre\n",
+					"    Bronze_ActiveRows = Bronze_ActiveRecord_Post \n",
+					"    Bronze_TotalRows = Bronze_TotalRowCount_Post\n",
+					"else:\n",
+					"    print(\"Feature Flag turned off, new code not allowed to run.\")"
+				],
+				"execution_count": 85
+			},
+			{
+				"cell_type": "code",
+				"source": [
+					"if esg_sharepoint_bronze_flag:\n",
+					"    print(\"Feature Flag turned on, new code allowed to run.\")\n",
+					"    #Create dataframe to insert log to controldb\n",
+					"    from pyspark.sql.types import StructType, StructField, StringType, IntegerType, BooleanType,DateType, DoubleType,TimestampType\n",
+					"\n",
+					"    log_data = [(db_notebookname,db_tablename,Bronze_LoadDate,Bronze_Insert,Bronze_Update,Bronze_Delete,Bronze_ActiveRows,Bronze_TotalRows)]\n",
+					"    print(log_data)\n",
+					"    log_columns = ['PIPELINE_NAME', 'TABLE_NAME', 'INGEST_DATETIME', 'INSERT','UPDATE','DELETE','ACTIVE_ROWS','TOTAL_ROWS']\n",
+					"    df_log = spark.createDataFrame(log_data, log_columns)\n",
+					"\n",
+					"    #display(df_log)\n",
+					"else:\n",
+					"    print(\"Feature Flag turned off, new code not allowed to run.\")"
+				],
+				"execution_count": 86
+			},
+			{
+				"cell_type": "code",
+				"source": [
+					"if esg_sharepoint_bronze_flag:\n",
+					"    print(\"Feature Flag turned on, new code allowed to run.\")\n",
+					"    #Write df_log to logging table in controldb\n",
+					"    db_port = 1433\n",
+					"    linked_service_name = \"LS_SQL_ELTFrameworkDB\"\n",
+					"    linkedServiceProperties = json.loads(mssparkutils.credentials.getPropertiesAll(linked_service_name))\n",
+					"    sql_server_name = linkedServiceProperties.get('Endpoint')\n",
+					"    db_name = linkedServiceProperties.get('Database')\n",
+					"    access_token = mssparkutils.credentials.getConnectionStringOrCreds(linked_service_name)\n",
+					"    write_table_name = \"[CTL].[CFG_INGESTION_LOGS]\"\n",
+					"\n",
+					"    try:\n",
+					"        df_log.write.format(\"jdbc\") \\\n",
+					"            .option(\"url\", \"jdbc:sqlserver://%s:%s\" % (sql_server_name, db_port)) \\\n",
+					"            .option(\"dbtable\", write_table_name) \\\n",
+					"            .option(\"accessToken\", access_token) \\\n",
+					"            .option(\"encrypt\", \"true\") \\\n",
+					"            .option(\"databaseName\", db_name) \\\n",
+					"            .option(\"hostNameInCertificate\", \"*.database.windows.net\") \\\n",
+					"            .mode(\"append\") \\\n",
+					"            .save()\n",
+					"    except ValueError as error :\n",
+					"        print(\"MSSQL Connector write failed\", error)\n",
+					"\n",
+					"    print(\"MSSQL Connector write(append) succeeded  \")\n",
+					"else:\n",
+					"    print(\"Feature Flag turned off, new code not allowed to run.\")"
+				],
+				"execution_count": 87
+			},
+			{
+				"cell_type": "markdown",
+				"metadata": {
+					"nteract": {
+						"transient": {
+							"deleting": false
+						}
+					}
+				},
+				"source": [
+					"# Table: **duid_connection_point_mapping**: END"
+				]
+			}
+		]
+	}
+}

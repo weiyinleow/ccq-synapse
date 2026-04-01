@@ -1,0 +1,75 @@
+{
+	"name": "Get_MetaDB_Params",
+	"properties": {
+		"folder": {
+			"name": "DataHubBatchScripts/Utils"
+		},
+		"nbformat": 4,
+		"nbformat_minor": 2,
+		"sessionProperties": {
+			"driverMemory": "28g",
+			"driverCores": 4,
+			"executorMemory": "28g",
+			"executorCores": 4,
+			"numExecutors": 2,
+			"conf": {
+				"spark.dynamicAllocation.enabled": "false",
+				"spark.dynamicAllocation.minExecutors": "2",
+				"spark.dynamicAllocation.maxExecutors": "2",
+				"spark.autotune.trackingId": "c16db875-25ac-46d3-b668-61cb84d438f1"
+			}
+		},
+		"metadata": {
+			"saveOutput": true,
+			"enableDebugMode": false,
+			"kernelspec": {
+				"name": "synapse_pyspark",
+				"display_name": "python"
+			},
+			"language_info": {
+				"name": "python"
+			},
+			"sessionKeepAliveTimeout": 30
+		},
+		"cells": [
+			{
+				"cell_type": "code",
+				"source": [
+					"# Connect to MetaDB\r\n",
+					"\r\n",
+					"from pyspark.sql.dataframe import DataFrame\r\n",
+					"import jdbc\r\n",
+					"\r\n",
+					"def get_data_from_meta_db(query:str) -> DataFrame:\r\n",
+					"    \"\"\"\r\n",
+					"    Runs a SQL query and returns the result as a spark dataframe\r\n",
+					"\r\n",
+					"    \"\"\"\r\n",
+					"    \r\n",
+					"db_port = 1433\r\n",
+					"linked_service_name = \"LS_SQL_ELTFrameworkDB\"\r\n",
+					"linkedServiceProperties = json.loads(mssparkutils.credentials.getPropertiesAll(linked_service_name))\r\n",
+					"sql_server = linkedServiceProperties.get(\"Endpoint\")\r\n",
+					"db_name = linkedServiceProperties.get(\"Database\")\r\n",
+					"\r\n",
+					"access_token = mssparkutils.credentials.getConnectionStringOrCreds(linked_service_name)\r\n",
+					"\r\n",
+					"# Read\r\n",
+					"df = spark.read.format(\"jdbc\") \\\r\n",
+					"    .option(\"url\", \"jdbc:sqlserver://%s:%s\" % (sql_server_name, db_port)) \\\r\n",
+					"    .option(\"query\", query) \\\r\n",
+					"    .option(\"accessToken\", access_token) \\\r\n",
+					"    .option(\"encrypt\", \"true\") \\\r\n",
+					"    .option(\"databaseName\", db_name) \\\r\n",
+					"    .option(\"hostNameInCertificate\", \"*.database.windows.net\") \\\r\n",
+					"    .load()\r\n",
+					"return df\r\n",
+					"\r\n",
+					"\r\n",
+					""
+				],
+				"execution_count": null
+			}
+		]
+	}
+}

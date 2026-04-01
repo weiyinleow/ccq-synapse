@@ -1,0 +1,291 @@
+{
+	"name": "14419_AEMO_Backup",
+	"properties": {
+		"folder": {
+			"name": "DataHubBatchScripts/AEMO/AEMO_14419"
+		},
+		"nbformat": 4,
+		"nbformat_minor": 2,
+		"bigDataPool": {
+			"referenceName": "Sparkpool01",
+			"type": "BigDataPoolReference"
+		},
+		"sessionProperties": {
+			"driverMemory": "56g",
+			"driverCores": 8,
+			"executorMemory": "56g",
+			"executorCores": 8,
+			"numExecutors": 2,
+			"conf": {
+				"spark.dynamicAllocation.enabled": "false",
+				"spark.dynamicAllocation.minExecutors": "2",
+				"spark.dynamicAllocation.maxExecutors": "2",
+				"spark.autotune.trackingId": "3131cf7d-616f-4167-92bf-8a13361908a7"
+			}
+		},
+		"metadata": {
+			"saveOutput": true,
+			"enableDebugMode": false,
+			"kernelspec": {
+				"name": "synapse_pyspark",
+				"display_name": "Synapse PySpark"
+			},
+			"language_info": {
+				"name": "python"
+			},
+			"a365ComputeOptions": {
+				"id": "/subscriptions/2e9f823e-dc76-4e8e-b815-c8a4f22d05ff/resourceGroups/CQL-AZUR1-DEVDATAHUB01-RG/providers/Microsoft.Synapse/workspaces/cql-dev-datahub-synapse01/bigDataPools/Sparkpool01",
+				"name": "Sparkpool01",
+				"type": "Spark",
+				"endpoint": "https://cql-dev-datahub-synapse01.dev.azuresynapse.net/livyApi/versions/2019-11-01-preview/sparkPools/Sparkpool01",
+				"auth": {
+					"type": "AAD",
+					"authResource": "https://dev.azuresynapse.net"
+				},
+				"sparkVersion": "3.3",
+				"nodeCount": 10,
+				"cores": 8,
+				"memory": 56,
+				"automaticScaleJobs": false
+			},
+			"sessionKeepAliveTimeout": 30
+		},
+		"cells": [
+			{
+				"cell_type": "code",
+				"metadata": {
+					"jupyter": {
+						"source_hidden": false,
+						"outputs_hidden": false
+					},
+					"nteract": {
+						"transient": {
+							"deleting": false
+						}
+					}
+				},
+				"source": [
+					"environment = \"dev\" #or dev"
+				],
+				"execution_count": 51
+			},
+			{
+				"cell_type": "code",
+				"source": [
+					"databasename = \"aemo_bronze\"\r\n",
+					"tablename = \"nem12_bronze\"\r\n",
+					"tablename_temp = \"nem12_bronze_temp\"\r\n",
+					"backup_tablename = \"nem12_bronze_14419\"\r\n",
+					"destination_path = \"AEMO/NEM12\""
+				],
+				"execution_count": 52
+			},
+			{
+				"cell_type": "code",
+				"metadata": {
+					"jupyter": {
+						"source_hidden": false,
+						"outputs_hidden": false
+					},
+					"nteract": {
+						"transient": {
+							"deleting": false
+						}
+					}
+				},
+				"source": [
+					"if environment == \"dev\":\r\n",
+					"    path = f'abfss://bronze@cqldevdatahubsynapse.dfs.core.windows.net/{destination_path}/{backup_tablename}' # Location of parquet files once we write the changes\r\n",
+					"elif environment == \"prod\":\r\n",
+					"    path = f'abfss://bronze@cqlproddatahubsynapse.dfs.core.windows.net/{destination_path}/{backup_tablename}' # Location of parquet files once we write the changes"
+				],
+				"execution_count": 53
+			},
+			{
+				"cell_type": "code",
+				"metadata": {
+					"jupyter": {
+						"source_hidden": false,
+						"outputs_hidden": false
+					},
+					"nteract": {
+						"transient": {
+							"deleting": false
+						}
+					}
+				},
+				"source": [
+					"print(environment)\r\n",
+					"print(path)"
+				],
+				"execution_count": 54
+			},
+			{
+				"cell_type": "markdown",
+				"metadata": {
+					"nteract": {
+						"transient": {
+							"deleting": false
+						}
+					}
+				},
+				"source": [
+					"# **Backup Start**"
+				]
+			},
+			{
+				"cell_type": "markdown",
+				"metadata": {
+					"nteract": {
+						"transient": {
+							"deleting": false
+						}
+					}
+				},
+				"source": [
+					"# Only execute when you want to delete backup\r\n",
+					"#Drop table and storage folder if exists \r\n",
+					"from py4j.protocol import Py4JJavaError\r\n",
+					"\r\n",
+					"spark.sql(f\"\"\"DROP TABLE IF EXISTS {databasename}.{backup_tablename}\"\"\")\r\n",
+					"\r\n",
+					"try:\r\n",
+					"    raw_output_path = f\"\"\"{path}\"\"\"\r\n",
+					"    mssparkutils.fs.rm(raw_output_path,recurse=True)\r\n",
+					"\r\n",
+					"    print(\"Delete successful\")\r\n",
+					"\r\n",
+					"except Py4JJavaError as error :\r\n",
+					"    if 'org.apache.hadoop.fs.PathNotFoundException' in str (error.java_exception):\r\n",
+					"        print(\"No such file or directory\")"
+				]
+			},
+			{
+				"cell_type": "code",
+				"metadata": {
+					"jupyter": {
+						"source_hidden": false,
+						"outputs_hidden": false
+					},
+					"nteract": {
+						"transient": {
+							"deleting": false
+						}
+					}
+				},
+				"source": [
+					"#create table \r\n",
+					"spark.sql(f\"\"\"CREATE DATABASE IF NOT EXISTS {databasename};\"\"\")\r\n",
+					"spark.sql(f\"\"\"\r\n",
+					"CREATE TABLE IF NOT EXISTS {databasename}.{backup_tablename}\r\n",
+					"(\r\n",
+					"    Nem12HashKey STRING,\r\n",
+					"    CDC_LoadDate TIMESTAMP,\r\n",
+					"    MSATSLoadDateTime STRING, \r\n",
+					"    VersionHeader STRING,\r\n",
+					"    CreationDate STRING,\r\n",
+					"    Timestamp TIMESTAMP,\r\n",
+					"    DisplayTimestamp_d STRING,\r\n",
+					"    FromParticipant STRING,\r\n",
+					"    ToParticipant STRING,\r\n",
+					"    NMI STRING,\r\n",
+					"    NMIConfiguration STRING,\r\n",
+					"    RegisterID STRING,\r\n",
+					"    NMISuffix STRING,\r\n",
+					"    MDMDataStreamIdentifier STRING,\r\n",
+					"    MeterSerialNumber STRING, \r\n",
+					"    UnitOfMeasurementId STRING,\r\n",
+					"    IntervalLength DOUBLE,\r\n",
+					"    IntervalIndex INT,\r\n",
+					"    IntervalDate STRING, \r\n",
+					"    NextScheduledReadDate STRING, \r\n",
+					"    Usage DOUBLE, \r\n",
+					"    FinalQualityMethodId STRING, \r\n",
+					"    FinalReasonCodeId STRING, \r\n",
+					"    QualityMethodId STRING,\r\n",
+					"    ReasonCodeId STRING,\r\n",
+					"    ReasonDescription STRING, \r\n",
+					"    NormalizedTimeStart STRING,\r\n",
+					"    NormalizedTimeEnd STRING,\r\n",
+					"    TransCodeId STRING, \r\n",
+					"    RetServiceOrder STRING, \r\n",
+					"    ReadDatetime STRING,\r\n",
+					"    IndexRead STRING,\r\n",
+					"    FileName STRING,\r\n",
+					"    CDC_StartDate TIMESTAMP,\r\n",
+					"    CDC_EndDate TIMESTAMP,\r\n",
+					"    CDC_Ops INT,\r\n",
+					"    CDC_CurrentFlag BOOLEAN,\r\n",
+					"    Nem12HashDiff STRING   \r\n",
+					")\r\n",
+					"USING delta\r\n",
+					"LOCATION '{path}'\r\n",
+					"\"\"\")\r\n",
+					"\r\n",
+					"#select all the records\r\n",
+					"raw_df = spark.sql(f\"\"\"\r\n",
+					"                        SELECT *\r\n",
+					"                        FROM {databasename}.{tablename}\r\n",
+					"                    \"\"\")"
+				],
+				"execution_count": 33
+			},
+			{
+				"cell_type": "code",
+				"metadata": {
+					"jupyter": {
+						"source_hidden": false,
+						"outputs_hidden": false
+					},
+					"nteract": {
+						"transient": {
+							"deleting": false
+						}
+					}
+				},
+				"source": [
+					"from pyspark.sql.functions import *\r\n",
+					"from pyspark.sql.types import DateType\r\n",
+					"\r\n",
+					"\r\n",
+					"\r\n",
+					"# Create a temporary view of the dataframe\r\n",
+					"raw_df.createOrReplaceTempView(\"temp_table\")\r\n",
+					"\r\n",
+					"# Use the merge operation to update the target table\r\n",
+					"spark.sql(f\"\"\"\r\n",
+					"      INSERT INTO {databasename}.{backup_tablename}\r\n",
+					"        (VersionHeader,CreationDate,Timestamp,DisplayTimestamp_d,FromParticipant,ToParticipant,NMI,NMIConfiguration,RegisterID,NMISuffix,\r\n",
+					"        MDMDataStreamIdentifier,MeterSerialNumber, UnitOfMeasurementId, IntervalLength, IntervalIndex,IntervalDate, NextScheduledReadDate, \r\n",
+					"        Usage, FinalQualityMethodId,FinalReasonCodeId, MSATSLoadDateTime, QualityMethodId, ReasonCodeId, ReasonDescription,\r\n",
+					"        NormalizedTimeStart,NormalizedTimeEnd, TransCodeId, RetServiceOrder, ReadDatetime, IndexRead,FileName,\r\n",
+					"        CDC_LoadDate, CDC_StartDate, CDC_EndDate, CDC_Ops, CDC_CurrentFlag, \r\n",
+					"        Nem12HashKey, Nem12HashDiff)\r\n",
+					"        SELECT\r\n",
+					"          s.VersionHeader,s.CreationDate,s.Timestamp,s.DisplayTimestamp_d,s.FromParticipant,s.ToParticipant,s.NMI,s.NMIConfiguration,s.RegisterID,s.NMISuffix,\r\n",
+					"        s.MDMDataStreamIdentifier,s.MeterSerialNumber, s.UnitOfMeasurementId, s.IntervalLength, s.IntervalIndex,s.IntervalDate, s.NextScheduledReadDate, \r\n",
+					"        s.Usage, s.FinalQualityMethodId,s.FinalReasonCodeId, s.MSATSLoadDateTime, s.QualityMethodId, s.ReasonCodeId, s.ReasonDescription,\r\n",
+					"        s.NormalizedTimeStart,s.NormalizedTimeEnd, s.TransCodeId, s.RetServiceOrder, s.ReadDatetime, s.IndexRead, s.FileName,\r\n",
+					"        s.CDC_LoadDate, s.CDC_StartDate, s.CDC_EndDate, s.CDC_Ops, s.CDC_CurrentFlag, \r\n",
+					"        s.Nem12HashKey, s.Nem12HashDiff\r\n",
+					"        FROM temp_table s;\r\n",
+					"  \"\"\")"
+				],
+				"execution_count": 34
+			},
+			{
+				"cell_type": "markdown",
+				"metadata": {
+					"nteract": {
+						"transient": {
+							"deleting": false
+						}
+					}
+				},
+				"source": [
+					"# Backup End"
+				]
+			}
+		]
+	}
+}

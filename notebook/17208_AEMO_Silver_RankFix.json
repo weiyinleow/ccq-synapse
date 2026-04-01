@@ -1,0 +1,733 @@
+{
+	"name": "17208_AEMO_Silver_RankFix",
+	"properties": {
+		"folder": {
+			"name": "DataHubBatchScripts/AEMO/AEMO_17208"
+		},
+		"nbformat": 4,
+		"nbformat_minor": 2,
+		"bigDataPool": {
+			"referenceName": "JobSparkpool03",
+			"type": "BigDataPoolReference"
+		},
+		"sessionProperties": {
+			"driverMemory": "112g",
+			"driverCores": 16,
+			"executorMemory": "112g",
+			"executorCores": 16,
+			"numExecutors": 2,
+			"conf": {
+				"spark.dynamicAllocation.enabled": "false",
+				"spark.dynamicAllocation.minExecutors": "2",
+				"spark.dynamicAllocation.maxExecutors": "2",
+				"spark.autotune.trackingId": "540eac88-2a9c-4f8c-a116-802d4e84703e"
+			}
+		},
+		"metadata": {
+			"saveOutput": true,
+			"enableDebugMode": false,
+			"kernelspec": {
+				"name": "synapse_pyspark",
+				"display_name": "Synapse PySpark"
+			},
+			"language_info": {
+				"name": "python"
+			},
+			"a365ComputeOptions": {
+				"id": "/subscriptions/2e9f823e-dc76-4e8e-b815-c8a4f22d05ff/resourceGroups/CQL-AZUR1-DEVDATAHUB01-RG/providers/Microsoft.Synapse/workspaces/cql-dev-datahub-synapse01/bigDataPools/JobSparkpool03",
+				"name": "JobSparkpool03",
+				"type": "Spark",
+				"endpoint": "https://cql-dev-datahub-synapse01.dev.azuresynapse.net/livyApi/versions/2019-11-01-preview/sparkPools/JobSparkpool03",
+				"auth": {
+					"type": "AAD",
+					"authResource": "https://dev.azuresynapse.net"
+				},
+				"sparkVersion": "3.4",
+				"nodeCount": 10,
+				"cores": 16,
+				"memory": 112
+			},
+			"sessionKeepAliveTimeout": 30
+		},
+		"cells": [
+			{
+				"cell_type": "code",
+				"source": [
+					"#Get Parameter from controldb\n",
+					"import json\n",
+					"db_port = 1433\n",
+					"linked_service_name = \"LS_SQL_ELTFrameworkDB\"\n",
+					"db_notebookname= \"AEMO_Silver\"\n",
+					"linkedServiceProperties = json.loads(mssparkutils.credentials.getPropertiesAll(linked_service_name))\n",
+					"sql_server_name = linkedServiceProperties.get('Endpoint')\n",
+					"db_name = linkedServiceProperties.get('Database')\n",
+					"access_token = mssparkutils.credentials.getConnectionStringOrCreds(linked_service_name)\n",
+					"\n",
+					"db_query =\"SELECT A.*,B.NotebookParameterId,B.ParameterType,B.Value  FROM [CTL].[CFG_NOTEBOOK] A LEFT JOIN [CTL].[CFG_NOTEBOOK_PARAMETER] B ON A.NotebookId = B.NotebookId\"\n",
+					"\n",
+					"df = spark.read.format(\"jdbc\") \\\n",
+					"    .option(\"url\", \"jdbc:sqlserver://%s:%s\" % (sql_server_name, db_port)) \\\n",
+					"    .option(\"query\", db_query) \\\n",
+					"    .option(\"accessToken\", access_token) \\\n",
+					"    .option(\"encrypt\", \"true\") \\\n",
+					"    .option(\"databaseName\", db_name) \\\n",
+					"    .option(\"hostNameInCertificate\", \"*.database.windows.net\") \\\n",
+					"    .load()\n",
+					"\n",
+					"df2 = df.where(df.NotebookPath==db_notebookname) "
+				],
+				"execution_count": 1
+			},
+			{
+				"cell_type": "code",
+				"metadata": {
+					"jupyter": {
+						"source_hidden": false,
+						"outputs_hidden": false
+					},
+					"nteract": {
+						"transient": {
+							"deleting": false
+						}
+					}
+				},
+				"source": [
+					"#Source DataLake storage details\n",
+					"source_storage = df2.where(df2.ParameterType=='source_storage').collect()[0][\"Value\"] #Storage name\n",
+					"source_container = df2.where(df2.ParameterType=='source_container').collect()[0][\"Value\"] #Storage container detail\n",
+					"source_path = df2.where(df2.ParameterType=='source_path').collect()[0][\"Value\"] #internal folder location in container \"demodata/demo_aemo\"\n",
+					"#source_file = '' #CUSTOMER__full_32a72bd2-bd94-467f-9030-6b9f20dad676_20240204_100201\n",
+					"\n",
+					"#Destination DataLake storage details\n",
+					"destination_storage = df2.where(df2.ParameterType=='destination_storage').collect()[0][\"Value\"] #Storage name\n",
+					"destination_container = df2.where(df2.ParameterType=='destination_container').collect()[0][\"Value\"] #raw storage container details\n",
+					"destination_path = df2.where(df2.ParameterType=='destination_path').collect()[0][\"Value\"] #raw delta file patch\n",
+					"\n",
+					"#Get Current Date\n",
+					"Silver_LoadDate=spark.sql(\"select current_timestamp()\").collect()[0][0]"
+				],
+				"execution_count": 2
+			},
+			{
+				"cell_type": "code",
+				"metadata": {
+					"jupyter": {
+						"source_hidden": false,
+						"outputs_hidden": false
+					},
+					"nteract": {
+						"transient": {
+							"deleting": false
+						}
+					}
+				},
+				"source": [
+					"#Set table name\n",
+					"db_tablename=\"nem12_silver\"\n",
+					"Bronze_notebookname=\"aemo_bronze\"\n",
+					"Bronze_tablename=\"nem12_bronze\""
+				],
+				"execution_count": null
+			},
+			{
+				"cell_type": "code",
+				"metadata": {
+					"jupyter": {
+						"source_hidden": false,
+						"outputs_hidden": false
+					},
+					"nteract": {
+						"transient": {
+							"deleting": false
+						}
+					}
+				},
+				"source": [
+					"# Create AEMO Dir if it does not exist\r\n",
+					"dirs_in_silver =  [f.name for f in mssparkutils.fs.ls(f\"abfss://{destination_container}@{destination_storage}.dfs.core.windows.net/\")]\r\n",
+					"if \"AEMO\" not in dirs_in_silver:\r\n",
+					"    mssparkutils.fs.mkdirs(f\"abfss://{destination_container}@{destination_storage}.dfs.core.windows.net/AEMO\")"
+				],
+				"execution_count": null
+			},
+			{
+				"cell_type": "code",
+				"metadata": {
+					"jupyter": {
+						"source_hidden": false,
+						"outputs_hidden": false
+					},
+					"nteract": {
+						"transient": {
+							"deleting": false
+						}
+					}
+				},
+				"source": [
+					"# Create NEM12 Dir if it does not exist \r\n",
+					"dirs_in_aemo =  [f.name for f in mssparkutils.fs.ls(f\"abfss://{destination_container}@{destination_storage}.dfs.core.windows.net/AEMO\")]\r\n",
+					"\r\n",
+					"if \"NEM12\" not in dirs_in_aemo:\r\n",
+					"    mssparkutils.fs.mkdirs(f\"abfss://{destination_container}@{destination_storage}.dfs.core.windows.net/AEMO/NEM12\")"
+				],
+				"execution_count": null
+			},
+			{
+				"cell_type": "code",
+				"metadata": {
+					"jupyter": {
+						"source_hidden": false,
+						"outputs_hidden": false
+					},
+					"nteract": {
+						"transient": {
+							"deleting": false
+						}
+					}
+				},
+				"source": [
+					"from pyspark.sql.functions import *"
+				],
+				"execution_count": null
+			},
+			{
+				"cell_type": "code",
+				"metadata": {
+					"jupyter": {
+						"source_hidden": false,
+						"outputs_hidden": false
+					},
+					"nteract": {
+						"transient": {
+							"deleting": false
+						}
+					}
+				},
+				"source": [
+					"# Drop table and storage folder if exists\r\n",
+					"from py4j.protocol import Py4JJavaError\r\n",
+					"\r\n",
+					"spark.sql(f\"\"\"DROP TABLE IF EXISTS {db_notebookname}.{db_tablename}\"\"\")\r\n",
+					"\r\n",
+					"try:\r\n",
+					"    raw_output_path = f\"abfss://{destination_container}@{destination_storage}.dfs.core.windows.net/{destination_path}/{db_tablename}\"\r\n",
+					"    mssparkutils.fs.rm(raw_output_path,recurse=True)\r\n",
+					"\r\n",
+					"    print(\"Delete successful\")\r\n",
+					"\r\n",
+					"except Py4JJavaError as error :\r\n",
+					"    if 'org.apache.hadoop.fs.PathNotFoundException' in str (error.java_exception):\r\n",
+					"        print(\"No such file or directory\")"
+				],
+				"execution_count": null
+			},
+			{
+				"cell_type": "code",
+				"metadata": {
+					"jupyter": {
+						"source_hidden": false,
+						"outputs_hidden": false
+					},
+					"nteract": {
+						"transient": {
+							"deleting": false
+						}
+					}
+				},
+				"source": [
+					"# Create database if exists\r\n",
+					"spark.sql(f\"\"\"CREATE DATABASE IF NOT EXISTS {db_notebookname};\"\"\")\r\n",
+					"\r\n",
+					"# Create silver table\r\n",
+					"spark.sql(f\"\"\"\r\n",
+					"CREATE TABLE IF NOT EXISTS {db_notebookname}.{db_tablename}\r\n",
+					"(\r\n",
+					"    Nem12HashKey STRING,\r\n",
+					"    CDC_CurrentFlag BOOLEAN,\r\n",
+					"    CDC_LoadDate TIMESTAMP,\r\n",
+					"    MSATSLoadDateTime STRING,\r\n",
+					"    CreationDate STRING,\r\n",
+					"    CDC_Ops INT,\r\n",
+					"    Year INT, \r\n",
+					"    VersionHeader STRING,\r\n",
+					"    FromParticipant STRING,\r\n",
+					"    ToParticipant STRING,\r\n",
+					"    IntervalDate STRING,\r\n",
+					"    IntervalLength DOUBLE,\r\n",
+					"    IntervalIndex INT,\r\n",
+					"    Timestamp TIMESTAMP,\r\n",
+					"    DisplayTimestamp_d STRING,\r\n",
+					"    DateHashId STRING, \r\n",
+					"    NormalizedTimeStart STRING,\r\n",
+					"    NormalizedTimeEnd STRING,\r\n",
+					"    TimeHashId STRING,\r\n",
+					"    NMI STRING,\r\n",
+					"    NMIHashId STRING,\r\n",
+					"    NMIConfiguration STRING,\r\n",
+					"    RegisterID STRING,\r\n",
+					"    NMISuffix STRING,\r\n",
+					"    ChannelHashId STRING,\r\n",
+					"    ReasonCodeId STRING,\r\n",
+					"    ReasonCodeHashId STRING,\r\n",
+					"    ReasonDescription STRING,\r\n",
+					"    FinalReasonCodeId STRING, \r\n",
+					"    FinalReasonCodeHashId STRING,\r\n",
+					"    TransCodeId STRING,\r\n",
+					"    TransCodeHashId STRING,\r\n",
+					"    UnitOfMeasurementId STRING,\r\n",
+					"    UnitOfMeasurementHashId STRING,\r\n",
+					"    QualityMethodId STRING,\r\n",
+					"    QualityFlag STRING,\r\n",
+					"    QualityFlagHashId STRING,\r\n",
+					"    MethodFlag STRING,\r\n",
+					"    MethodFlagHashId STRING, \r\n",
+					"    FinalQualityMethodId STRING,\r\n",
+					"    FinalQualityFlag STRING,\r\n",
+					"    FinalQualityFlagHashId STRING,\r\n",
+					"    FinalMethodFlag STRING, \r\n",
+					"    FinalMethodFlagHashId STRING,\r\n",
+					"    MDMDataStreamIdentifier STRING,\r\n",
+					"    MeterSerialNumber STRING, \r\n",
+					"    NextScheduledReadDate STRING,  \r\n",
+					"    RetServiceOrder STRING, \r\n",
+					"    ReadDatetime STRING,\r\n",
+					"    IndexRead STRING,\r\n",
+					"    Usage_d DOUBLE, \r\n",
+					"    Usage DOUBLE,\r\n",
+					"    FileName STRING\r\n",
+					")\r\n",
+					"USING delta\r\n",
+					"PARTITIONED BY (Year)\r\n",
+					"LOCATION 'abfss://{destination_container}@{destination_storage}.dfs.core.windows.net/{destination_path}/{db_tablename}'\r\n",
+					"\"\"\")"
+				],
+				"execution_count": null
+			},
+			{
+				"cell_type": "code",
+				"metadata": {
+					"jupyter": {
+						"source_hidden": false,
+						"outputs_hidden": false
+					},
+					"nteract": {
+						"transient": {
+							"deleting": false
+						}
+					},
+					"collapsed": false
+				},
+				"source": [
+					"# Row count parameters\n",
+					"Silver_Insert_Pre=spark.sql(f\"\"\" SELECT COUNT(*) FROM {db_notebookname}.{db_tablename} WHERE CDC_Ops = 1 \"\"\").collect()[0][0]\n",
+					"Silver_Update_Pre=spark.sql(f\"\"\" SELECT COUNT(*) FROM {db_notebookname}.{db_tablename} WHERE CDC_Ops = 2 \"\"\").collect()[0][0]\n",
+					"Silver_Delete_Pre=spark.sql(f\"\"\" SELECT COUNT(*) FROM {db_notebookname}.{db_tablename} WHERE CDC_Ops = 0 \"\"\").collect()[0][0]\n",
+					""
+				],
+				"execution_count": null
+			},
+			{
+				"cell_type": "markdown",
+				"metadata": {
+					"nteract": {
+						"transient": {
+							"deleting": false
+						}
+					}
+				},
+				"source": [
+					"#Silver load dates\r\n",
+					"df_Latest_LoadDate = spark.sql(f\"\"\"\r\n",
+					"                        SELECT date_format(CDC_LoadDate,'yyyy-MM-dd HH:mm:ss.SSSSSS') AS Latest_LoadDate FROM\r\n",
+					"                            (SELECT DISTINCT CDC_LoadDate FROM {db_notebookname}.{db_tablename}\r\n",
+					"                            ORDER BY CDC_LoadDate DESC\r\n",
+					"                            LIMIT 1);\r\n",
+					"                    \"\"\")\r\n",
+					"#display(df_Latest_LoadDate)\r\n",
+					"\r\n",
+					"if df_Latest_LoadDate.count() > 0 and df_Latest_LoadDate.collect()[0][0] != None:\r\n",
+					"    silver_loaddate = df_Latest_LoadDate.collect()[0][0]\r\n",
+					"else:\r\n",
+					"    silver_loaddate = '1900-01-01 00:00:00.000000'\r\n",
+					"print(silver_loaddate)"
+				]
+			},
+			{
+				"cell_type": "code",
+				"metadata": {
+					"jupyter": {
+						"source_hidden": false,
+						"outputs_hidden": false
+					},
+					"nteract": {
+						"transient": {
+							"deleting": false
+						}
+					}
+				},
+				"source": [
+					"df_silver = spark.sql(f\"\"\"\r\n",
+					"                        SELECT *\r\n",
+					"                        FROM (\r\n",
+					"                                SELECT\r\n",
+					"                                    Nem12HashKey\r\n",
+					"                                    ,'true' AS CDC_CurrentFlag\r\n",
+					"                                    ,VersionHeader\r\n",
+					"                                    ,Timestamp\r\n",
+					"                                    ,DisplayTimestamp_d\r\n",
+					"                                    ,FromParticipant\r\n",
+					"                                    ,ToParticipant\r\n",
+					"                                    ,NMI\r\n",
+					"                                    ,NMIConfiguration\r\n",
+					"                                    ,RegisterID\r\n",
+					"                                    ,NMISuffix\r\n",
+					"                                    ,MDMDataStreamIdentifier\r\n",
+					"                                    ,MeterSerialNumber\r\n",
+					"                                    ,UnitOfMeasurementId\r\n",
+					"                                    ,IntervalLength\r\n",
+					"                                    ,IntervalIndex\r\n",
+					"                                    ,IntervalDate\r\n",
+					"                                    ,NextScheduledReadDate\r\n",
+					"                                    ,Usage\r\n",
+					"                                    ,FinalQualityMethodId\r\n",
+					"                                    ,FinalReasonCodeId\r\n",
+					"                                    ,MSATSLoadDateTime\r\n",
+					"                                    ,QualityMethodId\r\n",
+					"                                    ,ReasonCodeId\r\n",
+					"                                    ,ReasonDescription\r\n",
+					"                                    ,NormalizedTimeStart\r\n",
+					"                                    ,NormalizedTimeEnd\r\n",
+					"                                    ,TransCodeId\r\n",
+					"                                    ,RetServiceOrder\r\n",
+					"                                    ,ReadDatetime\r\n",
+					"                                    ,IndexRead\r\n",
+					"                                    ,FileName\r\n",
+					"                                    ,CDC_LoadDate\r\n",
+					"                                    ,1 AS CDC_Ops\r\n",
+					"                                    ,CreationDate\r\n",
+					"                                    ,ROW_NUMBER() OVER (\r\n",
+					"                                        PARTITION BY \r\n",
+					"                                            NMI,\r\n",
+					"                                            IntervalDate,\r\n",
+					"                                            IntervalIndex,\r\n",
+					"                                            NMISuffix,\r\n",
+					"                                            FromParticipant\r\n",
+					"                                        ORDER BY \r\n",
+					"                                            MSATSLoadDateTime DESC, \r\n",
+					"                                            CreationDate DESC,\r\n",
+					"                                            FileName DESC\r\n",
+					"                                    ) AS FileRank\r\n",
+					"                                FROM {Bronze_notebookname}.{Bronze_tablename}\r\n",
+					"                                Order by Nem12HashKey)\r\n",
+					"                        WHERE FileRank = 1\r\n",
+					"                    \"\"\")\r\n",
+					"\r\n",
+					"###DevOps ticket #17208###\r\n",
+					"#Added FileName to the ORDER BY clause and IntervalIndex to the PARTITION BY clause for this because we have files that have been \r\n",
+					"#loaded into Bronze twice, some in the same load (same CDC_LoadDate). We only want to progress one of those sets of records otherwise \r\n",
+					"#we have duplicated rows.\r\n",
+					"###"
+				],
+				"execution_count": null
+			},
+			{
+				"cell_type": "markdown",
+				"metadata": {
+					"nteract": {
+						"transient": {
+							"deleting": false
+						}
+					}
+				},
+				"source": [
+					"display(df_silver)"
+				]
+			},
+			{
+				"cell_type": "code",
+				"metadata": {
+					"jupyter": {
+						"source_hidden": false,
+						"outputs_hidden": false
+					},
+					"nteract": {
+						"transient": {
+							"deleting": false
+						}
+					}
+				},
+				"source": [
+					"df_silver = df_silver.withColumn(\"Usage_d\",df_silver[\"Usage\"])\n",
+					"\n",
+					"# Replace NULL values in usage \n",
+					"df_silver = df_silver.na.fill({\"Usage_d\":0})"
+				],
+				"execution_count": null
+			},
+			{
+				"cell_type": "code",
+				"metadata": {
+					"jupyter": {
+						"source_hidden": false,
+						"outputs_hidden": false
+					},
+					"nteract": {
+						"transient": {
+							"deleting": false
+						}
+					}
+				},
+				"source": [
+					"from pyspark.sql.functions import *\n",
+					"\n",
+					"# # Create NMIHashKey \n",
+					"df_silver = df_silver.withColumn(\"NMIHashId\", sha2(concat_ws(\"||\",\"NMI\"),256))\n",
+					"\n",
+					"# # Create ChannelHashKey \n",
+					"df_silver = df_silver.withColumn(\"ChannelHashId\",sha2(concat_ws(\"||\",\"NMIConfiguration\",\"RegisterID\",\"NMISuffix\"),256))\n",
+					"\n",
+					"# Create ReasonCodeHash\n",
+					"df_silver = df_silver.withColumn(\"ReasonCodeHashId\",sha2(concat_ws(\"||\",\"ReasonCodeId\"),256))\n",
+					"\n",
+					"# Create FinalReasonCodeHash\n",
+					"df_silver = df_silver.withColumn(\"FinalReasonCodeHashId\",sha2(concat_ws(\"||\",\"FinalReasonCodeId\"),256))\n",
+					"\n",
+					"# Create TransCodeHash\n",
+					"df_silver = df_silver.withColumn(\"TransCodeHashId\",sha2(concat_ws(\"||\",\"TransCodeId\"),256))\n",
+					"\n",
+					"# Create UnitOfMeasurementHash\n",
+					"df_silver = df_silver.withColumn(\"UnitOfMeasurementHashId\",sha2(concat_ws(\"||\",\"UnitOfMeasurementId\"),256))\n",
+					"\n",
+					"# Create QualityMethodHash\n",
+					"df_silver = df_silver.withColumn(\"QualityMethodHashId\",sha2(concat_ws(\"||\",\"QualityMethodId\"),256))\n",
+					"\n",
+					"# Create QualityMethodHash\n",
+					"df_silver = df_silver.withColumn(\"FinalQualityMethodHashId\",sha2(concat_ws(\"||\",\"FinalQualityMethodId\"),256))\n",
+					"\n",
+					"# Create DateHashId \n",
+					"df_silver = df_silver.withColumn(\"DateHashId\",sha2(concat_ws(\"||\",\"IntervalDate\"),256) )\n",
+					"\n",
+					"# Create TimeHashId\n",
+					"df_silver = df_silver.withColumn(\"TimeIndex\",regexp_replace(\"NormalizedTimeStart\",\":\",\"\"))\n",
+					"df_silver = df_silver.withColumn(\"TimeIndex\", col(\"TimeIndex\").cast(\"integer\"))\n",
+					"df_silver = df_silver.withColumn(\"TimeHashId\",sha2(concat_ws(\"||\",\"TimeIndex\"),256))\n",
+					"df_silver = df_silver.withColumn(\"Year\", date_format(col(\"Timestamp\"), 'yyyy'))\n",
+					"\n",
+					"# Quality Method \n",
+					"df_silver = df_silver.withColumn(\"QualityFlag\",substring(col(\"QualityMethodId\"),1,1)).withColumn(\"MethodFlag\",substring(col(\"QualityMethodId\"),2,100))\n",
+					"df_silver = df_silver.withColumn(\"QualityFlagHashId\",sha2(concat_ws(\"||\",\"QualityFlag\"),256))\n",
+					"df_silver = df_silver.withColumn(\"MethodFlagHashId\",sha2(concat_ws(\"||\",\"MethodFlag\"),256))\n",
+					"\n",
+					"# Final Quality Method \n",
+					"df_silver = df_silver.withColumn(\"FinalQualityFlag\",substring(col(\"FinalQualityMethodId\"),1,1)).withColumn(\"FinalMethodFlag\",substring(col(\"FinalQualityMethodId\"),2,100))\n",
+					"df_silver = df_silver.withColumn(\"FinalQualityFlagHashId\",sha2(concat_ws(\"||\",\"FinalQualityFlag\"),256))\n",
+					"df_silver = df_silver.withColumn(\"FinalMethodFlagHashId\",sha2(concat_ws(\"||\",\"FinalMethodFlag\"),256))\n",
+					""
+				],
+				"execution_count": null
+			},
+			{
+				"cell_type": "code",
+				"metadata": {
+					"jupyter": {
+						"source_hidden": false,
+						"outputs_hidden": false
+					},
+					"nteract": {
+						"transient": {
+							"deleting": false
+						}
+					}
+				},
+				"source": [
+					"# CDC_CurrentFlag\r\n",
+					"df_silver = df_silver.withColumn(\"CDC_CurrentFlag\", when(df_silver.FileRank == 1, 'true').otherwise('false'))"
+				],
+				"execution_count": null
+			},
+			{
+				"cell_type": "code",
+				"metadata": {
+					"jupyter": {
+						"source_hidden": false,
+						"outputs_hidden": false
+					},
+					"nteract": {
+						"transient": {
+							"deleting": false
+						}
+					},
+					"collapsed": false
+				},
+				"source": [
+					"display(df_silver)"
+				],
+				"execution_count": null
+			},
+			{
+				"cell_type": "markdown",
+				"metadata": {
+					"nteract": {
+						"transient": {
+							"deleting": false
+						}
+					}
+				},
+				"source": [
+					"#rowcount\r\n",
+					"rowcount = df_silver.count()\r\n",
+					"print(rowcount)"
+				]
+			},
+			{
+				"cell_type": "code",
+				"metadata": {
+					"jupyter": {
+						"source_hidden": false,
+						"outputs_hidden": false
+					},
+					"nteract": {
+						"transient": {
+							"deleting": false
+						}
+					}
+				},
+				"source": [
+					"# Create a temporary view of the dataframe\r\n",
+					"df_silver.createOrReplaceTempView(\"temp_table\")\r\n",
+					"\r\n",
+					"# Use the merge operation to update the target table\r\n",
+					"spark.sql(f\"\"\"\r\n",
+					"      INSERT INTO {db_notebookname}.{db_tablename}\r\n",
+					"        (Nem12HashKey,CDC_CurrentFlag,CDC_LoadDate,MSATSLoadDateTime,CreationDate,CDC_Ops,Year,VersionHeader,FromParticipant,ToParticipant,IntervalDate,IntervalLength,IntervalIndex,Timestamp,DisplayTimestamp_d,\r\n",
+					"                DateHashId,NormalizedTimeStart,NormalizedTimeEnd,TimeHashId,NMI,NMIHashId,NMIConfiguration,RegisterID,NMISuffix,ChannelHashId,ReasonCodeId,ReasonCodeHashId,ReasonDescription,FinalReasonCodeId,\r\n",
+					"                FinalReasonCodeHashId,TransCodeId,TransCodeHashId,UnitOfMeasurementId,UnitOfMeasurementHashId,QualityMethodId,QualityFlag,QualityFlagHashId,MethodFlag,MethodFlagHashId,FinalQualityMethodId,\r\n",
+					"                FinalQualityFlag,FinalQualityFlagHashId,FinalMethodFlag,FinalMethodFlagHashId,MDMDataStreamIdentifier,MeterSerialNumber,NextScheduledReadDate,RetServiceOrder,ReadDatetime,IndexRead,Usage_d,Usage,\r\n",
+					"                FileName)\r\n",
+					"        SELECT \r\n",
+					"                s.Nem12HashKey,s.CDC_CurrentFlag,s.CDC_LoadDate,s.MSATSLoadDateTime,s.CreationDate,s.CDC_Ops,s.Year,s.VersionHeader,s.FromParticipant,s.ToParticipant,s.IntervalDate,s.IntervalLength,s.IntervalIndex,s.Timestamp,s.DisplayTimestamp_d,\r\n",
+					"                s.DateHashId,s.NormalizedTimeStart,s.NormalizedTimeEnd,s.TimeHashId,s.NMI,s.NMIHashId,s.NMIConfiguration,s.RegisterID,s.NMISuffix,s.ChannelHashId,s.ReasonCodeId,s.ReasonCodeHashId,s.ReasonDescription,s.FinalReasonCodeId,\r\n",
+					"                s.FinalReasonCodeHashId,s.TransCodeId,s.TransCodeHashId,s.UnitOfMeasurementId,s.UnitOfMeasurementHashId,s.QualityMethodId,s.QualityFlag,s.QualityFlagHashId,s.MethodFlag,s.MethodFlagHashId,s.FinalQualityMethodId,\r\n",
+					"                s.FinalQualityFlag,s.FinalQualityFlagHashId,s.FinalMethodFlag,s.FinalMethodFlagHashId,s.MDMDataStreamIdentifier,s.MeterSerialNumber,s.NextScheduledReadDate,s.RetServiceOrder,s.ReadDatetime,s.IndexRead,s.Usage_d,s.Usage,\r\n",
+					"                s.FileName\r\n",
+					"        FROM temp_table s;\r\n",
+					"\"\"\")"
+				],
+				"execution_count": null
+			},
+			{
+				"cell_type": "code",
+				"metadata": {
+					"jupyter": {
+						"source_hidden": false,
+						"outputs_hidden": false
+					},
+					"nteract": {
+						"transient": {
+							"deleting": false
+						}
+					},
+					"collapsed": false
+				},
+				"source": [
+					"#Row count parameters\n",
+					"Silver_Insert_Post=spark.sql(f\"\"\" SELECT COUNT(*) FROM {db_notebookname}.{db_tablename} WHERE CDC_Ops = 1 \"\"\").collect()[0][0]\n",
+					"Silver_Update_Post=spark.sql(f\"\"\" SELECT COUNT(*) FROM {db_notebookname}.{db_tablename} WHERE CDC_Ops = 2 \"\"\").collect()[0][0]\n",
+					"Silver_Delete_Post=spark.sql(f\"\"\" SELECT COUNT(*) FROM {db_notebookname}.{db_tablename} WHERE CDC_Ops = 0 \"\"\").collect()[0][0]\n",
+					"Silver_TotalRowCount_Post=spark.sql(f\"\"\" SELECT COUNT(*) FROM {db_notebookname}.{db_tablename}\"\"\").collect()[0][0]\n",
+					"Silver_ActiveRecord_Post=spark.sql(f\"\"\" SELECT COUNT(*) FROM {db_notebookname}.{db_tablename} WHERE CDC_CurrentFlag = true \"\"\").collect()[0][0]"
+				],
+				"execution_count": null
+			},
+			{
+				"cell_type": "code",
+				"metadata": {
+					"jupyter": {
+						"source_hidden": false,
+						"outputs_hidden": false
+					},
+					"nteract": {
+						"transient": {
+							"deleting": false
+						}
+					}
+				},
+				"source": [
+					"#Row calculation\n",
+					"Silver_Update = Silver_Update_Post - Silver_Update_Pre\n",
+					"Silver_Insert = (Silver_Insert_Post - Silver_Insert_Pre) + Silver_Update\n",
+					"Silver_Delete = Silver_Delete_Post - Silver_Delete_Pre\n",
+					"Silver_ActiveRows = Silver_ActiveRecord_Post \n",
+					"Silver_TotalRows = Silver_TotalRowCount_Post"
+				],
+				"execution_count": null
+			},
+			{
+				"cell_type": "code",
+				"metadata": {
+					"jupyter": {
+						"source_hidden": false,
+						"outputs_hidden": false
+					},
+					"nteract": {
+						"transient": {
+							"deleting": false
+						}
+					},
+					"collapsed": false
+				},
+				"source": [
+					"from pyspark.sql.types import StructType, StructField, StringType, IntegerType, BooleanType,DateType, DoubleType,TimestampType\n",
+					"\n",
+					"log_data = [(db_notebookname,db_tablename,Silver_LoadDate,Silver_Insert,Silver_Update,Silver_Delete,Silver_ActiveRows,Silver_TotalRows)]\n",
+					"log_columns = ['PIPELINE_NAME', 'TABLE_NAME', 'INGEST_DATETIME', 'INSERT','UPDATE','DELETE','ACTIVE_ROWS','TOTAL_ROWS']\n",
+					"df_log = spark.createDataFrame(log_data, log_columns)\n",
+					"display(log_data)"
+				],
+				"execution_count": null
+			},
+			{
+				"cell_type": "code",
+				"metadata": {
+					"jupyter": {
+						"source_hidden": false,
+						"outputs_hidden": false
+					},
+					"nteract": {
+						"transient": {
+							"deleting": false
+						}
+					}
+				},
+				"source": [
+					"#Write to controldb\n",
+					"import json\n",
+					"db_port = 1433\n",
+					"linked_service_name = \"LS_SQL_ELTFrameworkDB\"\n",
+					"linkedServiceProperties = json.loads(mssparkutils.credentials.getPropertiesAll(linked_service_name))\n",
+					"sql_server_name = linkedServiceProperties.get('Endpoint')\n",
+					"db_name = linkedServiceProperties.get('Database')\n",
+					"access_token = mssparkutils.credentials.getConnectionStringOrCreds(linked_service_name)\n",
+					"write_table_name = \"[CTL].[CFG_INGESTION_LOGS]\"\n",
+					"\n",
+					"try:\n",
+					"    df_log.write.format(\"jdbc\") \\\n",
+					"        .option(\"url\", \"jdbc:sqlserver://%s:%s\" % (sql_server_name, db_port)) \\\n",
+					"        .option(\"dbtable\", write_table_name) \\\n",
+					"        .option(\"accessToken\", access_token) \\\n",
+					"        .option(\"encrypt\", \"true\") \\\n",
+					"        .option(\"databaseName\", db_name) \\\n",
+					"        .option(\"hostNameInCertificate\", \"*.database.windows.net\") \\\n",
+					"        .mode(\"append\") \\\n",
+					"        .save()\n",
+					"except ValueError as error :\n",
+					"    print(\"MSSQL Connector write failed\", error)\n",
+					"\n",
+					"print(\"MSSQL Connector write(append) succeeded  \")\n",
+					""
+				],
+				"execution_count": null
+			}
+		]
+	}
+}

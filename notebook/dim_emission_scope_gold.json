@@ -1,0 +1,402 @@
+{
+	"name": "dim_emission_scope_gold",
+	"properties": {
+		"folder": {
+			"name": "DataHubBatchScripts/GOLD/DIMENSIONS"
+		},
+		"nbformat": 4,
+		"nbformat_minor": 2,
+		"bigDataPool": {
+			"referenceName": "Sparkpool01",
+			"type": "BigDataPoolReference"
+		},
+		"sessionProperties": {
+			"driverMemory": "28g",
+			"driverCores": 4,
+			"executorMemory": "28g",
+			"executorCores": 4,
+			"numExecutors": 2,
+			"conf": {
+				"spark.dynamicAllocation.enabled": "false",
+				"spark.dynamicAllocation.minExecutors": "2",
+				"spark.dynamicAllocation.maxExecutors": "2",
+				"spark.autotune.trackingId": "f7c5590a-7a07-49d4-8d9d-df7ea8750a8e"
+			}
+		},
+		"metadata": {
+			"saveOutput": true,
+			"enableDebugMode": false,
+			"kernelspec": {
+				"name": "synapse_pyspark",
+				"display_name": "Synapse PySpark"
+			},
+			"language_info": {
+				"name": "python"
+			},
+			"a365ComputeOptions": {
+				"id": "/subscriptions/2e9f823e-dc76-4e8e-b815-c8a4f22d05ff/resourceGroups/CQL-AZUR1-DEVDATAHUB01-RG/providers/Microsoft.Synapse/workspaces/cql-dev-datahub-synapse01/bigDataPools/Sparkpool01",
+				"name": "Sparkpool01",
+				"type": "Spark",
+				"endpoint": "https://cql-dev-datahub-synapse01.dev.azuresynapse.net/livyApi/versions/2019-11-01-preview/sparkPools/Sparkpool01",
+				"auth": {
+					"type": "AAD",
+					"authResource": "https://dev.azuresynapse.net"
+				},
+				"sparkVersion": "3.4",
+				"nodeCount": 10,
+				"cores": 8,
+				"memory": 56,
+				"automaticScaleJobs": false
+			},
+			"sessionKeepAliveTimeout": 30
+		},
+		"cells": [
+			{
+				"cell_type": "code",
+				"source": [
+					"#Imports\n",
+					"import json\n",
+					"\n",
+					"from pyspark.sql import Row\n",
+					"from pyspark.sql.functions import hash\n",
+					"from pyspark.sql import functions as fn\n",
+					"from pyspark.sql.functions import col, concat, lit, to_timestamp,current_timestamp,date_format\n",
+					"from pyspark.sql.functions import sha2, concat_ws\n",
+					"\n",
+					"from pyspark.sql.types import StructType, StructField, StringType, IntegerType, BooleanType,DateType, DoubleType,TimestampType\n",
+					"\n",
+					"from py4j.protocol import Py4JJavaError\n",
+					"\n",
+					"import com.microsoft.spark.sqlanalytics\n",
+					"from com.microsoft.spark.sqlanalytics.Constants import Constants"
+				],
+				"execution_count": 9
+			},
+			{
+				"cell_type": "code",
+				"metadata": {
+					"collapsed": false
+				},
+				"source": [
+					"#Get Parameter from controldb\n",
+					"db_port = 1433\n",
+					"linked_service_name = \"LS_SQL_ELTFrameworkDB\"\n",
+					"lake_db_name = \"gold\"\n",
+					"db_notebookname= \"dim_emission_scope_gold\"\n",
+					"linkedServiceProperties = json.loads(mssparkutils.credentials.getPropertiesAll(linked_service_name))\n",
+					"sql_server_name = linkedServiceProperties.get('Endpoint')\n",
+					"db_name = linkedServiceProperties.get('Database')\n",
+					"#print(linkedServiceProperties)\n",
+					"access_token = mssparkutils.credentials.getConnectionStringOrCreds(linked_service_name)\n",
+					"\n",
+					"db_query =\"SELECT A.*,B.NotebookParameterId,B.ParameterType,B.Value  FROM [CTL].[CFG_NOTEBOOK] A LEFT JOIN [CTL].[CFG_NOTEBOOK_PARAMETER] B ON A.NotebookId = B.NotebookId\"\n",
+					"\n",
+					"df = spark.read.format(\"jdbc\") \\\n",
+					"    .option(\"url\", \"jdbc:sqlserver://%s:%s\" % (sql_server_name, db_port)) \\\n",
+					"    .option(\"query\", db_query) \\\n",
+					"    .option(\"accessToken\", access_token) \\\n",
+					"    .option(\"encrypt\", \"true\") \\\n",
+					"    .option(\"databaseName\", db_name) \\\n",
+					"    .option(\"hostNameInCertificate\", \"*.database.windows.net\") \\\n",
+					"    .load()\n",
+					"\n",
+					"df2 = df.where(df.NotebookPath==db_notebookname) \n",
+					"#display(df2)"
+				],
+				"execution_count": 10
+			},
+			{
+				"cell_type": "code",
+				"source": [
+					"#Destination DataLake Storage Details\n",
+					"destination_storage = df2.where(df2.ParameterType=='destination_storage').collect()[0][\"Value\"]\n",
+					"destination_container = df2.where(df2.ParameterType=='destination_container').collect()[0][\"Value\"]\n",
+					"destination_path = df2.where(df2.ParameterType=='destination_path').collect()[0][\"Value\"]\n",
+					"\n",
+					"#Get Current Date\n",
+					"Date_Collection = spark.sql(\"select current_timestamp() AS Current,(current_timestamp() + interval '-1' second) AS EndDate\").collect()\n",
+					"Gold_LoadDate = Date_Collection[0]['Current']\n",
+					"Gold_UpdateEndDate = Date_Collection[0]['EndDate']\n",
+					"\n",
+					"#Synapse Dedicated Server detials\n",
+					"SynapseDedicatedServer = df2.where(df2.ParameterType=='destination_storage').collect()[0]['SynapseDedicatedServer'] \n",
+					"TempFolder = df2.where(df2.ParameterType=='destination_storage').collect()[0]['TempFolder']\n",
+					"SynapseDedicatedDatabase = df2.where(df2.ParameterType=='destination_storage').collect()[0]['SynapseDedicatedDatabase']"
+				],
+				"execution_count": 11
+			},
+			{
+				"cell_type": "markdown",
+				"metadata": {
+					"nteract": {
+						"transient": {
+							"deleting": false
+						}
+					}
+				},
+				"source": [
+					"# Table: DimEmissionScope: START"
+				]
+			},
+			{
+				"cell_type": "code",
+				"source": [
+					"#UTILS: Set table name\n",
+					"\n",
+					"#drop_tablename=\"dim_emission_scope\"\n",
+					"\n",
+					"#UTILS: Drop table\n",
+					"\n",
+					"#spark.sql(f\"\"\"DROP TABLE IF EXISTS {lake_db_name}.{drop_tablename}\"\"\")\n",
+					"#raw_output_path = f\"abfss://{destination_container}@{destination_storage}.dfs.core.windows.net/{destination_path}/{drop_tablename}\"\n",
+					"#mssparkutils.fs.rm(raw_output_path,recurse=True)"
+				],
+				"execution_count": 12
+			},
+			{
+				"cell_type": "code",
+				"source": [
+					"#Set table name\n",
+					"db_tablename=\"dim_emission_scope\"\n",
+					"tablename=\"DimEmissionScope\""
+				],
+				"execution_count": 13
+			},
+			{
+				"cell_type": "code",
+				"source": [
+					"#Create Gold Table\n",
+					"spark.sql(f\"\"\"CREATE DATABASE IF NOT EXISTS {lake_db_name};\"\"\")\n",
+					"spark.sql(f\"\"\"\n",
+					"CREATE TABLE IF NOT EXISTS {lake_db_name}.{db_tablename}\n",
+					"(\n",
+					"\tDimEmissionScopeKey STRING,\n",
+					"\tEmissionScopeCode STRING,\n",
+					"\tEmissionScopeDescription STRING,\n",
+					"\tCDCLoadDate TIMESTAMP,\n",
+					"\tCDCStartDate TIMESTAMP,\n",
+					"\tCDCEndDate TIMESTAMP,\n",
+					"\tCDCOps INT,\n",
+					"\tCDCCurrentFlag BOOLEAN,\n",
+					"\tHashDiff STRING\n",
+					")\n",
+					"USING delta\n",
+					"LOCATION 'abfss://{destination_container}@{destination_storage}.dfs.core.windows.net/{destination_path}/{db_tablename}'\n",
+					"\"\"\")"
+				],
+				"execution_count": 14
+			},
+			{
+				"cell_type": "code",
+				"metadata": {
+					"collapsed": false
+				},
+				"source": [
+					"source_sql_df = spark.sql(f\"\"\"\n",
+					"SELECT \n",
+					"Code as EmissionScopeCode,\n",
+					"Description as EmissionScopeDescription\n",
+					"FROM silver.reference_data\n",
+					"WHERE Dataset = 'EmissionScope'\n",
+					"AND CDCCurrentFlag = 1\n",
+					"\"\"\")\n",
+					"set_unknown_row = spark.createDataFrame([Row(EmissionScopeCode = 'UNK', EmissionScopeDescription='Unknown')])\n",
+					"source_sql_df = source_sql_df.unionByName(set_unknown_row)\n",
+					"#display(source_sql_df)"
+				],
+				"execution_count": 15
+			},
+			{
+				"cell_type": "code",
+				"metadata": {
+					"collapsed": false
+				},
+				"source": [
+					"# Add CDC columns\n",
+					"source_sql_df = source_sql_df.withColumn(\"DimEmissionScopeKey\", sha2(concat_ws(\"||\", \"EmissionScopeCode\"), 256))\n",
+					"source_sql_df = source_sql_df.withColumn(\"HashDiff\", sha2(concat_ws(\"||\", \"EmissionScopeDescription\"), 256))\n",
+					"source_sql_df = source_sql_df.withColumn(\"CDCLoadDate\", to_timestamp(lit(Gold_LoadDate),'yyyy-MM-dd HH:mm:ss'))\n",
+					"source_sql_df = source_sql_df.withColumn(\"CDCStartDate\", to_timestamp(lit(Gold_LoadDate), 'yyyy-MM-dd HH:mm:ss'))\n",
+					"source_sql_df = source_sql_df.withColumn(\"CDCEndDate\", to_timestamp(lit(\"9999-12-31 23:59:59\"), 'yyyy-MM-dd HH:mm:ss'))\n",
+					"source_sql_df = source_sql_df.withColumn(\"CDCCurrentFlag\", lit(1))\n",
+					"source_sql_df = source_sql_df.withColumn(\"CDCOps\", lit(1))\n",
+					"#display(source_sql_df)"
+				],
+				"execution_count": 16
+			},
+			{
+				"cell_type": "code",
+				"source": [
+					"# Row count parameters\n",
+					"Gold_Insert_Pre=spark.sql(f\"\"\" SELECT COUNT(*) FROM {lake_db_name}.{db_tablename} WHERE CDCOps = 1 \"\"\").collect()[0][0]\n",
+					"Gold_Update_Pre=spark.sql(f\"\"\" SELECT COUNT(*) FROM {lake_db_name}.{db_tablename} WHERE CDCOps = 2 \"\"\").collect()[0][0]\n",
+					"Gold_Delete_Pre=spark.sql(f\"\"\" SELECT COUNT(*) FROM {lake_db_name}.{db_tablename} WHERE CDCOps = 0 \"\"\").collect()[0][0]"
+				],
+				"execution_count": 17
+			},
+			{
+				"cell_type": "code",
+				"source": [
+					"# Create a temporary view of the dataframe\n",
+					"source_sql_df.createOrReplaceTempView(\"temp_view\")"
+				],
+				"execution_count": 18
+			},
+			{
+				"cell_type": "code",
+				"source": [
+					"# SCD2 logic\n",
+					"# Use the merge operation to update the target table\n",
+					"spark.sql(f\"\"\"\n",
+					"    MERGE INTO {lake_db_name}.{db_tablename} t\n",
+					"    USING temp_view s\n",
+					"    ON t.DimEmissionScopeKey = s.DimEmissionScopeKey AND t.CDCCurrentFlag == true\n",
+					"    WHEN MATCHED AND t.HashDiff <> s.HashDiff THEN\n",
+					"      UPDATE SET t.CDCEndDate = '{Gold_UpdateEndDate}',\n",
+					"                 t.CDCCurrentFlag = false,\n",
+					"                 t.CDCOps = s.CDCOps + 1\n",
+					"    WHEN NOT MATCHED THEN\n",
+					"      INSERT (DimEmissionScopeKey, EmissionScopeCode, EmissionScopeDescription, CDCLoadDate, CDCStartDate, CDCEndDate, CDCOps, CDCCurrentFlag, HashDiff)\n",
+					"      VALUES (s.DimEmissionScopeKey, s.EmissionScopeCode, s.EmissionScopeDescription, s.CDCLoadDate, s.CDCStartDate, s.CDCEndDate, s.CDCOps, s.CDCCurrentFlag, s.HashDiff)\n",
+					"\"\"\")\n",
+					"\n",
+					"# Use the merge operation to Insert updated record \n",
+					"spark.sql(f\"\"\"\n",
+					"    MERGE INTO {lake_db_name}.{db_tablename} t\n",
+					"    USING temp_view s\n",
+					"    ON t.DimEmissionScopeKey = s.DimEmissionScopeKey AND t.CDCCurrentFlag == true\n",
+					"    WHEN MATCHED AND t.HashDiff <> s.HashDiff THEN\n",
+					"      UPDATE SET t.CDCEndDate = '{Gold_UpdateEndDate}',\n",
+					"                 t.CDCCurrentFlag = false,\n",
+					"                 t.CDCOps = s.CDCOps + 1\n",
+					"    WHEN NOT MATCHED THEN\n",
+					"      INSERT (DimEmissionScopeKey, EmissionScopeCode, EmissionScopeDescription, CDCLoadDate, CDCStartDate, CDCEndDate, CDCOps, CDCCurrentFlag, HashDiff)\n",
+					"      VALUES (s.DimEmissionScopeKey, s.EmissionScopeCode, s.EmissionScopeDescription, s.CDCLoadDate, s.CDCStartDate, s.CDCEndDate, s.CDCOps, s.CDCCurrentFlag, s.HashDiff)\n",
+					"\"\"\")\n",
+					""
+				],
+				"execution_count": 19
+			},
+			{
+				"cell_type": "code",
+				"source": [
+					"#Row count parameters\n",
+					"Gold_Insert_Post=spark.sql(f\"\"\" SELECT COUNT(*) FROM {lake_db_name}.{db_tablename} WHERE CDCOps = 1 \"\"\").collect()[0][0]\n",
+					"Gold_Update_Post=spark.sql(f\"\"\" SELECT COUNT(*) FROM {lake_db_name}.{db_tablename} WHERE CDCOps = 2 \"\"\").collect()[0][0]\n",
+					"Gold_Delete_Post=spark.sql(f\"\"\" SELECT COUNT(*) FROM {lake_db_name}.{db_tablename} WHERE CDCOps = 0 \"\"\").collect()[0][0]\n",
+					"Gold_TotalRowCount_Post=spark.sql(f\"\"\" SELECT COUNT(*) FROM {lake_db_name}.{db_tablename}\"\"\").collect()[0][0]\n",
+					"Gold_ActiveRecord_Post=spark.sql(f\"\"\" SELECT COUNT(*) FROM {lake_db_name}.{db_tablename} WHERE CDCCurrentFlag = true \"\"\").collect()[0][0]"
+				],
+				"execution_count": 20
+			},
+			{
+				"cell_type": "code",
+				"source": [
+					"#Row calculation\n",
+					"Gold_Update = Gold_Update_Post - Gold_Update_Pre\n",
+					"Gold_Insert = (Gold_Insert_Post - Gold_Insert_Pre) + Gold_Update\n",
+					"Gold_Delete = Gold_Delete_Post - Gold_Delete_Pre\n",
+					"Gold_ActiveRows = Gold_ActiveRecord_Post \n",
+					"Gold_TotalRows = Gold_TotalRowCount_Post"
+				],
+				"execution_count": 21
+			},
+			{
+				"cell_type": "code",
+				"source": [
+					"log_data = [(db_notebookname,db_tablename,Gold_LoadDate,Gold_Insert,Gold_Update,Gold_Delete,Gold_ActiveRows,Gold_TotalRows)]\n",
+					"print(log_data)\n",
+					"log_columns = ['PIPELINE_NAME', 'TABLE_NAME', 'INGEST_DATETIME', 'INSERT','UPDATE','DELETE','ACTIVE_ROWS','TOTAL_ROWS']\n",
+					"df_log = spark.createDataFrame(log_data, log_columns)"
+				],
+				"execution_count": 22
+			},
+			{
+				"cell_type": "code",
+				"source": [
+					"#Write to controldb\n",
+					"db_port = 1433\n",
+					"linked_service_name = \"LS_SQL_ELTFrameworkDB\"\n",
+					"linkedServiceProperties = json.loads(mssparkutils.credentials.getPropertiesAll(linked_service_name))\n",
+					"sql_server_name = linkedServiceProperties.get('Endpoint')\n",
+					"db_name = linkedServiceProperties.get('Database')\n",
+					"access_token = mssparkutils.credentials.getConnectionStringOrCreds(linked_service_name)\n",
+					"write_table_name = \"[CTL].[CFG_INGESTION_LOGS]\"\n",
+					"\n",
+					"try:\n",
+					"    df_log.write.format(\"jdbc\") \\\n",
+					"        .option(\"url\", \"jdbc:sqlserver://%s:%s\" % (sql_server_name, db_port)) \\\n",
+					"        .option(\"dbtable\", write_table_name) \\\n",
+					"        .option(\"accessToken\", access_token) \\\n",
+					"        .option(\"encrypt\", \"true\") \\\n",
+					"        .option(\"databaseName\", db_name) \\\n",
+					"        .option(\"hostNameInCertificate\", \"*.database.windows.net\") \\\n",
+					"        .mode(\"append\") \\\n",
+					"        .save()\n",
+					"except ValueError as error :\n",
+					"    print(\"MSSQL Connector write failed\", error)\n",
+					"\n",
+					"print(\"MSSQL Connector write(append) succeeded  \")"
+				],
+				"execution_count": 23
+			},
+			{
+				"cell_type": "code",
+				"metadata": {
+					"editable": true,
+					"run_control": {
+						"frozen": false
+					},
+					"collapsed": false
+				},
+				"source": [
+					"gold_df = spark.sql(f\"\"\"\n",
+					"SELECT \n",
+					"    DimEmissionScopeKey,\n",
+					"    EmissionScopeCode,\n",
+					"\tEmissionScopeDescription,\n",
+					"    CDCLoadDate,\n",
+					"\tCDCStartDate,\n",
+					"\tCDCEndDate,\n",
+					"\tCDCOps,\n",
+					"\tCDCCurrentFlag\n",
+					"FROM gold.dim_emission_scope\n",
+					"\"\"\")\n",
+					"#display(gold_df)"
+				],
+				"execution_count": 24
+			},
+			{
+				"cell_type": "code",
+				"metadata": {
+					"editable": true,
+					"run_control": {
+						"frozen": false
+					}
+				},
+				"source": [
+					"# Configure and submit the request to write to Synapse Dedicated SQL Pool\n",
+					"(gold_df.write\n",
+					".option(Constants.SERVER, f\"\"\"{SynapseDedicatedServer}\"\"\")\n",
+					".option(Constants.TEMP_FOLDER, (f\"\"\"abfss://temp@{TempFolder}/{tablename}_staging\"\"\"))\n",
+					".mode(\"overwrite\")\n",
+					".synapsesql(f\"\"\"{SynapseDedicatedDatabase}.dbo.{tablename}\"\"\"))"
+				],
+				"execution_count": 25
+			},
+			{
+				"cell_type": "markdown",
+				"metadata": {
+					"nteract": {
+						"transient": {
+							"deleting": false
+						}
+					}
+				},
+				"source": [
+					"# Table: DimEmissionScope: END"
+				]
+			}
+		]
+	}
+}

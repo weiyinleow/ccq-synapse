@@ -1,0 +1,263 @@
+{
+	"name": "Altering_Hash_Keys",
+	"properties": {
+		"folder": {
+			"name": "DataHubBatchScripts/Utils"
+		},
+		"nbformat": 4,
+		"nbformat_minor": 2,
+		"bigDataPool": {
+			"referenceName": "JobSparkpool02",
+			"type": "BigDataPoolReference"
+		},
+		"sessionProperties": {
+			"driverMemory": "56g",
+			"driverCores": 8,
+			"executorMemory": "56g",
+			"executorCores": 8,
+			"numExecutors": 2,
+			"conf": {
+				"spark.dynamicAllocation.enabled": "false",
+				"spark.dynamicAllocation.minExecutors": "2",
+				"spark.dynamicAllocation.maxExecutors": "2",
+				"spark.autotune.trackingId": "5df97c6a-13d7-43eb-aec3-92040327783d"
+			}
+		},
+		"metadata": {
+			"saveOutput": true,
+			"enableDebugMode": false,
+			"kernelspec": {
+				"name": "synapse_pyspark",
+				"display_name": "Synapse PySpark"
+			},
+			"language_info": {
+				"name": "python"
+			},
+			"a365ComputeOptions": {
+				"id": "/subscriptions/2e9f823e-dc76-4e8e-b815-c8a4f22d05ff/resourceGroups/CQL-AZUR1-DEVDATAHUB01-RG/providers/Microsoft.Synapse/workspaces/cql-dev-datahub-synapse01/bigDataPools/JobSparkpool02",
+				"name": "JobSparkpool02",
+				"type": "Spark",
+				"endpoint": "https://cql-dev-datahub-synapse01.dev.azuresynapse.net/livyApi/versions/2019-11-01-preview/sparkPools/JobSparkpool02",
+				"auth": {
+					"type": "AAD",
+					"authResource": "https://dev.azuresynapse.net"
+				},
+				"sparkVersion": "3.4",
+				"nodeCount": 10,
+				"cores": 8,
+				"memory": 56
+			},
+			"sessionKeepAliveTimeout": 30
+		},
+		"cells": [
+			{
+				"cell_type": "markdown",
+				"metadata": {
+					"nteract": {
+						"transient": {
+							"deleting": false
+						}
+					}
+				},
+				"source": [
+					"# Altering Hash Keys"
+				]
+			},
+			{
+				"cell_type": "markdown",
+				"metadata": {
+					"nteract": {
+						"transient": {
+							"deleting": false
+						}
+					}
+				},
+				"source": [
+					"\n",
+					"#### Use this notebook to alter HashKey and HashDiffs and have it also reflected in currently loaded data.\n",
+					""
+				]
+			},
+			{
+				"cell_type": "code",
+				"metadata": {
+					"jupyter": {
+						"source_hidden": false,
+						"outputs_hidden": false
+					},
+					"nteract": {
+						"transient": {
+							"deleting": false
+						}
+					},
+					"tags": [
+						"parameters"
+					]
+				},
+				"source": [
+					"table_name = \"nem12_bronze\" # Set default to bronze table\n",
+					"db_name = \"aemo_bronze\"\n",
+					"destination_container = \"bronze\"\n",
+					"destination_storage = \"cqldevdatahubsynapse\"\n",
+					"destination_path = \"AEMO/NEM12\" # Default, please change as require\n",
+					""
+				],
+				"execution_count": 1
+			},
+			{
+				"cell_type": "code",
+				"metadata": {
+					"jupyter": {
+						"source_hidden": false,
+						"outputs_hidden": false
+					},
+					"nteract": {
+						"transient": {
+							"deleting": false
+						}
+					}
+				},
+				"source": [
+					"path = f'abfss://{destination_container}@{destination_storage}.dfs.core.windows.net/{destination_path}/{table_name}' # Location of parquet files once we write the changes\n",
+					"\n",
+					"# Loading data from table\n",
+					"df = spark.read.table(f\"{db_name}.{table_name}\")"
+				],
+				"execution_count": 2
+			},
+			{
+				"cell_type": "code",
+				"metadata": {
+					"jupyter": {
+						"source_hidden": false,
+						"outputs_hidden": false
+					},
+					"nteract": {
+						"transient": {
+							"deleting": false
+						}
+					}
+				},
+				"source": [
+					"# Columns included for new HashDiff\n",
+					"# Please fill this in with the column names from the table that need to be included for hash key and hash diff\n",
+					"COLUMNS_FOR_HASH_KEY = []\n",
+					"COLUMNS_FOR_HASH_DIFF = ['NMI','RegisterID','NMIConfiguration','IntervalLength','UnitOfMeasurementId','Timestamp','IntervalDate','VersionHeader','FromParticipant','ToParticipant','NMISuffix','MDMDataStreamIdentifier','MeterSerialNumber','NextScheduledReadDate','FinalQualityMethodId','FinalReasonCodeId','MSATSLoadDateTime','QualityMethodId','ReasonCodeId','TransCodeId','RetServiceOrder','ReadDatetime','IndexRead','FileName']\n",
+					""
+				],
+				"execution_count": 3
+			},
+			{
+				"cell_type": "code",
+				"metadata": {
+					"jupyter": {
+						"source_hidden": false,
+						"outputs_hidden": false
+					},
+					"nteract": {
+						"transient": {
+							"deleting": false
+						}
+					}
+				},
+				"source": [
+					"from pyspark.sql.functions import hash\n",
+					"from pyspark.sql import functions as fn\n",
+					"from pyspark.sql.functions import col, concat, lit, to_timestamp,current_timestamp,date_format\n",
+					"from pyspark.sql.functions import sha2, concat_ws\n",
+					"\n",
+					"assert len(COLUMNS_FOR_HASH_DIFF) > 0 or len(COLUMNS_FOR_HASH_KEY) > 0\n",
+					"\n",
+					"if len(COLUMNS_FOR_HASH_KEY) > 0:\n",
+					"    df = df.withColumn(\"NewHashKey\", sha2(concat_ws(\"||\",*COLUMNS_FOR_HASH_KEY),256))\n",
+					"    df = df.withColumn(\"OldHashKey\",col(\"Nem12HashKey\")) # Creating a backup to test changes\n",
+					"    df = df.withColumn(\"Nem12HashKey\",col(\"NewHashKey\")) # Replacing HashDiff column with new HashDiff values\n",
+					"\n",
+					"if len(COLUMNS_FOR_HASH_DIFF) > 0:\n",
+					"    df = df.withColumn(\"NewHashDiff\", sha2(concat_ws(\"||\",*COLUMNS_FOR_HASH_DIFF),256))\n",
+					"    df = df.withColumn(\"OldHashDiff\",col(\"Nem12HashDiff\")) # Creating a backup to test changes\n",
+					"    df = df.withColumn(\"Nem12HashDiff\",col(\"NewHashDiff\")) # Replacing HashDiff column with new HashDiff values"
+				],
+				"execution_count": 4
+			},
+			{
+				"cell_type": "code",
+				"metadata": {
+					"jupyter": {
+						"source_hidden": false,
+						"outputs_hidden": false
+					},
+					"nteract": {
+						"transient": {
+							"deleting": false
+						}
+					},
+					"collapsed": false
+				},
+				"source": [
+					"# Visual Test \n",
+					"display(df)"
+				],
+				"execution_count": 5
+			},
+			{
+				"cell_type": "code",
+				"metadata": {
+					"jupyter": {
+						"source_hidden": false,
+						"outputs_hidden": false
+					},
+					"nteract": {
+						"transient": {
+							"deleting": false
+						}
+					}
+				},
+				"source": [
+					"# Cleanup Unnecessary Columns\n",
+					"cols_to_include = [c for c in df.columns if c not in [\"NewHashDiff\",\"OldHashDiff\",\"NewHashKey\",\"OldHashKey\"]]\n",
+					"df_with_necessary_cols = df.select(*cols_to_include)"
+				],
+				"execution_count": 6
+			},
+			{
+				"cell_type": "code",
+				"metadata": {
+					"jupyter": {
+						"source_hidden": false,
+						"outputs_hidden": false
+					},
+					"nteract": {
+						"transient": {
+							"deleting": false
+						}
+					}
+				},
+				"source": [
+					"# Save changes \n",
+					"df_with_necessary_cols.write.format(\"delta\").mode(\"overwrite\").option(\"overwriteSchema\",\"true\").option(\"path\",path).saveAsTable(f\"{db_name}.{table_name}\")\n",
+					""
+				],
+				"execution_count": 8
+			},
+			{
+				"cell_type": "code",
+				"metadata": {
+					"jupyter": {
+						"source_hidden": false,
+						"outputs_hidden": false
+					},
+					"nteract": {
+						"transient": {
+							"deleting": false
+						}
+					}
+				},
+				"source": [
+					""
+				],
+				"execution_count": null
+			}
+		]
+	}
+}

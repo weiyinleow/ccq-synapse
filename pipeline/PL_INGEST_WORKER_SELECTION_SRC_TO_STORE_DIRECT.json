@@ -1,0 +1,48 @@
+{
+	"name": "PL_INGEST_WORKER_SELECTION_SRC_TO_STORE_DIRECT",
+	"properties": {
+		"description": "Generic Loader of Source System to Landing Layer",
+		"activities": [
+			{
+				"name": "Wait1",
+				"type": "Wait",
+				"dependsOn": [],
+				"userProperties": [],
+				"typeProperties": {
+					"waitTimeInSeconds": 1
+				}
+			}
+		],
+		"parameters": {
+			"pl_param_pipelineId": {
+				"type": "string"
+			},
+			"pl_param_pipelineRunId": {
+				"type": "string"
+			},
+			"pl_param_sourceConfig": {
+				"type": "object"
+			},
+			"pl_param_loadItem": {
+				"type": "object"
+			},
+			"pl_param_loadConfig": {
+				"type": "object"
+			},
+			"pl_param_destinationConfig": {
+				"type": "object"
+			}
+		},
+		"variables": {
+			"workerRunId": {
+				"type": "String"
+			}
+		},
+		"folder": {
+			"name": "99 - Framework Components/B - Ingest"
+		},
+		"annotations": [],
+		"lastPublishTime": "2024-03-15T02:04:28Z"
+	},
+	"type": "Microsoft.Synapse/workspaces/pipelines"
+}

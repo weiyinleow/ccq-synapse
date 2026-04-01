@@ -1,0 +1,7 @@
+{
+	"name": "cqldatahubsql01-synapse01-endpoint",
+	"properties": {
+		"privateLinkResourceId": "/subscriptions/2e9f823e-dc76-4e8e-b815-c8a4f22d05ff/resourceGroups/CQL-AZUR1-DEVDATAHUB01-RG/providers/Microsoft.Sql/servers/cql-dev-datahub-sql",
+		"groupId": "sqlServer"
+	}
+}

@@ -1,0 +1,150 @@
+{
+	"name": "Dedicated_SQL",
+	"properties": {
+		"folder": {
+			"name": "DataHubBatchScripts/Utils"
+		},
+		"nbformat": 4,
+		"nbformat_minor": 2,
+		"bigDataPool": {
+			"referenceName": "Sparkpool01",
+			"type": "BigDataPoolReference"
+		},
+		"sessionProperties": {
+			"driverMemory": "56g",
+			"driverCores": 8,
+			"executorMemory": "56g",
+			"executorCores": 8,
+			"numExecutors": 2,
+			"conf": {
+				"spark.dynamicAllocation.enabled": "false",
+				"spark.dynamicAllocation.minExecutors": "2",
+				"spark.dynamicAllocation.maxExecutors": "2",
+				"spark.autotune.trackingId": "7e7cea0f-7c2c-4b1c-bb0f-ba96a69c155a"
+			}
+		},
+		"metadata": {
+			"saveOutput": true,
+			"enableDebugMode": false,
+			"kernelspec": {
+				"name": "synapse_pyspark",
+				"display_name": "Synapse PySpark"
+			},
+			"language_info": {
+				"name": "python"
+			},
+			"a365ComputeOptions": {
+				"id": "/subscriptions/2e9f823e-dc76-4e8e-b815-c8a4f22d05ff/resourceGroups/CQL-AZUR1-DEVDATAHUB01-RG/providers/Microsoft.Synapse/workspaces/cql-dev-datahub-synapse01/bigDataPools/Sparkpool01",
+				"name": "Sparkpool01",
+				"type": "Spark",
+				"endpoint": "https://cql-dev-datahub-synapse01.dev.azuresynapse.net/livyApi/versions/2019-11-01-preview/sparkPools/Sparkpool01",
+				"auth": {
+					"type": "AAD",
+					"authResource": "https://dev.azuresynapse.net"
+				},
+				"sparkVersion": "3.3",
+				"nodeCount": 10,
+				"cores": 8,
+				"memory": 56
+			},
+			"sessionKeepAliveTimeout": 30
+		},
+		"cells": [
+			{
+				"cell_type": "code",
+				"metadata": {
+					"jupyter": {
+						"source_hidden": false,
+						"outputs_hidden": false
+					},
+					"nteract": {
+						"transient": {
+							"deleting": false
+						}
+					}
+				},
+				"source": [
+					"# Write using AAD Auth to internal table\r\n",
+					"# Add required imports\r\n",
+					"import com.microsoft.spark.sqlanalytics\r\n",
+					"from com.microsoft.spark.sqlanalytics.Constants import Constants\r\n",
+					"\r\n",
+					"# Configure and submit the request to write to Synapse Dedicated SQL Pool\r\n",
+					"# Sample below is using AAD-based authentication approach; See further examples to leverage SQL Basic auth.\r\n",
+					"(df_gold.write\r\n",
+					" # If `Constants.SERVER` is not provided, the `<database_name>` from the three-part table name argument\r\n",
+					" # to `synapsesql` method is used to infer the Synapse Dedicated SQL End Point.\r\n",
+					" .option(Constants.SERVER, \"cql-dev-datahub-synapse01.sql.azuresynapse.net\")\r\n",
+					" # Like-wise, if `Constants.TEMP_FOLDER` is not provided, the connector will use the runtime staging directory config (see section on Configuration Options for details).\r\n",
+					" .option(Constants.TEMP_FOLDER, (f\"\"\"abfss://temp@cqldevdatahubsynapse.dfs.core.windows.net/{db_tablename}\"\"\"))\r\n",
+					" # Choose a save mode that is apt for your use case.\r\n",
+					" # Options for save modes are \"error\" or \"errorifexists\" (default), \"overwrite\", \"append\", \"ignore\".\r\n",
+					" # refer to https://spark.apache.org/docs/latest/sql-data-sources-load-save-functions.html#save-modes\r\n",
+					" .mode(\"overwrite\")\r\n",
+					" # Required parameter - Three-part table name to which data will be written\r\n",
+					" .synapsesql(\"cqldevdatahubdsql01.aemo.DimReasoncode\"))\r\n",
+					""
+				],
+				"execution_count": null
+			},
+			{
+				"cell_type": "code",
+				"metadata": {
+					"jupyter": {
+						"source_hidden": false,
+						"outputs_hidden": false
+					},
+					"nteract": {
+						"transient": {
+							"deleting": false
+						}
+					}
+				},
+				"source": [
+					"# Add required imports\r\n",
+					"import com.microsoft.spark.sqlanalytics\r\n",
+					"from com.microsoft.spark.sqlanalytics.Constants import Constants\r\n",
+					"from pyspark.sql.functions import col\r\n",
+					"\r\n",
+					"# Name of the SQL Dedicated Pool or database where to run the query\r\n",
+					"# Database can be specified as a Spark Config or as a Constant - Constants.DATABASE\r\n",
+					"spark.conf.set(\"spark.sqlanalyticsconnector.dw.database\", \"<database_name>\")\r\n",
+					"\r\n",
+					"# Read from a query\r\n",
+					"# Query can be provided either as an argument to synapsesql or as a Constant - Constants.QUERY\r\n",
+					"dfToReadFromQueryAsOption = (spark.read\r\n",
+					"                     # Name of the SQL Dedicated Pool or database where to run the query\r\n",
+					"                     # Database can be specified as a Spark Config - spark.sqlanalyticsconnector.dw.database or as a Constant - Constants.DATABASE\r\n",
+					"                     .option(Constants.DATABASE, \"<database_name>\")\r\n",
+					"                     # If `Constants.SERVER` is not provided, the `<database_name>` from the three-part table name argument\r\n",
+					"                     # to `synapsesql` method is used to infer the Synapse Dedicated SQL End Point.\r\n",
+					"                     .option(Constants.SERVER, \"<sql-server-name>.sql.azuresynapse.net\")\r\n",
+					"                     # Defaults to storage path defined in the runtime configurations\r\n",
+					"                     .option(Constants.TEMP_FOLDER, \"abfss://<container_name>@<storage_account_name>.dfs.core.windows.net/<some_base_path_for_temporary_staging_folders>\")\r\n",
+					"                     # query from which data will be read\r\n",
+					"                     .option(Constants.QUERY, \"select <column_name>, count(*) as cnt from <schema_name>.<table_name> group by <column_name>\")\r\n",
+					"                     .synapsesql()\r\n",
+					")\r\n",
+					"\r\n",
+					"dfToReadFromQueryAsArgument = (spark.read\r\n",
+					"                     # Name of the SQL Dedicated Pool or database where to run the query\r\n",
+					"                     # Database can be specified as a Spark Config - spark.sqlanalyticsconnector.dw.database or as a Constant - Constants.DATABASE\r\n",
+					"                     .option(Constants.DATABASE, \"<database_name>\")\r\n",
+					"                     # If `Constants.SERVER` is not provided, the `<database_name>` from the three-part table name argument\r\n",
+					"                     # to `synapsesql` method is used to infer the Synapse Dedicated SQL End Point.\r\n",
+					"                     .option(Constants.SERVER, \"<sql-server-name>.sql.azuresynapse.net\")\r\n",
+					"                     # Defaults to storage path defined in the runtime configurations\r\n",
+					"                     .option(Constants.TEMP_FOLDER, \"abfss://<container_name>@<storage_account_name>.dfs.core.windows.net/<some_base_path_for_temporary_staging_folders>\")\r\n",
+					"                     # query from which data will be read\r\n",
+					"                     .synapsesql(\"select <column_name>, count(*) as counts from <schema_name>.<table_name> group by <column_name>\")\r\n",
+					")\r\n",
+					"\r\n",
+					"# Show contents of the dataframe\r\n",
+					"dfToReadFromQueryAsOption.show()\r\n",
+					"dfToReadFromQueryAsArgument.show()"
+				],
+				"execution_count": null
+			}
+		]
+	}
+}

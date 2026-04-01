@@ -1,0 +1,416 @@
+{
+	"name": "14419_AEMO",
+	"properties": {
+		"folder": {
+			"name": "DataHubBatchScripts/AEMO/AEMO_14419"
+		},
+		"nbformat": 4,
+		"nbformat_minor": 2,
+		"bigDataPool": {
+			"referenceName": "Sparkpool01",
+			"type": "BigDataPoolReference"
+		},
+		"sessionProperties": {
+			"driverMemory": "56g",
+			"driverCores": 8,
+			"executorMemory": "56g",
+			"executorCores": 8,
+			"numExecutors": 2,
+			"conf": {
+				"spark.dynamicAllocation.enabled": "false",
+				"spark.dynamicAllocation.minExecutors": "2",
+				"spark.dynamicAllocation.maxExecutors": "2",
+				"spark.autotune.trackingId": "3c4919d0-13a1-499f-aef5-c9ad9ddf3e67"
+			}
+		},
+		"metadata": {
+			"saveOutput": true,
+			"enableDebugMode": false,
+			"kernelspec": {
+				"name": "synapse_pyspark",
+				"display_name": "Synapse PySpark"
+			},
+			"language_info": {
+				"name": "python"
+			},
+			"a365ComputeOptions": {
+				"id": "/subscriptions/2e9f823e-dc76-4e8e-b815-c8a4f22d05ff/resourceGroups/CQL-AZUR1-DEVDATAHUB01-RG/providers/Microsoft.Synapse/workspaces/cql-dev-datahub-synapse01/bigDataPools/Sparkpool01",
+				"name": "Sparkpool01",
+				"type": "Spark",
+				"endpoint": "https://cql-dev-datahub-synapse01.dev.azuresynapse.net/livyApi/versions/2019-11-01-preview/sparkPools/Sparkpool01",
+				"auth": {
+					"type": "AAD",
+					"authResource": "https://dev.azuresynapse.net"
+				},
+				"sparkVersion": "3.3",
+				"nodeCount": 10,
+				"cores": 8,
+				"memory": 56,
+				"automaticScaleJobs": false
+			},
+			"sessionKeepAliveTimeout": 30
+		},
+		"cells": [
+			{
+				"cell_type": "markdown",
+				"metadata": {
+					"nteract": {
+						"transient": {
+							"deleting": false
+						}
+					}
+				},
+				"source": [
+					"environment = \"dev\" #or dev"
+				]
+			},
+			{
+				"cell_type": "code",
+				"source": [
+					"databasename = \"aemo_bronze\"\r\n",
+					"tablename = \"nem12_bronze\"\r\n",
+					"tablename_temp = \"nem12_bronze_temp\"\r\n",
+					"backup_tablename = \"nem12_bronze_20240101\"\r\n",
+					"destination_path = \"AEMO/NEM12\""
+				],
+				"execution_count": 52
+			},
+			{
+				"cell_type": "markdown",
+				"metadata": {
+					"nteract": {
+						"transient": {
+							"deleting": false
+						}
+					}
+				},
+				"source": [
+					"if environment == \"dev\":\r\n",
+					"    path = f'abfss://bronze@cqldevdatahubsynapse.dfs.core.windows.net/{destination_path}/{backup_tablename}' # Location of parquet files once we write the changes\r\n",
+					"elif environment == \"prod\":\r\n",
+					"    path = f'abfss://bronze@cqlproddatahubsynapse.dfs.core.windows.net/{destination_path}/{backup_tablename}' # Location of parquet files once we write the changes"
+				]
+			},
+			{
+				"cell_type": "markdown",
+				"metadata": {
+					"nteract": {
+						"transient": {
+							"deleting": false
+						}
+					}
+				},
+				"source": [
+					"print(environment)\r\n",
+					"print(path)"
+				]
+			},
+			{
+				"cell_type": "code",
+				"metadata": {
+					"jupyter": {
+						"source_hidden": false,
+						"outputs_hidden": false
+					},
+					"nteract": {
+						"transient": {
+							"deleting": false
+						}
+					}
+				},
+				"source": [
+					"spark.sql(f\"\"\"ALTER TABLE {databasename}.{tablename} SET TBLPROPERTIES (\r\n",
+					"   'delta.columnMapping.mode' = 'name',\r\n",
+					"   'delta.minReaderVersion' = '2',\r\n",
+					"   'delta.minWriterVersion' = '5');\"\"\")"
+				],
+				"execution_count": 35
+			},
+			{
+				"cell_type": "code",
+				"metadata": {
+					"jupyter": {
+						"source_hidden": false,
+						"outputs_hidden": false
+					},
+					"nteract": {
+						"transient": {
+							"deleting": false
+						}
+					}
+				},
+				"source": [
+					"spark.sql(f\"\"\"ALTER TABLE {databasename}.{tablename_temp} SET TBLPROPERTIES (\r\n",
+					"   'delta.columnMapping.mode' = 'name',\r\n",
+					"   'delta.minReaderVersion' = '2',\r\n",
+					"   'delta.minWriterVersion' = '5');\"\"\")"
+				],
+				"execution_count": 36
+			},
+			{
+				"cell_type": "code",
+				"metadata": {
+					"jupyter": {
+						"source_hidden": false,
+						"outputs_hidden": false
+					},
+					"nteract": {
+						"transient": {
+							"deleting": false
+						}
+					}
+				},
+				"source": [
+					"# Add Alter Columns\r\n",
+					"spark.sql(f\"\"\"ALTER TABLE {databasename}.{tablename} DROP COLUMN NextScheduledReadDate;\"\"\")\r\n",
+					"spark.sql(f\"\"\"ALTER TABLE {databasename}.{tablename} DROP COLUMN CDC_StartDate;\"\"\")\r\n",
+					"spark.sql(f\"\"\"ALTER TABLE {databasename}.{tablename} DROP COLUMN CDC_EndDate;\"\"\")\r\n",
+					"spark.sql(f\"\"\"ALTER TABLE {databasename}.{tablename} DROP COLUMN CDC_Ops;\"\"\")\r\n",
+					"spark.sql(f\"\"\"ALTER TABLE {databasename}.{tablename} DROP COLUMN CDC_CurrentFlag;\"\"\")\r\n",
+					"spark.sql(f\"\"\"ALTER TABLE {databasename}.{tablename} DROP COLUMN Nem12HashDiff;\"\"\")\r\n",
+					"spark.sql(f\"\"\"ALTER TABLE {databasename}.{tablename} ADD COLUMN NextScheduledReadDate STRING;\"\"\")\r\n",
+					""
+				],
+				"execution_count": null
+			},
+			{
+				"cell_type": "code",
+				"metadata": {
+					"jupyter": {
+						"source_hidden": false,
+						"outputs_hidden": false
+					},
+					"nteract": {
+						"transient": {
+							"deleting": false
+						}
+					}
+				},
+				"source": [
+					"# Add CreationDate Columns\r\n",
+					"spark.sql(f\"\"\"ALTER TABLE {databasename}.{tablename_temp} DROP COLUMN NextScheduledReadDate;\"\"\")\r\n",
+					"spark.sql(f\"\"\"ALTER TABLE {databasename}.{tablename_temp} DROP COLUMN CDC_StartDate;\"\"\")\r\n",
+					"spark.sql(f\"\"\"ALTER TABLE {databasename}.{tablename_temp} DROP COLUMN CDC_EndDate;\"\"\")\r\n",
+					"spark.sql(f\"\"\"ALTER TABLE {databasename}.{tablename_temp} DROP COLUMN CDC_Ops;\"\"\")\r\n",
+					"spark.sql(f\"\"\"ALTER TABLE {databasename}.{tablename_temp} DROP COLUMN CDC_CurrentFlag;\"\"\")\r\n",
+					"spark.sql(f\"\"\"ALTER TABLE {databasename}.{tablename_temp} DROP COLUMN Nem12HashDiff;\"\"\")\r\n",
+					"spark.sql(f\"\"\"ALTER TABLE {databasename}.{tablename_temp} ADD COLUMN NextScheduledReadDate STRING;\"\"\")\r\n",
+					""
+				],
+				"execution_count": 33
+			},
+			{
+				"cell_type": "code",
+				"metadata": {
+					"jupyter": {
+						"source_hidden": false,
+						"outputs_hidden": false
+					},
+					"nteract": {
+						"transient": {
+							"deleting": false
+						}
+					}
+				},
+				"source": [
+					"spark.sql(f\"\"\"SELECT * FROM {databasename}.{tablename};\"\"\").show(n=20)"
+				],
+				"execution_count": null
+			},
+			{
+				"cell_type": "code",
+				"metadata": {
+					"jupyter": {
+						"source_hidden": false,
+						"outputs_hidden": false
+					},
+					"nteract": {
+						"transient": {
+							"deleting": false
+						}
+					}
+				},
+				"source": [
+					"#How to reorder columns in Delta table for better performance in Databricks PySpark\r\n",
+					"spark.sql(f'ALTER TABLE {databasename}.{tablename} ALTER COLUMN Nem12HashKey FIRST;')\r\n",
+					"spark.sql(f'ALTER TABLE {databasename}.{tablename} ALTER COLUMN CDC_LoadDate AFTER Nem12HashKey;')\r\n",
+					"spark.sql(f'ALTER TABLE {databasename}.{tablename} ALTER COLUMN MSATSLoadDateTime AFTER CDC_LoadDate;')\r\n",
+					"spark.sql(f'ALTER TABLE {databasename}.{tablename} ALTER COLUMN CreationDate AFTER MSATSLoadDateTime;')"
+				],
+				"execution_count": null
+			},
+			{
+				"cell_type": "code",
+				"metadata": {
+					"jupyter": {
+						"source_hidden": false,
+						"outputs_hidden": false
+					},
+					"nteract": {
+						"transient": {
+							"deleting": false
+						}
+					}
+				},
+				"source": [
+					"#How to reorder columns in Delta table for better performance in Databricks PySpark\r\n",
+					"spark.sql(f'ALTER TABLE {databasename}.{tablename_temp} ALTER COLUMN Nem12HashKey FIRST;')\r\n",
+					"spark.sql(f'ALTER TABLE {databasename}.{tablename_temp} ALTER COLUMN CDC_LoadDate AFTER Nem12HashKey;')\r\n",
+					"spark.sql(f'ALTER TABLE {databasename}.{tablename_temp} ALTER COLUMN MSATSLoadDateTime AFTER CDC_LoadDate;')\r\n",
+					"spark.sql(f'ALTER TABLE {databasename}.{tablename_temp} ALTER COLUMN CreationDate AFTER MSATSLoadDateTime;')"
+				],
+				"execution_count": 37
+			},
+			{
+				"cell_type": "code",
+				"metadata": {
+					"jupyter": {
+						"source_hidden": false,
+						"outputs_hidden": false
+					},
+					"nteract": {
+						"transient": {
+							"deleting": false
+						}
+					}
+				},
+				"source": [
+					"# Performance Tuning Apache Spark with Z-Ordering\r\n",
+					"spark.sql(f'OPTIMIZE {databasename}.{tablename} ZORDER BY (Nem12HashKey,CDC_LoadDate,MSATSLoadDateTime,CreationDate)')"
+				],
+				"execution_count": 38
+			},
+			{
+				"cell_type": "markdown",
+				"metadata": {
+					"nteract": {
+						"transient": {
+							"deleting": false
+						}
+					}
+				},
+				"source": [
+					"# Drop Silver for new changes"
+				]
+			},
+			{
+				"cell_type": "code",
+				"metadata": {
+					"jupyter": {
+						"source_hidden": false,
+						"outputs_hidden": false
+					},
+					"nteract": {
+						"transient": {
+							"deleting": false
+						}
+					}
+				},
+				"source": [
+					"#Get Parameter from controldb\r\n",
+					"import json\r\n",
+					"db_port = 1433\r\n",
+					"linked_service_name = \"LS_SQL_ELTFrameworkDB\"\r\n",
+					"db_notebookname= \"AEMO_Silver\"\r\n",
+					"linkedServiceProperties = json.loads(mssparkutils.credentials.getPropertiesAll(linked_service_name))\r\n",
+					"sql_server_name = linkedServiceProperties.get('Endpoint')\r\n",
+					"db_name = linkedServiceProperties.get('Database')\r\n",
+					"access_token = mssparkutils.credentials.getConnectionStringOrCreds(linked_service_name)\r\n",
+					"\r\n",
+					"db_query =\"SELECT A.*,B.NotebookParameterId,B.ParameterType,B.Value  FROM [CTL].[CFG_NOTEBOOK] A LEFT JOIN [CTL].[CFG_NOTEBOOK_PARAMETER] B ON A.NotebookId = B.NotebookId\"\r\n",
+					"\r\n",
+					"df = spark.read.format(\"jdbc\") \\\r\n",
+					"    .option(\"url\", \"jdbc:sqlserver://%s:%s\" % (sql_server_name, db_port)) \\\r\n",
+					"    .option(\"query\", db_query) \\\r\n",
+					"    .option(\"accessToken\", access_token) \\\r\n",
+					"    .option(\"encrypt\", \"true\") \\\r\n",
+					"    .option(\"databaseName\", db_name) \\\r\n",
+					"    .option(\"hostNameInCertificate\", \"*.database.windows.net\") \\\r\n",
+					"    .load()\r\n",
+					"\r\n",
+					"df2 = df.where(df.NotebookPath==db_notebookname) "
+				],
+				"execution_count": null
+			},
+			{
+				"cell_type": "code",
+				"metadata": {
+					"jupyter": {
+						"source_hidden": false,
+						"outputs_hidden": false
+					},
+					"nteract": {
+						"transient": {
+							"deleting": false
+						}
+					}
+				},
+				"source": [
+					"#Source DataLake storage details\r\n",
+					"source_storage = df2.where(df2.ParameterType=='source_storage').collect()[0][\"Value\"] #Storage name\r\n",
+					"source_container = df2.where(df2.ParameterType=='source_container').collect()[0][\"Value\"] #Storage container detail\r\n",
+					"source_path = df2.where(df2.ParameterType=='source_path').collect()[0][\"Value\"] #internal folder location in container \"demodata/demo_aemo\"\r\n",
+					"#source_file = '' #CUSTOMER__full_32a72bd2-bd94-467f-9030-6b9f20dad676_20240204_100201\r\n",
+					"\r\n",
+					"#Destination DataLake storage details\r\n",
+					"destination_storage = df2.where(df2.ParameterType=='destination_storage').collect()[0][\"Value\"] #Storage name\r\n",
+					"destination_container = df2.where(df2.ParameterType=='destination_container').collect()[0][\"Value\"] #raw storage container details\r\n",
+					"destination_path = df2.where(df2.ParameterType=='destination_path').collect()[0][\"Value\"] #raw delta file patch"
+				],
+				"execution_count": null
+			},
+			{
+				"cell_type": "code",
+				"metadata": {
+					"jupyter": {
+						"source_hidden": false,
+						"outputs_hidden": false
+					},
+					"nteract": {
+						"transient": {
+							"deleting": false
+						}
+					}
+				},
+				"source": [
+					"#Set table name\r\n",
+					"db_tablename=\"nem12_silver\"\r\n",
+					"Bronze_notebookname=\"aemo_bronze\"\r\n",
+					"Bronze_tablename=\"nem12_bronze\""
+				],
+				"execution_count": null
+			},
+			{
+				"cell_type": "code",
+				"metadata": {
+					"jupyter": {
+						"source_hidden": false,
+						"outputs_hidden": false
+					},
+					"nteract": {
+						"transient": {
+							"deleting": false
+						}
+					}
+				},
+				"source": [
+					"# Drop table and storage folder if exists\r\n",
+					"from py4j.protocol import Py4JJavaError\r\n",
+					"\r\n",
+					"spark.sql(f\"\"\"DROP TABLE IF EXISTS {db_notebookname}.{db_tablename}\"\"\")\r\n",
+					"\r\n",
+					"try:\r\n",
+					"    raw_output_path = f\"abfss://{destination_container}@{destination_storage}.dfs.core.windows.net/{destination_path}/{db_tablename}\"\r\n",
+					"    mssparkutils.fs.rm(raw_output_path,recurse=True)\r\n",
+					"\r\n",
+					"    print(\"Delete successful\")\r\n",
+					"\r\n",
+					"except Py4JJavaError as error :\r\n",
+					"    if 'org.apache.hadoop.fs.PathNotFoundException' in str (error.java_exception):\r\n",
+					"        print(\"No such file or directory\")"
+				],
+				"execution_count": null
+			}
+		]
+	}
+}

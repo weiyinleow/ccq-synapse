@@ -1,0 +1,516 @@
+{
+	"name": "18322_silver",
+	"properties": {
+		"folder": {
+			"name": "DataHubBatchScripts/AEMO/AEMO_18322_16266"
+		},
+		"nbformat": 4,
+		"nbformat_minor": 2,
+		"bigDataPool": {
+			"referenceName": "JobSparkpool03",
+			"type": "BigDataPoolReference"
+		},
+		"sessionProperties": {
+			"driverMemory": "112g",
+			"driverCores": 16,
+			"executorMemory": "112g",
+			"executorCores": 16,
+			"numExecutors": 1,
+			"conf": {
+				"spark.dynamicAllocation.enabled": "true",
+				"spark.dynamicAllocation.minExecutors": "1",
+				"spark.dynamicAllocation.maxExecutors": "5",
+				"spark.autotune.trackingId": "2a554e58-2afc-4378-a894-79335b74f34a"
+			}
+		},
+		"metadata": {
+			"saveOutput": true,
+			"enableDebugMode": false,
+			"kernelspec": {
+				"name": "synapse_pyspark",
+				"display_name": "Synapse PySpark"
+			},
+			"language_info": {
+				"name": "python"
+			},
+			"a365ComputeOptions": {
+				"id": "/subscriptions/2e9f823e-dc76-4e8e-b815-c8a4f22d05ff/resourceGroups/CQL-AZUR1-DEVDATAHUB01-RG/providers/Microsoft.Synapse/workspaces/cql-dev-datahub-synapse01/bigDataPools/JobSparkpool03",
+				"name": "JobSparkpool03",
+				"type": "Spark",
+				"endpoint": "https://cql-dev-datahub-synapse01.dev.azuresynapse.net/livyApi/versions/2019-11-01-preview/sparkPools/JobSparkpool03",
+				"auth": {
+					"type": "AAD",
+					"authResource": "https://dev.azuresynapse.net"
+				},
+				"sparkVersion": "3.4",
+				"nodeCount": 3,
+				"cores": 16,
+				"memory": 112,
+				"automaticScaleJobs": true
+			},
+			"sessionKeepAliveTimeout": 30
+		},
+		"cells": [
+			{
+				"cell_type": "code",
+				"source": [
+					"#Get Parameter from controldb\n",
+					"import json\n",
+					"db_port = 1433\n",
+					"linked_service_name = \"LS_SQL_ELTFrameworkDB\"\n",
+					"db_notebookname= \"AEMO_Silver\"\n",
+					"linkedServiceProperties = json.loads(mssparkutils.credentials.getPropertiesAll(linked_service_name))\n",
+					"sql_server_name = linkedServiceProperties.get('Endpoint')\n",
+					"db_name = linkedServiceProperties.get('Database')\n",
+					"access_token = mssparkutils.credentials.getConnectionStringOrCreds(linked_service_name)\n",
+					"\n",
+					"db_query =\"SELECT A.*,B.NotebookParameterId,B.ParameterType,B.Value  FROM [CTL].[CFG_NOTEBOOK] A LEFT JOIN [CTL].[CFG_NOTEBOOK_PARAMETER] B ON A.NotebookId = B.NotebookId\"\n",
+					"\n",
+					"df = spark.read.format(\"jdbc\") \\\n",
+					"    .option(\"url\", \"jdbc:sqlserver://%s:%s\" % (sql_server_name, db_port)) \\\n",
+					"    .option(\"query\", db_query) \\\n",
+					"    .option(\"accessToken\", access_token) \\\n",
+					"    .option(\"encrypt\", \"true\") \\\n",
+					"    .option(\"databaseName\", db_name) \\\n",
+					"    .option(\"hostNameInCertificate\", \"*.database.windows.net\") \\\n",
+					"    .load()\n",
+					"\n",
+					"df2 = df.where(df.NotebookPath==db_notebookname) "
+				],
+				"execution_count": 1
+			},
+			{
+				"cell_type": "code",
+				"source": [
+					"#Source DataLake storage details\n",
+					"source_storage = df2.where(df2.ParameterType=='source_storage').collect()[0][\"Value\"] #Storage name\n",
+					"source_container = df2.where(df2.ParameterType=='source_container').collect()[0][\"Value\"] #Storage container detail\n",
+					"source_path = df2.where(df2.ParameterType=='source_path').collect()[0][\"Value\"] #internal folder location in container \"demodata/demo_aemo\"\n",
+					"\n",
+					"#Destination DataLake storage details\n",
+					"destination_storage = df2.where(df2.ParameterType=='destination_storage').collect()[0][\"Value\"] #Storage name\n",
+					"destination_container = df2.where(df2.ParameterType=='destination_container').collect()[0][\"Value\"] #raw storage container details\n",
+					"destination_path = df2.where(df2.ParameterType=='destination_path').collect()[0][\"Value\"] #raw delta file patch"
+				],
+				"execution_count": 2
+			},
+			{
+				"cell_type": "code",
+				"source": [
+					"# Display values\n",
+					"print(source_storage)\n",
+					"print(source_container)\n",
+					"print(source_path)\n",
+					"print(destination_storage)\n",
+					"print(destination_container)\n",
+					"print(destination_path)"
+				],
+				"execution_count": 3
+			},
+			{
+				"cell_type": "code",
+				"source": [
+					"#Set table name\n",
+					"db_tablename=\"nem12_silver\"\n",
+					"backup_tablename = \"nem12_silver_bkp_20250925\""
+				],
+				"execution_count": 4
+			},
+			{
+				"cell_type": "markdown",
+				"metadata": {
+					"nteract": {
+						"transient": {
+							"deleting": false
+						}
+					}
+				},
+				"source": [
+					"Step 1 : Create a backup table for Silver Table (aemo_silver.nem12_silver)"
+				]
+			},
+			{
+				"cell_type": "code",
+				"metadata": {
+					"jupyter": {
+						"source_hidden": false,
+						"outputs_hidden": false
+					},
+					"nteract": {
+						"transient": {
+							"deleting": false
+						}
+					}
+				},
+				"source": [
+					"#Create a backup table for Silver Table (aemo_silver.nem12_silver)\n",
+					"\n",
+					"spark.sql(f\"\"\"\n",
+					"CREATE TABLE IF NOT EXISTS {db_notebookname}.{backup_tablename}\n",
+					"(\n",
+					"    Nem12HashKey STRING,\n",
+					"    CDC_CurrentFlag BOOLEAN,\n",
+					"    CDC_LoadDate TIMESTAMP,\n",
+					"    MSATSLoadDateTime STRING,\n",
+					"    CreationDate STRING,\n",
+					"    CDC_Ops INT,\n",
+					"    Year INT, \n",
+					"    VersionHeader STRING,\n",
+					"    FromParticipant STRING,\n",
+					"    ToParticipant STRING,\n",
+					"    IntervalDate STRING,\n",
+					"    IntervalLength DOUBLE,\n",
+					"    IntervalIndex INT,\n",
+					"    Timestamp TIMESTAMP,\n",
+					"    DisplayTimestamp_d STRING,\n",
+					"    DateHashId STRING, \n",
+					"    NormalizedTimeStart STRING,\n",
+					"    NormalizedTimeEnd STRING,\n",
+					"    TimeHashId STRING,\n",
+					"    NMI STRING,\n",
+					"    NMIHashId STRING,\n",
+					"    NMIConfiguration STRING,\n",
+					"    RegisterID STRING,\n",
+					"    NMISuffix STRING,\n",
+					"    ChannelHashId STRING,\n",
+					"    ReasonCodeId STRING,\n",
+					"    ReasonCodeHashId STRING,\n",
+					"    ReasonDescription STRING,\n",
+					"    FinalReasonCodeId STRING, \n",
+					"    FinalReasonCodeHashId STRING,\n",
+					"    TransCodeId STRING,\n",
+					"    TransCodeHashId STRING,\n",
+					"    UnitOfMeasurementId STRING,\n",
+					"    UnitOfMeasurementHashId STRING,\n",
+					"    QualityMethodId STRING,\n",
+					"    QualityFlag STRING,\n",
+					"    QualityFlagHashId STRING,\n",
+					"    MethodFlag STRING,\n",
+					"    MethodFlagHashId STRING, \n",
+					"    FinalQualityMethodId STRING,\n",
+					"    FinalQualityFlag STRING,\n",
+					"    FinalQualityFlagHashId STRING,\n",
+					"    FinalMethodFlag STRING, \n",
+					"    FinalMethodFlagHashId STRING,\n",
+					"    MDMDataStreamIdentifier STRING,\n",
+					"    MeterSerialNumber STRING, \n",
+					"    NextScheduledReadDate STRING,  \n",
+					"    RetServiceOrder STRING, \n",
+					"    ReadDatetime STRING,\n",
+					"    IndexRead STRING,\n",
+					"    Usage_d DOUBLE, \n",
+					"    Usage DOUBLE,\n",
+					"    FileName STRING\n",
+					")\n",
+					"USING delta\n",
+					"PARTITIONED BY (Year)\n",
+					"LOCATION 'abfss://{destination_container}@{destination_storage}.dfs.core.windows.net/{destination_path}/{backup_tablename}'\n",
+					"\"\"\")"
+				],
+				"execution_count": 5
+			},
+			{
+				"cell_type": "markdown",
+				"metadata": {
+					"nteract": {
+						"transient": {
+							"deleting": false
+						}
+					}
+				},
+				"source": [
+					"Step 2: Copy data from aemo_silver.nem12_silver to aemo_silver.nem12_silver_bkp_YYYYMMDD\n",
+					"\n",
+					"**Note - 249,266,688 records in Dev took 5 minutes 57 seconds**"
+				]
+			},
+			{
+				"cell_type": "code",
+				"source": [
+					"# Copy data from aemo_silver.nem12_silver to aemo_silver.nem12_silver_bkp_YYYYMMDD\n",
+					"spark.sql(f\"\"\"\n",
+					"      INSERT INTO {db_notebookname}.{backup_tablename}\n",
+					"\n",
+					"        (Nem12HashKey,CDC_CurrentFlag,CDC_LoadDate,MSATSLoadDateTime,CreationDate,CDC_Ops,Year,VersionHeader,FromParticipant,ToParticipant,IntervalDate,IntervalLength,IntervalIndex,Timestamp,DisplayTimestamp_d,\n",
+					"        DateHashId,NormalizedTimeStart,NormalizedTimeEnd,TimeHashId,NMI,NMIHashId,NMIConfiguration,RegisterID,NMISuffix,ChannelHashId,ReasonCodeId,ReasonCodeHashId,ReasonDescription,FinalReasonCodeId,\n",
+					"        FinalReasonCodeHashId,TransCodeId,TransCodeHashId,UnitOfMeasurementId,UnitOfMeasurementHashId,QualityMethodId,QualityFlag,QualityFlagHashId,MethodFlag,MethodFlagHashId,FinalQualityMethodId,\n",
+					"        FinalQualityFlag,FinalQualityFlagHashId,FinalMethodFlag,FinalMethodFlagHashId,MDMDataStreamIdentifier,MeterSerialNumber,NextScheduledReadDate,RetServiceOrder,ReadDatetime,IndexRead,Usage_d,Usage,\n",
+					"        FileName)\n",
+					"\n",
+					"      SELECT \n",
+					"        \n",
+					"        s.Nem12HashKey,s.CDC_CurrentFlag,s.CDC_LoadDate,s.MSATSLoadDateTime,s.CreationDate,s.CDC_Ops,s.Year,s.VersionHeader,s.FromParticipant,s.ToParticipant,s.IntervalDate,s.IntervalLength,s.IntervalIndex,s.Timestamp,s.DisplayTimestamp_d,\n",
+					"        s.DateHashId,s.NormalizedTimeStart,s.NormalizedTimeEnd,s.TimeHashId,s.NMI,s.NMIHashId,s.NMIConfiguration,s.RegisterID,s.NMISuffix,s.ChannelHashId,s.ReasonCodeId,s.ReasonCodeHashId,s.ReasonDescription,s.FinalReasonCodeId,\n",
+					"        s.FinalReasonCodeHashId,s.TransCodeId,s.TransCodeHashId,s.UnitOfMeasurementId,s.UnitOfMeasurementHashId,s.QualityMethodId,s.QualityFlag,s.QualityFlagHashId,s.MethodFlag,s.MethodFlagHashId,s.FinalQualityMethodId,\n",
+					"        s.FinalQualityFlag,s.FinalQualityFlagHashId,s.FinalMethodFlag,s.FinalMethodFlagHashId,s.MDMDataStreamIdentifier,s.MeterSerialNumber,s.NextScheduledReadDate,s.RetServiceOrder,s.ReadDatetime,s.IndexRead,s.Usage_d,s.Usage,\n",
+					"        s.FileName\n",
+					"\n",
+					"      FROM {db_notebookname}.{db_tablename} s;\n",
+					"  \"\"\")"
+				],
+				"execution_count": 6
+			},
+			{
+				"cell_type": "code",
+				"source": [
+					"#Row count parameters\n",
+					"Silver_Record_Count=spark.sql(f\"\"\" SELECT COUNT(*) FROM {db_notebookname}.{db_tablename}\"\"\").collect()[0][0]\n",
+					"Silver_Bkp_Record_Count=spark.sql(f\"\"\" SELECT COUNT(*) FROM {db_notebookname}.{backup_tablename}\"\"\").collect()[0][0]"
+				],
+				"execution_count": 7
+			},
+			{
+				"cell_type": "markdown",
+				"metadata": {
+					"nteract": {
+						"transient": {
+							"deleting": false
+						}
+					}
+				},
+				"source": [
+					"Step 3: Verify silver and backup tables count.\n",
+					"# **Both tables counts should match**"
+				]
+			},
+			{
+				"cell_type": "code",
+				"source": [
+					"# Display values\n",
+					"print(Silver_Record_Count)\n",
+					"print(Silver_Bkp_Record_Count)"
+				],
+				"execution_count": 8
+			},
+			{
+				"cell_type": "markdown",
+				"metadata": {
+					"nteract": {
+						"transient": {
+							"deleting": false
+						}
+					}
+				},
+				"source": [
+					"Step 4: Drop aemo_silver.nem12_silver table and storage folder"
+				]
+			},
+			{
+				"cell_type": "code",
+				"source": [
+					"# Drop aemo_silver.nem12_silver table and storage folder if exists\n",
+					"from py4j.protocol import Py4JJavaError\n",
+					"\n",
+					"spark.sql(f\"\"\"DROP TABLE IF EXISTS {db_notebookname}.{db_tablename}\"\"\")\n",
+					"\n",
+					"try:\n",
+					"    raw_output_path = f\"abfss://{destination_container}@{destination_storage}.dfs.core.windows.net/{destination_path}/{db_tablename}\"\n",
+					"    mssparkutils.fs.rm(raw_output_path,recurse=True)\n",
+					"\n",
+					"    print(\"Delete successful\")\n",
+					"\n",
+					"except Py4JJavaError as error :\n",
+					"    if 'org.apache.hadoop.fs.PathNotFoundException' in str (error.java_exception):\n",
+					"        print(\"No such file or directory\")"
+				],
+				"execution_count": 9
+			},
+			{
+				"cell_type": "markdown",
+				"metadata": {
+					"nteract": {
+						"transient": {
+							"deleting": false
+						}
+					}
+				},
+				"source": [
+					"Step 5: Create silver table(aemo_silver.nem12_silver) with additional columns"
+				]
+			},
+			{
+				"cell_type": "code",
+				"source": [
+					"#Create silver table(aemo_silver.nem12_silver) with additional columns\n",
+					"\n",
+					"spark.sql(f\"\"\"\n",
+					"CREATE TABLE IF NOT EXISTS {db_notebookname}.{db_tablename}\n",
+					"(\n",
+					"    Nem12HashKey STRING,\n",
+					"    CDC_CurrentFlag BOOLEAN,\n",
+					"    CDC_LoadDate TIMESTAMP,\n",
+					"    UpdateDateTime STRING,\n",
+					"    MSATSLoadDateTime STRING,\n",
+					"    CreationDate STRING,\n",
+					"    CDC_Ops INT,\n",
+					"    Year INT, \n",
+					"    VersionHeader STRING,\n",
+					"    FromParticipant STRING,\n",
+					"    ToParticipant STRING,\n",
+					"    IntervalDate STRING,\n",
+					"    IntervalLength DOUBLE,\n",
+					"    IntervalIndex INT,\n",
+					"    Timestamp TIMESTAMP,\n",
+					"    DisplayTimestamp_d STRING,\n",
+					"    DateHashId STRING, \n",
+					"    NormalizedTimeStart STRING,\n",
+					"    NormalizedTimeEnd STRING,\n",
+					"    TimeHashId STRING,\n",
+					"    NMI STRING,\n",
+					"    NMIHashId STRING,\n",
+					"    NMIConfiguration STRING,\n",
+					"    RegisterID STRING,\n",
+					"    NMISuffix STRING,\n",
+					"    ChannelHashId STRING,\n",
+					"    ReasonCodeId STRING,\n",
+					"    ReasonCodeHashId STRING,\n",
+					"    ReasonDescription STRING,\n",
+					"    FinalReasonDescription STRING,\n",
+					"    FinalReasonCodeId STRING, \n",
+					"    FinalReasonCodeHashId STRING,\n",
+					"    TransCodeId STRING,\n",
+					"    TransCodeHashId STRING,\n",
+					"    UnitOfMeasurementId STRING,\n",
+					"    UnitOfMeasurementHashId STRING,\n",
+					"    QualityMethodId STRING,\n",
+					"    QualityFlag STRING,\n",
+					"    QualityFlagHashId STRING,\n",
+					"    MethodFlag STRING,\n",
+					"    MethodFlagHashId STRING, \n",
+					"    FinalQualityMethodId STRING,\n",
+					"    FinalQualityFlag STRING,\n",
+					"    FinalQualityFlagHashId STRING,\n",
+					"    FinalMethodFlag STRING, \n",
+					"    FinalMethodFlagHashId STRING,\n",
+					"    MDMDataStreamIdentifier STRING,\n",
+					"    MeterSerialNumber STRING, \n",
+					"    NextScheduledReadDate STRING,  \n",
+					"    RetServiceOrder STRING, \n",
+					"    ReadDatetime STRING,\n",
+					"    IndexRead STRING,\n",
+					"    Usage_d DOUBLE, \n",
+					"    Usage DOUBLE,\n",
+					"    FileName STRING\n",
+					")\n",
+					"USING delta\n",
+					"PARTITIONED BY (Year)\n",
+					"LOCATION 'abfss://{destination_container}@{destination_storage}.dfs.core.windows.net/{destination_path}/{db_tablename}'\n",
+					"\"\"\")\n",
+					""
+				],
+				"execution_count": 10
+			},
+			{
+				"cell_type": "markdown",
+				"metadata": {
+					"nteract": {
+						"transient": {
+							"deleting": false
+						}
+					}
+				},
+				"source": [
+					"Step 6: Copy data from aemo_silver.nem12_silver_bkp_YYYYMMDD to aemo_silver.nem12_silver\n",
+					"\n",
+					"**Note - 249,266,688 records in Dev took 2 minutes 9 seconds**"
+				]
+			},
+			{
+				"cell_type": "code",
+				"source": [
+					"spark.sql(f\"\"\"\n",
+					"    INSERT INTO {db_notebookname}.{db_tablename}\n",
+					"\n",
+					"        (Nem12HashKey,CDC_CurrentFlag,CDC_LoadDate,UpdateDateTime,MSATSLoadDateTime,CreationDate,CDC_Ops,Year,VersionHeader,FromParticipant,ToParticipant,IntervalDate,IntervalLength,IntervalIndex,Timestamp,DisplayTimestamp_d,\n",
+					"        DateHashId,NormalizedTimeStart,NormalizedTimeEnd,TimeHashId,NMI,NMIHashId,NMIConfiguration,RegisterID,NMISuffix,ChannelHashId,ReasonCodeId,ReasonCodeHashId,ReasonDescription,FinalReasonDescription,FinalReasonCodeId,\n",
+					"        FinalReasonCodeHashId,TransCodeId,TransCodeHashId,UnitOfMeasurementId,UnitOfMeasurementHashId,QualityMethodId,QualityFlag,QualityFlagHashId,MethodFlag,MethodFlagHashId,FinalQualityMethodId,\n",
+					"        FinalQualityFlag,FinalQualityFlagHashId,FinalMethodFlag,FinalMethodFlagHashId,MDMDataStreamIdentifier,MeterSerialNumber,NextScheduledReadDate,RetServiceOrder,ReadDatetime,IndexRead,Usage_d,Usage,FileName)\n",
+					"\n",
+					"    SELECT \n",
+					"        \n",
+					"        s.Nem12HashKey,s.CDC_CurrentFlag,s.CDC_LoadDate,s.MSATSLoadDateTime,NULL,s.CreationDate,s.CDC_Ops,s.Year,s.VersionHeader,s.FromParticipant,s.ToParticipant,s.IntervalDate,s.IntervalLength,s.IntervalIndex,s.Timestamp,s.DisplayTimestamp_d,\n",
+					"        s.DateHashId,s.NormalizedTimeStart,s.NormalizedTimeEnd,s.TimeHashId,s.NMI,s.NMIHashId,s.NMIConfiguration,s.RegisterID,s.NMISuffix,s.ChannelHashId,s.ReasonCodeId,s.ReasonCodeHashId,s.ReasonDescription,NULL,s.FinalReasonCodeId,\n",
+					"        s.FinalReasonCodeHashId,s.TransCodeId,s.TransCodeHashId,s.UnitOfMeasurementId,s.UnitOfMeasurementHashId,s.QualityMethodId,s.QualityFlag,s.QualityFlagHashId,s.MethodFlag,s.MethodFlagHashId,s.FinalQualityMethodId,\n",
+					"        s.FinalQualityFlag,s.FinalQualityFlagHashId,s.FinalMethodFlag,s.FinalMethodFlagHashId,s.MDMDataStreamIdentifier,s.MeterSerialNumber,s.NextScheduledReadDate,s.RetServiceOrder,s.ReadDatetime,s.IndexRead,s.Usage_d,s.Usage,s.FileName\n",
+					"\n",
+					"    FROM {db_notebookname}.{backup_tablename} s;\n",
+					"  \"\"\")\n",
+					""
+				],
+				"execution_count": 11
+			},
+			{
+				"cell_type": "code",
+				"source": [
+					"#Row count parameters\n",
+					"Silver_Record_Count=spark.sql(f\"\"\" SELECT COUNT(*) FROM {db_notebookname}.{db_tablename}\"\"\").collect()[0][0]\n",
+					"Silver_Bkp_Record_Count=spark.sql(f\"\"\" SELECT COUNT(*) FROM {db_notebookname}.{backup_tablename}\"\"\").collect()[0][0]"
+				],
+				"execution_count": 12
+			},
+			{
+				"cell_type": "markdown",
+				"metadata": {
+					"nteract": {
+						"transient": {
+							"deleting": false
+						}
+					}
+				},
+				"source": [
+					"Step 7: Verify Silver and backup tables count. \n",
+					"# **Both tables counts should match**"
+				]
+			},
+			{
+				"cell_type": "code",
+				"source": [
+					"# Display values\n",
+					"print(Silver_Record_Count)\n",
+					"print(Silver_Bkp_Record_Count)"
+				],
+				"execution_count": 13
+			},
+			{
+				"cell_type": "markdown",
+				"metadata": {
+					"nteract": {
+						"transient": {
+							"deleting": false
+						}
+					}
+				},
+				"source": [
+					"Step 8: Drop back up table aemo_silver.nem12_silver_bkp_YYYYMMDD table and storage folder\n",
+					"# **Only run below when ready to delete back up table**"
+				]
+			},
+			{
+				"cell_type": "markdown",
+				"metadata": {
+					"nteract": {
+						"transient": {
+							"deleting": false
+						}
+					}
+				},
+				"source": [
+					"# Drop aemo_silver.nem12_silver_bkp_YYYYMMDD table and storage folder if exists\n",
+					"from py4j.protocol import Py4JJavaError\n",
+					"\n",
+					"spark.sql(f\"\"\"DROP TABLE IF EXISTS {db_notebookname}.{backup_tablename}\"\"\")\n",
+					"\n",
+					"try:\n",
+					"    raw_output_path = f\"abfss://{destination_container}@{destination_storage}.dfs.core.windows.net/{destination_path}/{backup_tablename}\"\n",
+					"    mssparkutils.fs.rm(raw_output_path,recurse=True)\n",
+					"\n",
+					"    print(\"Delete successful\")\n",
+					"\n",
+					"except Py4JJavaError as error :\n",
+					"    if 'org.apache.hadoop.fs.PathNotFoundException' in str (error.java_exception):\n",
+					"        print(\"No such file or directory\")"
+				]
+			}
+		]
+	}
+}

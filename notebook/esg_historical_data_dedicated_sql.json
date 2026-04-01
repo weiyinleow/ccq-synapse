@@ -1,0 +1,203 @@
+{
+	"name": "esg_historical_data_dedicated_sql",
+	"properties": {
+		"folder": {
+			"name": "DataHubBatchScripts/GOLD/SustainabilityUseCase"
+		},
+		"nbformat": 4,
+		"nbformat_minor": 2,
+		"bigDataPool": {
+			"referenceName": "JobSparkpool02",
+			"type": "BigDataPoolReference"
+		},
+		"sessionProperties": {
+			"driverMemory": "56g",
+			"driverCores": 8,
+			"executorMemory": "56g",
+			"executorCores": 8,
+			"numExecutors": 2,
+			"conf": {
+				"spark.dynamicAllocation.enabled": "false",
+				"spark.dynamicAllocation.minExecutors": "2",
+				"spark.dynamicAllocation.maxExecutors": "2",
+				"spark.autotune.trackingId": "488c9e6d-a0a2-417d-a124-aac3d8182fb7"
+			}
+		},
+		"metadata": {
+			"saveOutput": true,
+			"enableDebugMode": false,
+			"kernelspec": {
+				"name": "synapse_pyspark",
+				"display_name": "Synapse PySpark"
+			},
+			"language_info": {
+				"name": "python"
+			},
+			"a365ComputeOptions": {
+				"id": "/subscriptions/2e9f823e-dc76-4e8e-b815-c8a4f22d05ff/resourceGroups/CQL-AZUR1-DEVDATAHUB01-RG/providers/Microsoft.Synapse/workspaces/cql-dev-datahub-synapse01/bigDataPools/JobSparkpool02",
+				"name": "JobSparkpool02",
+				"type": "Spark",
+				"endpoint": "https://cql-dev-datahub-synapse01.dev.azuresynapse.net/livyApi/versions/2019-11-01-preview/sparkPools/JobSparkpool02",
+				"auth": {
+					"type": "AAD",
+					"authResource": "https://dev.azuresynapse.net"
+				},
+				"sparkVersion": "3.4",
+				"nodeCount": 10,
+				"cores": 8,
+				"memory": 56,
+				"automaticScaleJobs": false
+			},
+			"sessionKeepAliveTimeout": 30
+		},
+		"cells": [
+			{
+				"cell_type": "code",
+				"source": [
+					"#Imports\n",
+					"import json\n",
+					"\n",
+					"import com.microsoft.spark.sqlanalytics\n",
+					"from com.microsoft.spark.sqlanalytics.Constants import Constants\n",
+					"\n",
+					"from pyspark.sql.types import IntegerType, StringType, DecimalType\n",
+					""
+				],
+				"execution_count": 45
+			},
+			{
+				"cell_type": "code",
+				"source": [
+					"#Get Parameter from controldb\n",
+					"db_port = 1433\n",
+					"linked_service_name = \"LS_SQL_ELTFrameworkDB\"\n",
+					"lake_db_name = \"gold\"\n",
+					"db_notebookname= \"esg_historical_data_dedicated_sql\"\n",
+					"linkedServiceProperties = json.loads(mssparkutils.credentials.getPropertiesAll(linked_service_name))\n",
+					"sql_server_name = linkedServiceProperties.get('Endpoint')\n",
+					"db_name = linkedServiceProperties.get('Database')\n",
+					"#print(linkedServiceProperties)\n",
+					"access_token = mssparkutils.credentials.getConnectionStringOrCreds(linked_service_name)\n",
+					"\n",
+					"db_query =\"SELECT A.*,B.NotebookParameterId,B.ParameterType,B.Value  FROM [CTL].[CFG_NOTEBOOK] A LEFT JOIN [CTL].[CFG_NOTEBOOK_PARAMETER] B ON A.NotebookId = B.NotebookId\"\n",
+					"\n",
+					"df = spark.read.format(\"jdbc\") \\\n",
+					"    .option(\"url\", \"jdbc:sqlserver://%s:%s\" % (sql_server_name, db_port)) \\\n",
+					"    .option(\"query\", db_query) \\\n",
+					"    .option(\"accessToken\", access_token) \\\n",
+					"    .option(\"encrypt\", \"true\") \\\n",
+					"    .option(\"databaseName\", db_name) \\\n",
+					"    .option(\"hostNameInCertificate\", \"*.database.windows.net\") \\\n",
+					"    .load()\n",
+					"\n",
+					"df2 = df.where(df.NotebookPath==db_notebookname)\n",
+					"#display(df2)"
+				],
+				"execution_count": 46
+			},
+			{
+				"cell_type": "code",
+				"source": [
+					"#Synapse Dedicated Server detials\n",
+					"SynapseDedicatedServer = df2.where(df2.ParameterType=='destination_storage').collect()[0]['SynapseDedicatedServer'] \n",
+					"TempFolder = df2.where(df2.ParameterType=='destination_storage').collect()[0]['TempFolder']\n",
+					"SynapseDedicatedDatabase = df2.where(df2.ParameterType=='destination_storage').collect()[0]['SynapseDedicatedDatabase']"
+				],
+				"execution_count": 47
+			},
+			{
+				"cell_type": "code",
+				"source": [
+					"#Set table name\n",
+					"dedicated_db_tablename =\"GHGEmissionHistory\""
+				],
+				"execution_count": 48
+			},
+			{
+				"cell_type": "code",
+				"metadata": {
+					"collapsed": false
+				},
+				"source": [
+					"import pandas as pd\n",
+					"from io import StringIO\n",
+					"\n",
+					"historical_data= \"\"\"\n",
+					"FinancialYear,FYYearStartMonthKey,FYYearEndMonthKey,SiteCode,ElectricityConsumptionMWh,ExportedGenerationMWh,GHGIntensityLocationBasedTCO2ePerMWh,GHGIntensityMarketBasedTCO2ePerMWh,GridImportMWh,NaturalGasConsumptionGJ,RenewableComponentPercentage,RoundTripEfficiencyPercentage,StationEfficiencyPercent,TotalGrossGenerationMWh,TotalScope2GHGLocationBasedTCO2e,TotalScope2GHGMarketBasedTCO2e,TotalScope2GHGLocationBasedAuxLossOnlyTCO2e,TotalScope2GHGMarketBasedAuxLossOnlyTCO2e,TotalScope1GHGTCO2e\n",
+					"FY20,20190701,20200601,BAR,0,97259,0.011371698,0.011758295,545,,0,,,99099,442,479.6,,,664\n",
+					"FY20,20190701,20200601,BNE,67,,,,,,0,,,,48.91,55.99803343,,,\n",
+					"FY20,20190701,20200601,KAR,,138176,0.014278891,0.015475625,2372,,,,,145515,1922,2138.36,,,51\n",
+					"FY20,20190701,20200601,SBK,0,906355,0.38688483,0.386980466,1236,7043475,0,,46.32483256,924505,1001,1087.68,,,349654\n",
+					"FY20,20190701,20200601,WIV,0,94462,1.291406068,1.137092732,150580,,0,62.73210254,,94609,121969.8,107393.0537,45455.58,40023.13313,19\n",
+					"FY21,20200701,20210601,BAR,35,184897,0.004553887,0.006158023,636,,0,,,188998.087,543,570.35,,,299\n",
+					"FY21,20200701,20210601,BNE,57,,,,,,0,,,,45.6,48.45,,,\n",
+					"FY21,20200701,20210601,KAR,,557808,0.001642142,0.001717885,1045,,,,,560797.721,846,958.25,,,70\n",
+					"FY21,20200701,20210601,SBK,28,1053320,0.418935366,0.418990763,1443,8861813,0,,42.78979933,1081811.144,1192,1250.35,,,440081\n",
+					"FY21,20200701,20210601,WIV,38,185733,1.190904201,1.013260459,273003.3689,,0,68.03331832,,187938.208,221163.21,188168.9049,70719.48,74211.8,27\n",
+					"FY22,20210701,20220601,BAR,33,226589,0.003199626,0.004234168,576,,50,,,230944,486,495.2064897,,,239\n",
+					"FY22,20210701,20220601,BNE,43,,,,,,0,,,,34.83,37.84,,,\n",
+					"FY22,20210701,20220601,KAR,,471534,0.002814219,0.002932282,1561,,,,,475360,1249,1382.6706,,,78\n",
+					"FY22,20210701,20220601,SBK,389,217861,0.425679676,0.426735702,4138,1794747,50,,43.69973038,226785,3391,3621.066863,,,89348\n",
+					"FY22,20210701,20220601,WIV,176,397019,1.139896579,0.969399822,565496,,50,70.20721632,,399881,452537.6,384847.148,134922.4,140848.4267,23\n",
+					"FY23,20220701,20230601,BAR,67,334422,0.001764622,0.002471789,407,,100,,,335420.0676,341.6530524,329.67,,,248.4753641\n",
+					"FY23,20220701,20230601,BNE,80,,,,,,0,,,,58.33722,64.8,,,\n",
+					"FY23,20220701,20230601,KAR,,401106,0.009045344,0.010014436,4857,,,,,402309.528,3545.461372,4016.850333,,,82.68033278\n",
+					"FY23,20220701,20230601,SBK,196,831451,0.394780985,0.395265691,5038,6532680,100,,45.81922886,834320.8833,3677.770952,4080.78,,,324563.2737\n",
+					"FY23,20220701,20230601,WIV,89,500675,1.029637848,0.927587472,705992,,100,70.91794241,,502177.42,515439.13,464345.0582,149946.38,166306.77,74.79931763\n",
+					"\"\"\"\n",
+					"historical_df = pd.read_csv(StringIO(historical_data))\n",
+					"\n",
+					"spark_df = spark.createDataFrame(historical_df)\n",
+					"\n",
+					"#display(spark_df)"
+				],
+				"execution_count": 49
+			},
+			{
+				"cell_type": "code",
+				"metadata": {
+					"collapsed": false
+				},
+				"source": [
+					"#Cast Columns to match target Data types\n",
+					"final_df = (spark_df.withColumn(\"FinancialYear\", spark_df[\"FinancialYear\"].cast(StringType())) \n",
+					"       .withColumn(\"FYYearStartMonthKey\", spark_df[\"FYYearStartMonthKey\"].cast(IntegerType())) \n",
+					"       .withColumn(\"FYYearEndMonthKey\", spark_df[\"FYYearEndMonthKey\"].cast(IntegerType())) \n",
+					"       .withColumn(\"SiteCode\", spark_df[\"SiteCode\"].cast(StringType())) \n",
+					"       .withColumn(\"ElectricityConsumptionMWh\", spark_df[\"ElectricityConsumptionMWh\"].cast(DecimalType(20, 2))) \n",
+					"       .withColumn(\"ExportedGenerationMWh\", spark_df[\"ExportedGenerationMWh\"].cast(DecimalType(20, 2))) \n",
+					"       .withColumn(\"GHGIntensityLocationBasedTCO2ePerMWh\", spark_df[\"GHGIntensityLocationBasedTCO2ePerMWh\"].cast(DecimalType(20, 10))) \n",
+					"       .withColumn(\"GHGIntensityMarketBasedTCO2ePerMWh\", spark_df[\"GHGIntensityMarketBasedTCO2ePerMWh\"].cast(DecimalType(20, 10))) \n",
+					"       .withColumn(\"GridImportMWh\", spark_df[\"GridImportMWh\"].cast(DecimalType(20, 2))) \n",
+					"       .withColumn(\"NaturalGasConsumptionGJ\", spark_df[\"NaturalGasConsumptionGJ\"].cast(DecimalType(20, 2))) \n",
+					"       .withColumn(\"RenewableComponentPercentage\", spark_df[\"RenewableComponentPercentage\"].cast(DecimalType(20, 2))) \n",
+					"       .withColumn(\"RoundTripEfficiencyPercentage\", spark_df[\"RoundTripEfficiencyPercentage\"].cast(DecimalType(20, 10))) \n",
+					"       .withColumn(\"StationEfficiencyPercent\", spark_df[\"StationEfficiencyPercent\"].cast(DecimalType(20, 10))) \n",
+					"       .withColumn(\"TotalGrossGenerationMWh\", spark_df[\"TotalGrossGenerationMWh\"].cast(DecimalType(20, 2))) \n",
+					"       .withColumn(\"TotalScope2GHGLocationBasedTCO2e\", spark_df[\"TotalScope2GHGLocationBasedTCO2e\"].cast(DecimalType(20, 2))) \n",
+					"       .withColumn(\"TotalScope2GHGMarketBasedTCO2e\", spark_df[\"TotalScope2GHGMarketBasedTCO2e\"].cast(DecimalType(20, 2))) \n",
+					"       .withColumn(\"TotalScope2GHGLocationBasedAuxLossOnlyTCO2e\", spark_df[\"TotalScope2GHGLocationBasedAuxLossOnlyTCO2e\"].cast(DecimalType(20, 2))) \n",
+					"       .withColumn(\"TotalScope2GHGMarketBasedAuxLossOnlyTCO2e\", spark_df[\"TotalScope2GHGMarketBasedAuxLossOnlyTCO2e\"].cast(DecimalType(20, 2))) \n",
+					"       .withColumn(\"TotalScope1GHGTCO2e\", spark_df[\"TotalScope1GHGTCO2e\"].cast(DecimalType(20, 2)))\n",
+					"       )\n",
+					"\n",
+					"#display(final_df) "
+				],
+				"execution_count": 50
+			},
+			{
+				"cell_type": "code",
+				"source": [
+					"# Configure and submit the request to write to Synapse Dedicated SQL Pool\n",
+					"\n",
+					"(final_df.write\n",
+					".option(Constants.SERVER, f\"\"\"{SynapseDedicatedServer}\"\"\")\n",
+					".option(Constants.TEMP_FOLDER, (f\"\"\"abfss://temp@{TempFolder}/{dedicated_db_tablename}_staging\"\"\"))\n",
+					".mode(\"overwrite\")\n",
+					".synapsesql(f\"\"\"{SynapseDedicatedDatabase}.dbo.{dedicated_db_tablename}\"\"\"))"
+				],
+				"execution_count": 51
+			}
+		]
+	}
+}
